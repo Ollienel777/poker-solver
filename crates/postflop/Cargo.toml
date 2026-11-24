@@ -1,0 +1,8 @@
+[package]
+name = "pk-postflop"
+description = "Heads-up flop-to-river solver"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

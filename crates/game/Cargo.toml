@@ -1,0 +1,8 @@
+[package]
+name = "pk-game"
+description = "GameConfig, positions, action order and betting-tree builders"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

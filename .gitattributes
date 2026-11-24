@@ -1,0 +1,2 @@
+# LF everywhere, so rustfmt and tests see the same bytes on Windows and in CI.
+* text=auto eol=lf

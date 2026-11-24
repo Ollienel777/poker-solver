@@ -1,0 +1,12 @@
+[package]
+name = "pk-cli"
+description = "The solver binary"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "solver"
+path = "src/main.rs"
+
+[dependencies]

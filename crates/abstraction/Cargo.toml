@@ -1,0 +1,8 @@
+[package]
+name = "pk-abstraction"
+description = "Equity histograms, k-means and bucket tables for the preflop solver"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

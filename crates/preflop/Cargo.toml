@@ -1,0 +1,8 @@
+[package]
+name = "pk-preflop"
+description = "N-player MCCFR over the abstracted game, checkpoints and range export"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

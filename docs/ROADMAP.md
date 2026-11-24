@@ -17,7 +17,7 @@ flowchart LR
 - **Decision issues** (`type: decision`) are never blocked by a gate, so answer them early. The M1 decisions, [#1](https://github.com/Ollienel777/poker-solver/issues/1) to [#5](https://github.com/Ollienel777/poker-solver/issues/5), were answered on 2026-11-23 and are recorded in [DECISIONS.md](DECISIONS.md).
 - **Manual issues** (`type: manual`) are things you do by hand: recording reference ranges and setting up AWS billing. They can be done any time their inputs exist. Record references early, because the M5, M7 and M8 gates wait on them.
 - **Blocked-by links** use GitHub's native issue dependencies and are repeated at the bottom of each issue body.
-- **One issue per branch and PR**, closed with `Closes #N`.
+- **One branch and PR per milestone, with one commit per issue.** The PR body closes them with `Closes #N`.
 
 ## Where the order can bend
 
