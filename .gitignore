@@ -1,0 +1,16 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Solver outputs (large, regenerable)
+/runs/
+/solutions/
+/checkpoints/
+/buckets/
+*.pksol
+*.ckpt
+
+# Local
+.env
+.DS_Store
+Thumbs.db
