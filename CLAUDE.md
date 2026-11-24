@@ -36,7 +36,7 @@ cargo fmt --all --check
 
 Tests are built optimized (`[profile.test] opt-level = 3`) with debug assertions on, because they enumerate boards and run solves.
 
-The toolchain is stable Rust, set in `rust-toolchain.toml`. This machine uses the GNU host (`x86_64-pc-windows-gnu`), which has no C compiler, so a crate that builds C code needs one installed first.
+The toolchain is stable Rust, set in `rust-toolchain.toml`. On Windows, use the MSVC host (`x86_64-pc-windows-msvc`), which needs the Visual Studio "Desktop development with C++" workload. The GNU host, as rustup installs it, fails with a `dlltool` error on any dependency that links Windows libraries, which includes proptest and criterion.
 
 ## Layout
 
