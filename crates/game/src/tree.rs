@@ -70,6 +70,18 @@
 //! children, the children follow the order of the node's actions, and every subtree takes a
 //! contiguous range of indices.
 //!
+//! # Node paths
+//!
+//! A node is named by its *path*: the actions from the root to it, oldest first, each written as
+//! its token (`Display` for [`Action`]) and separated by spaces, such as `x b50 c`. The empty
+//! path is the root. [`PostflopTree::find`] turns a path into a node index. A token names the
+//! action as the tree labels it, so a size that merged with a smaller one is reached by the
+//! smaller size's token, and a size that became all-in by `a`.
+//!
+//! A path ends at the first chance node it reaches: the card it deals is not part of the path
+//! yet. So on a flop or turn tree a path can name the decisions of the street it starts on and
+//! the chance node that ends it, but nothing after.
+//!
 //! # Size
 //!
 //! Every bet and raise adds at least one chip, and no player can put in more than the stack, so
@@ -312,6 +324,71 @@ pub enum TreeError {
     TooLarge { limit: u32 },
 }
 
+/// Why a node path does not lead to a node: see [`PostflopTree::find`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathError {
+    /// The tokens before the one that failed, which lead to a node.
+    pub before: Vec<String>,
+    /// The token that failed.
+    pub token: String,
+    pub kind: PathErrorKind,
+}
+
+/// What is at the node where a path fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathErrorKind {
+    /// A player node with no action of that token. `actions` are its tokens, in order.
+    NoAction { actions: Vec<String> },
+    /// A terminal: the hand is over, and no token can follow.
+    HandOver { outcome: Outcome },
+    /// A chance node, which deals `street`. A path does not go past one yet.
+    Chance { street: Street },
+}
+
+/// One line, such as "`b75` is not an action after `x`; the actions there are `x` and `b50`".
+impl fmt::Display for PathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (token, before) = (&self.token, self.before.join(" "));
+        match &self.kind {
+            PathErrorKind::NoAction { actions } => {
+                let place = if before.is_empty() {
+                    "at the root".to_string()
+                } else {
+                    format!("after `{before}`")
+                };
+                let actions: Vec<String> = actions.iter().map(|a| format!("`{a}`")).collect();
+                let actions = match actions.split_last() {
+                    Some((last, rest)) if !rest.is_empty() => {
+                        format!("{} and {last}", rest.join(", "))
+                    }
+                    _ => actions.concat(),
+                };
+                write!(
+                    f,
+                    "`{token}` is not an action {place}; the actions there are {actions}"
+                )
+            }
+            PathErrorKind::HandOver { outcome } => {
+                let end = match outcome {
+                    Outcome::Fold { winner } => format!("where {} folds", winner.opponent()),
+                    Outcome::Showdown => "a showdown".to_string(),
+                };
+                write!(
+                    f,
+                    "`{token}` comes after the end of the hand, at `{before}`, {end}"
+                )
+            }
+            PathErrorKind::Chance { street } => write!(
+                f,
+                "`{token}` comes after `{before}`, which deals the {street}, and a path does not \
+                 go past a chance node yet"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PathError {}
+
 impl From<Invalid> for TreeError {
     fn from(invalid: Invalid) -> TreeError {
         TreeError::Invalid {
@@ -420,6 +497,46 @@ impl PostflopTree {
 
     pub fn node(&self, index: u32) -> &Node {
         &self.nodes[index as usize]
+    }
+
+    /// The node that `path` leads to from the root, as the
+    /// [module documentation](self#node-paths) describes paths: tokens separated by any
+    /// whitespace, such as `x b50 c`, with `""` for the root.
+    ///
+    /// Fails at the first token that does not lead on: one that is not an action at the node
+    /// the tokens before it reach, which the error lists the actions of, or one that comes after
+    /// the end of the hand or after a chance node.
+    pub fn find(&self, path: &str) -> Result<u32, PathError> {
+        let mut at = PostflopTree::ROOT;
+        let mut before: Vec<String> = Vec::new();
+        for token in path.split_whitespace() {
+            let found = match self.node(at) {
+                Node::Player {
+                    actions, children, ..
+                } => match actions.iter().position(|a| a.to_string() == token) {
+                    Some(slot) => Ok(children[slot]),
+                    None => Err(PathErrorKind::NoAction {
+                        actions: actions.iter().map(Action::to_string).collect(),
+                    }),
+                },
+                Node::Chance { street, .. } => Err(PathErrorKind::Chance { street: *street }),
+                Node::Terminal { outcome, .. } => {
+                    Err(PathErrorKind::HandOver { outcome: *outcome })
+                }
+            };
+            match found {
+                Ok(child) => at = child,
+                Err(kind) => {
+                    return Err(PathError {
+                        before,
+                        token: token.to_string(),
+                        kind,
+                    });
+                }
+            }
+            before.push(token.to_string());
+        }
+        Ok(at)
     }
 
     /// Node counts per street, for the memory estimate.

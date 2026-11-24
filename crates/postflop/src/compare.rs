@@ -81,12 +81,11 @@
 //! Single combos are not compared: where several equilibria exist, two correct solvers can
 //! split a mixed strategy differently among equivalent hands.
 
-use std::collections::BTreeMap;
 use std::fmt;
 
-use pk_cfr::{PublicGame, PublicProfile};
+use pk_cfr::PublicProfile;
 use pk_core::HandClass;
-use pk_game::{Chips, Node, Player, PostflopTree};
+use pk_game::{Chips, Player, PostflopTree};
 
 use crate::dump::{DumpAction, PathText, SolutionDump, SolverInfo, decision_nodes};
 use crate::exploitability::Exploitability;
@@ -688,7 +687,7 @@ impl At {
     fn new(game: &RiverGame, profile: &PublicProfile, node: u32) -> At {
         At {
             node,
-            reach: node_reach(game, profile, node),
+            reach: game.reach_probability(profile, node),
             weights: game.range_view_weights(profile, node),
             frequencies: game.range_view_frequencies(profile, node),
         }
@@ -708,27 +707,6 @@ impl At {
         }
         (weight > 0.0).then(|| total / weight)
     }
-}
-
-/// The probability that a hand dealt plays to `node` under `profile`:
-/// `Σ deal(0)[h] · π_0(n, h) · deal(1)[o] · π_1(n, o)` over the pairs of hands that share no
-/// card.
-fn node_reach(game: &RiverGame, profile: &PublicProfile, node: u32) -> f64 {
-    let reach = game.reach(profile, node);
-    let ip: Vec<f64> = reach[1]
-        .iter()
-        .zip(game.deal(1))
-        .map(|(r, d)| r * d)
-        .collect();
-    let mut met = vec![0.0; reach[0].len()];
-    game.board_hands()
-        .fold_values(Player::Oop, &ip, 1.0, &mut met);
-    game.deal(0)
-        .iter()
-        .zip(&reach[0])
-        .zip(&met)
-        .map(|((d, r), m)| d * r * m)
-        .sum()
 }
 
 fn summarize(nodes: &[NodeComparison], min_reach: f64) -> FrequencySummary {
@@ -767,19 +745,13 @@ fn summarize(nodes: &[NodeComparison], min_reach: f64) -> FrequencySummary {
 /// The classes of the root player's range at the root, under both strategies.
 fn root_classes(game: &RiverGame, sides: [&MappedSolution; 2]) -> Vec<ClassComparison> {
     let root = PostflopTree::ROOT;
-    let Node::Player { actor, actions, .. } = game.tree().node(root) else {
-        panic!("the root is a decision node");
-    };
-    let combos = game.hands(*actor).combos();
-    let num_actions = actions.len();
     // At the root every hand's own reach is 1, so a range view weighs each hand by its range
-    // weight alone, under both strategies.
-    let at = At::new(game, sides[0].strategy(), root);
-    let weights = at.weights.expect("the root is always reached");
-    let mut by_class: BTreeMap<HandClass, Vec<usize>> = BTreeMap::new();
-    for (hand, &combo) in combos.iter().enumerate() {
-        by_class.entry(HandClass::of(combo)).or_default().push(hand);
-    }
+    // weight alone, and the classes and their shares are the same under both strategies.
+    let reached = "the root is always reached";
+    let weights = game
+        .range_view_weights(sides[0].strategy(), root)
+        .expect(reached);
+    let [a, b] = sides.map(|s| game.range_view_classes(s.strategy(), root).expect(reached));
     let class_ev = |evs: &NodeValues, hands: &[usize]| -> Option<f64> {
         let evs = evs.get(root)?;
         let (mut total, mut weight) = (0.0, 0.0);
@@ -791,29 +763,17 @@ fn root_classes(game: &RiverGame, sides: [&MappedSolution; 2]) -> Vec<ClassCompa
         }
         (weight > 0.0).then(|| total / weight)
     };
-    by_class
-        .into_iter()
-        .map(|(class, hands)| {
-            let share: f64 = hands.iter().map(|&h| weights[h]).sum();
-            let frequencies = sides.map(|s| {
-                let strategy = s.strategy().get(root as usize).expect("a root strategy");
-                (0..num_actions)
-                    .map(|a| {
-                        let total: f64 = hands
-                            .iter()
-                            .map(|&h| weights[h] * f64::from(strategy[a * combos.len() + h]))
-                            .sum();
-                        total / share
-                    })
-                    .collect()
-            });
+    a.into_iter()
+        .zip(b)
+        .map(|(a, b)| {
+            debug_assert_eq!((a.class, a.share), (b.class, b.share));
             ClassComparison {
-                class,
-                combos: hands.len(),
-                share,
-                frequencies,
-                ev: sides.map(|s| s.reported_evs().and_then(|evs| class_ev(evs, &hands))),
-                measured_ev: sides.map(|s| class_ev(s.measured_evs(), &hands)),
+                class: a.class,
+                combos: a.hands.len(),
+                share: a.share,
+                ev: sides.map(|s| s.reported_evs().and_then(|evs| class_ev(evs, &a.hands))),
+                measured_ev: sides.map(|s| class_ev(s.measured_evs(), &a.hands)),
+                frequencies: [a.frequencies, b.frequencies],
             }
         })
         .collect()

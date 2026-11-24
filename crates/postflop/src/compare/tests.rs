@@ -1,3 +1,5 @@
+use pk_game::Node;
+
 use super::*;
 use crate::solve::{Solution, SolveOptions, solve};
 

@@ -171,7 +171,7 @@ Button (Mississippi) straddles are not modelled (DECISIONS D15). They can't be d
   - Sizes are rounded to whole chips by one function: to the nearest chip, halves up. Sizes that land on the same amount are one action, named by the smallest size.
   - Actions are ordered check, or fold then call, followed by wagers from smallest to largest. All-in, when offered, is last.
   - A call or a check behind ends the street. On the river that is a showdown. Earlier, it leads to a chance node and the next street. Players who are all-in before the river pass through the remaining chance nodes to a showdown, with no decisions.
-- **Tokens.** Each action prints its path token: `x`, `c`, `f`, `b33` (from the size 0.33), `r3` (from the size 3) or `a`. A size lifted by the minimum bet or raise keeps its token.
+- **Tokens.** Each action prints its path token: `x`, `c`, `f`, `b33` (from the size 0.33), `r3` (from the size 3) or `a`. A size lifted by the minimum bet or raise keeps its token. `PostflopTree::find` takes a path of tokens, such as `x b50`, to its node, and an error names the token that did not match and lists the actions available there. A path stops at a chance node; card tokens come with the turn and flop solver.
 - **Size limit.** The builder refuses a tree of more than `max_nodes` nodes, one million by default (about 100 MB), instead of allocating without bound. Trees with many sizes over three streets grow fast.
 - **Node counts.** Every tree reports node counts per street: player nodes, actions, chance nodes, folds and showdowns. A chance node counts on the street it deals. The memory estimators start from these counts.
 
@@ -215,6 +215,8 @@ M3 builds this for river spots; flop and turn spots, with their chance nodes, co
 - **Reading a strategy.** `RiverGame::reach` gives each player's own reach of a node by hand. Summed over the acting player's range at a node, a strategy answers two different questions, with two read-outs that differ by up to several points:
   - **How often each action is taken once the node is reached.** `hand_weights` gives the probability that the acting player holds each hand once the node is reached, including card removal by the opponent's range there, and `action_frequencies` the probability of each action at the node under those weights. Use it for the probabilities of play, such as how often a bet is called.
   - **What a range view shows.** `range_view_weights` weighs each hand by the acting player's own combos alone, range weight times own reach, with no card removal by the opponent's range, and `range_view_frequencies` gives each action's frequency under those weights. This is what a solver's range view shows and what the cross-solver comparison uses.
+
+  `range_view_classes` groups the range view by the 169 hand classes, with each class's share of the range and its frequency for each action, and `reach_probability` gives how often play reaches a node. The example `solve_spot` in `pk-postflop` prints these for a spot file.
 
   On `four_flush` at 0.05% of the pot, IP's re-raise facing OOP's check-raise is 10.1% by the first and 18.7% by the second. A test in `pk_postflop::river` pins the two apart so that neither is turned into the other.
 

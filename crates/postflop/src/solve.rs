@@ -63,7 +63,7 @@ use thiserror::Error;
 use crate::exploitability::{Exploitability, exploitability};
 use crate::hands::HandList;
 use crate::invariants::debug_assert_valid;
-use crate::river::RiverGame;
+use crate::river::{ClassView, RiverGame};
 use crate::spot::{Spot, SpotError};
 
 /// Why a solve could not start.
@@ -269,6 +269,19 @@ impl Solution {
     /// solver; use [`Solution::action_frequencies`] for how often an action is taken.
     pub fn range_view_frequencies(&self, node: u32) -> Option<Vec<f64>> {
         self.game.range_view_frequencies(&self.strategy, node)
+    }
+
+    /// Each hand class in the acting player's range at `node`, with its share of the range and
+    /// its frequency for each action, as a range view shows them, under the average strategy:
+    /// see [`RiverGame::range_view_classes`].
+    pub fn range_view_classes(&self, node: u32) -> Option<Vec<ClassView>> {
+        self.game.range_view_classes(&self.strategy, node)
+    }
+
+    /// The probability that a hand dealt plays to `node` under the average strategy: see
+    /// [`RiverGame::reach_probability`]. Panics if `node` is out of range.
+    pub fn reach_probability(&self, node: u32) -> f64 {
+        self.game.reach_probability(&self.strategy, node)
     }
 }
 

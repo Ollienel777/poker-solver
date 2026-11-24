@@ -18,6 +18,6 @@ pub use config::{
 pub use position::{ParsePositionError, Position};
 pub use range_file::{PlayerRange, RANGE_FILE_FORMAT, RangeFile, RangeFileError};
 pub use tree::{
-    Action, Node, NodeCounts, Outcome, Player, PostflopTree, Street, StreetCounts, TreeError,
-    TreeSpec,
+    Action, Node, NodeCounts, Outcome, PathError, PathErrorKind, Player, PostflopTree, Street,
+    StreetCounts, TreeError, TreeSpec,
 };

@@ -42,7 +42,7 @@ pub use import::{ImportError, MappedSolution, Mismatch};
 pub use invariants::{Invariant, Report, Violation, check_solution};
 pub use node_values::{NodeValues, node_values};
 pub use payoff::{Payoff, ShowdownPayoff, fold_payoffs, rake_on, showdown_payoff};
-pub use river::RiverGame;
+pub use river::{ClassView, RiverGame};
 pub use solve::{Progress, Solution, SolveError, SolveOptions, StopReason, solve};
 pub use spot::{SPOT_FORMAT, Spot, SpotError, TreeSizing};
 pub use terminal::BoardHands;

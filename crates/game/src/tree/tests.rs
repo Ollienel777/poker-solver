@@ -996,6 +996,228 @@ fn config_sizing_builds_trees_from_every_street() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Node paths
+
+/// Every node a path can name, with its path written out by walking the tree: each player
+/// node's children, each under its action's token, down to the terminals and the chance nodes
+/// that end a path. In pre-order.
+fn named_nodes(tree: &PostflopTree) -> Vec<(u32, String)> {
+    let mut named = Vec::new();
+    let mut stack = vec![(PostflopTree::ROOT, Vec::<String>::new())];
+    while let Some((index, path)) = stack.pop() {
+        if let Node::Player {
+            actions, children, ..
+        } = tree.node(index)
+        {
+            for (action, &child) in actions.iter().zip(children).rev() {
+                let mut next = path.clone();
+                next.push(action.to_string());
+                stack.push((child, next));
+            }
+        }
+        named.push((index, path.join(" ")));
+    }
+    named
+}
+
+fn strings(tokens: &[&str]) -> Vec<String> {
+    tokens.iter().map(|token| token.to_string()).collect()
+}
+
+#[test]
+fn every_node_is_found_by_its_path() {
+    // River trees with two bet sizes, raises, and all-in by the flag, by the threshold and by
+    // the stack: every node has a path. On a turn tree, paths name the turn's nodes and the
+    // chance nodes that end them.
+    let rivers = [
+        build(
+            Street::River,
+            1000,
+            1500,
+            street(&[0.5, 1.0], &[2.0], true),
+            2,
+            0.6,
+        ),
+        build(
+            Street::River,
+            200,
+            700,
+            street(&[0.25, 4.0], &[1.5], false),
+            2,
+            1.0,
+        ),
+        build(
+            Street::River,
+            1000,
+            10_000,
+            street(&[0.5, 1.0], &[3.0], false),
+            1,
+            1.0,
+        ),
+    ];
+    for tree in &rivers {
+        let named = named_nodes(tree);
+        assert_eq!(named.len(), tree.nodes().len());
+        for (index, path) in named {
+            assert_eq!(tree.find(&path), Ok(index), "`{path}`");
+        }
+    }
+    let turn = build(Street::Turn, 100, 1000, street(&[1.0], &[], false), 0, 1.0);
+    let named = named_nodes(&turn);
+    // 4 player nodes, 2 folds and 3 chance nodes, as counted by hand above.
+    assert_eq!(named.len(), 9);
+    for (index, path) in named {
+        assert_eq!(turn.find(&path), Ok(index), "`{path}`");
+    }
+    assert!(matches!(
+        turn.node(turn.find("b100 c").unwrap()),
+        Node::Chance {
+            street: Street::River,
+            ..
+        }
+    ));
+    // The empty path is the root, and any whitespace separates tokens.
+    let tree = &rivers[2];
+    assert_eq!(tree.find(""), Ok(PostflopTree::ROOT));
+    assert_eq!(tree.find("   "), Ok(PostflopTree::ROOT));
+    assert_eq!(tree.find("  x\tb50  r3 "), tree.find("x b50 r3"));
+    assert_eq!(tree.find("x b50 r3"), Ok(at(tree, "x b50 r3")));
+}
+
+#[test]
+fn a_merged_size_is_found_by_the_smallest_sizes_token_and_all_in_by_a() {
+    // At a pot of 150, the sizes 0.1, 0.33 and 0.5 are all lifted to 100 chips, one action named
+    // by the smallest: `x b10 b67 a`, as `sizes_that_round_to_the_same_amount_are_one_action`
+    // counts. The other two sizes' tokens name nothing.
+    let sizing = street(&[0.5, 0.67, 0.33, 0.1], &[], true);
+    let tree = build(Street::River, 150, 10_000, sizing, 0, 1.0);
+    let root = tree.node(PostflopTree::ROOT).children();
+    assert_eq!(tree.find("b10"), Ok(root[1]));
+    assert_eq!(tree.find("b67"), Ok(root[2]));
+    assert_eq!(tree.find("a"), Ok(root[3]));
+    for token in ["b33", "b50"] {
+        let error = tree.find(token).unwrap_err();
+        assert_eq!(
+            error,
+            PathError {
+                before: Vec::new(),
+                token: token.to_string(),
+                kind: PathErrorKind::NoAction {
+                    actions: strings(&["x", "b10", "b67", "a"]),
+                },
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "`{token}` is not an action at the root; the actions there are `x`, `b10`, `b67` \
+                 and `a`"
+            )
+        );
+    }
+    // A size that would use more than the stack becomes all-in: `a`, not its own token.
+    let tree = build(
+        Street::River,
+        200,
+        700,
+        street(&[0.25, 4.0], &[1.5], false),
+        2,
+        1.0,
+    );
+    assert_eq!(
+        tree.find("a"),
+        Ok(tree.node(PostflopTree::ROOT).children()[2])
+    );
+    let error = tree.find("x b400").unwrap_err();
+    assert_eq!(error.before, ["x"]);
+    assert_eq!(
+        error.kind,
+        PathErrorKind::NoAction {
+            actions: strings(&["x", "b25", "a"]),
+        }
+    );
+}
+
+#[test]
+fn a_path_that_leads_nowhere_names_the_token_and_what_is_there() {
+    // River, pot 1000, stack 10000, bets [0.5], raises [3], one raise: as counted by hand above.
+    let tree = build(
+        Street::River,
+        1000,
+        10_000,
+        street(&[0.5], &[3.0], false),
+        1,
+        1.0,
+    );
+    // A token that is not an action there. Only the first bad token is reported.
+    let error = tree.find("x b75 c").unwrap_err();
+    assert_eq!(
+        error,
+        PathError {
+            before: strings(&["x"]),
+            token: "b75".to_string(),
+            kind: PathErrorKind::NoAction {
+                actions: strings(&["x", "b50"]),
+            },
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "`b75` is not an action after `x`; the actions there are `x` and `b50`"
+    );
+    // Tokens are matched exactly, and a raise cap leaves no raise.
+    let error = tree.find("X").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "`X` is not an action at the root; the actions there are `x` and `b50`"
+    );
+    assert_eq!(
+        tree.find("b50 r3 r3").unwrap_err().to_string(),
+        "`r3` is not an action after `b50 r3`; the actions there are `f` and `c`"
+    );
+    // A token after a fold or a showdown.
+    let error = tree.find("b50 f c").unwrap_err();
+    assert_eq!(
+        error,
+        PathError {
+            before: strings(&["b50", "f"]),
+            token: "c".to_string(),
+            kind: PathErrorKind::HandOver {
+                outcome: Outcome::Fold {
+                    winner: Player::Oop
+                },
+            },
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "`c` comes after the end of the hand, at `b50 f`, where IP folds"
+    );
+    assert_eq!(
+        tree.find("x x x").unwrap_err().to_string(),
+        "`x` comes after the end of the hand, at `x x`, a showdown"
+    );
+    // A token after a chance node.
+    let turn = build(Street::Turn, 100, 1000, street(&[1.0], &[], false), 0, 1.0);
+    let error = turn.find("x x b100").unwrap_err();
+    assert_eq!(
+        error,
+        PathError {
+            before: strings(&["x", "x"]),
+            token: "b100".to_string(),
+            kind: PathErrorKind::Chance {
+                street: Street::River,
+            },
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "`b100` comes after `x x`, which deals the river, and a path does not go past a chance \
+         node yet"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // Random sizings
 
 fn bet_size() -> impl Strategy<Value = f64> {
@@ -1081,6 +1303,16 @@ proptest! {
             // Expected now and then; the limit itself is tested on a tree counted by hand.
             Err(TreeError::TooLarge { limit }) => prop_assert_eq!(limit, RANDOM_MAX_NODES),
             Err(error) => prop_assert!(false, "a valid spec was refused: {}", error),
+        }
+    }
+
+    #[test]
+    fn random_trees_find_every_node_by_its_path(spec in spec()) {
+        // Also checks that no two actions at a node print the same token.
+        if let Ok(tree) = PostflopTree::build(spec) {
+            for (index, path) in named_nodes(&tree) {
+                prop_assert_eq!(tree.find(&path), Ok(index), "`{}`", path);
+            }
         }
     }
 }
