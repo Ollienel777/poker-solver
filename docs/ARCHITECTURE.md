@@ -212,7 +212,11 @@ M3 builds this for river spots; flop and turn spots, with their chance nodes, co
 - **Hands.** Each player's hands are its `HandList` from the `BoardHands`: the in-range combos that miss the board. Blocked and out-of-range combos have no hand index, so each player node stores regrets and strategy sums, as `f32`, for the acting player's in-range combos only (DECISIONS P9).
 - **Deal.** Chance deals OOP `h` and IP `o` with probability `w_0(h) · w_1(o) / Z` when the two combos share no card, where `Z` sums that product over the pairs that can be dealt. The deal vectors are `w_p / √Z`, so every value is in chips per hand dealt.
 - **Terminals.** Each terminal's `Payoff` is computed once, with the rake. A fold calls `BoardHands::fold_values` with the traverser's payoff, and a showdown calls `showdown_values`, both O(n) with card removal.
-- **Reading a strategy.** `RiverGame::reach` gives each player's own reach of a node by hand. `hand_weights` gives the probability that the acting player holds each hand once the node is reached, including card removal by the opponent's range there. `action_frequencies` gives the probability of each action at the node over the acting player's whole range, which is what a range view shows.
+- **Reading a strategy.** `RiverGame::reach` gives each player's own reach of a node by hand. Summed over the acting player's range at a node, a strategy answers two different questions, with two read-outs that differ by up to several points:
+  - **How often each action is taken once the node is reached.** `hand_weights` gives the probability that the acting player holds each hand once the node is reached, including card removal by the opponent's range there, and `action_frequencies` the probability of each action at the node under those weights. Use it for the probabilities of play, such as how often a bet is called.
+  - **What a range view shows.** `range_view_weights` weighs each hand by the acting player's own combos alone, range weight times own reach, with no card removal by the opponent's range, and `range_view_frequencies` gives each action's frequency under those weights. This is what a solver's range view shows and what the cross-solver comparison uses.
+
+  On `four_flush` at 0.05% of the pot, IP's re-raise facing OOP's check-raise is 10.1% by the first and 18.7% by the second. A test in `pk_postflop::river` pins the two apart so that neither is turned into the other.
 
 ### The solve loop
 
@@ -228,7 +232,7 @@ M3 builds this for river spots; flop and turn spots, with their chance nodes, co
 
 The target is checked after each measurement, and the caps before each iteration. When several rules hold at once, the target wins, then the iteration cap, then the time cap. If the solve stops after an iteration it did not measure, it measures once more. So the `progress` callback receives one `Progress` (iterations, elapsed time, exploitability) per measurement, in order, and its last call matches the solution. The library never prints. Measuring only reads the average strategy, so the strategy after `t` iterations is bit-identical whatever the measurement interval and caps.
 
-The `Solution` lives in memory; the solution file comes in M5. It holds the stopping rule that ended the solve, the iterations, the elapsed time, the `Exploitability` (each player's value, best-response value, and the exploitability in chips and as a percent of the pot) and the average strategy. Read access covers each hand's action probabilities at each node, and the reach, hand weights and action frequencies above.
+The `Solution` lives in memory; the solution file comes in M5. It holds the stopping rule that ended the solve, the iterations, the elapsed time, the `Exploitability` (each player's value, best-response value, and the exploitability in chips and as a percent of the pot) and the average strategy. Read access covers each hand's action probabilities at each node, and the reach and both read-outs above: hand weights and action frequencies, and range-view weights and frequencies.
 
 ### Exploitability
 
@@ -247,6 +251,20 @@ Here `v_i` is player `i`'s expected value when both players follow `σ`, and `BR
 - **Rake.** `pk_postflop::expected_rake(game, profile)` gives the probability of ending at each terminal and the rake taken there, worked out from the contributions and the rake settings rather than from the payoffs. It walks the tree itself and removes the pairs of hands that share a card by counting cards, in O(n) per terminal. On every river spot the solved values sum to `pot · M − E[rake]` within 7e-13 chips. `M`, the probability of ending at some terminal, is 1 up to the `f32` rounding of the strategies (within 2e-8), so the values sum to the pot less the expected rake. The terminal probabilities match the O(n²) sum over every pair, a raked spot's values are lower by the expected rake than the same strategy's without rake, and the scalar game's values sum to the same.
 - **Every river spot** solves to 0.3% of the pot in the fast suite. A slow test (`river_spot_table`) prints the iterations to 0.3%, 0.1% and 0.03%, the time per iteration and per measurement, and the share of the time spent in terminal evaluation.
 - **Invariants.** `pk_postflop::check_solution(&solution)` returns a `Report` of every way a solution breaks the invariants every solve must keep, each with the invariant, the node, the hand and the numbers. Each hand's probabilities at a node sum to 1 within 1e-6. Each reach is its parent's times the probability of the action taken, within 1e-14. The values sum to `pot · M − E[rake]` from `expected_rake`, within 1e-13 of the largest pot. No number is NaN or infinite. The tolerances come from the margins a slow test (`invariant_margins`) measures. Identical results on suit-isomorphic boards wait for isomorphism in M4. In a build with debug assertions, `solve` checks every solution it returns and panics with the report, at about the cost of one exploitability measurement, and the tests check every solve they make in release too. Unit tests put one fault at a time into a solved spot and confirm that the check reports exactly that fault.
+
+### Cross-solver comparison
+
+The check against another solver, which is only ever run as a separate program whose output is read (brief, Validation). Everything that does not depend on which reference solver is chosen (#24) lives in `pk-postflop`, so that once one is approved, the only thing left to write is a wrapper that writes a [solution dump](#solution-dump) from it.
+
+- **Dumps.** `SolutionDump` is a solver-neutral JSON form of a river solution, described under [Solution dump](#solution-dump). `SolutionDump::from_solution` writes ours, with the per-hand EVs of `pk_postflop::node_values`, and `SolutionDump::from_json` and `load` read one strictly.
+- **Mapping onto our tree.** `MappedSolution::from_dump(dump, spot)` checks the dump against the spot before reading any probability, in this order, and stops at the first stage that fails: the dump on its own; the board, pot, stack and rake; each player's hands and weights (a dump with the players the wrong way round is reported as such); and the tree, walked from our root, every node matched by its path and every action by kind and amount in any order. Each stage lists every difference it finds as a `Mismatch`: a node where the actions differ, with the actions only one side has, a node the dump lacks, a node of the dump's where our hand is over, another player to act. Nodes below a difference already reported are not reported again. The mapped strategy is rounded to `f32`, as ours is stored.
+- **Comparing.** `compare(spot, a, b, tolerances)` maps two dumps and compares them, and `compare_mapped` compares two `MappedSolution`s, either ours (`MappedSolution::from_solution`) or imported. The `Comparison` is data, with a `Display` for `solver compare`. It holds each strategy's exploitability measured by our code in our game, each player's value at the root under each, every decision node's reach and its range-view frequencies under each, the largest frequency difference at the nodes reached more than 1% of the time and the reach-weighted mean difference over all nodes, and per hand class at the root the share, the frequencies and the EVs. Both sides are summed by the same functions from their per-hand strategies, with the range-view weighting of [the river game](#the-river-game), so the convention cannot differ between them; a dump carries no aggregate of its own.
+- **The verdict.** `Tolerances` sets the limits; the defaults are the proposal on #34: each strategy under 0.3% of the pot exploitable, frequencies within 2 points at every node reached more than 1% of the time, values within 0.2% of the pot. Two EV checks have defaults of their own: each class's EVs at the root within 5% of the pot between the two solutions, and the EVs and values a solution reports within 0.1% of the pot of those our code measures for its own strategy, which catches EVs on another baseline or in other units.
+- **Running a program.** `ExternalSolver` runs a command template, in which `{spot}` and `{out}` stand for a spot file and the dump to write, with a timeout, captures the end of its output when it fails, and reads the dump. `ExternalSolver::from_env` reads the template from `PK_REFERENCE_SOLVER`, a JSON array of strings; when it is unset there is no reference and the test that needs one does nothing.
+
+What the comparison can tell apart, while no reference exists, is shown by `tests/compare.rs`: every spot's dump round-trips through JSON and compares identical to itself, with the strategy bit for bit; a dump of a tree with one other bet size fails the tree check, naming both places the trees part; swapped players are caught at the hands; uniform play and a solve stopped after two iterations fail on exploitability; one node's actions swapped fails on frequencies there and on exploitability; EVs on another baseline (zero-sum, in big blinds, or counted from the node) fail on EVs alone; and a hand-written dump of the toy game's analytical equilibrium, pure where our solve mixes, passes. A stand-in program, the test binary itself, exercises the runner and each way a program can fail.
+
+**The tolerance proposed on #34, measured.** The slow test `honest_solvers_table` compares two sound solves of every spot that differ in schedule or iterations. With both at 0.1% of the pot, the frequency limit of 2 points fails sound pairs: DCFR against CFR+ on 2 of the 9 spots (worst 2.98 points), and DCFR at 0.1% against DCFR at 0.02% on 3 (worst 6.17 points, `paired_low_spr`). The differences shrink with convergence, so they are convergence error rather than distinct equilibria: with both at 0.03% every spot passes, the worst at 1.75 points. Values never came within a factor of 3 of their 0.2% limit (worst 0.065%), class EVs reached 3.05% of the pot against their 5% limit, and EVs over the range at deeper nodes, which are reported and not checked, differ by up to 6.9% of the pot, because each side weighs them by its own reaches.
 
 Tree shape: every flop line that closes the street leads to a chance node over up to 49 turn cards, and every turn line to one over the remaining river cards. Per-player hand vectors hold up to 1,176 combos on the flop, 1,128 on the turn and 1,081 on the river. A node stores only the combos that are in range.
 
@@ -341,6 +359,8 @@ A node path is a space-separated list of actions:
 | `rN` | raise to N times the bet |
 | `a` | all-in |
 | a card, such as `8h` | the next street's card |
+
+`compare` will print a `pk_postflop::Comparison` ([Cross-solver comparison](#cross-solver-comparison)). The tokens above are labels from our own sizes, so a [solution dump](#solution-dump), which another solver writes, names each action by its kind and chip amount instead.
 
 ## File formats
 
@@ -455,6 +475,82 @@ Keys may come in any order, cards in any order and case, and amounts and sizes a
 
 **What the solver takes.** `Spot::street` is the starting street, from the board's length. `Spot::tree_spec` and `Spot::build_tree` give the betting tree; a `PostflopSizing` has a field for every street, so the streets before the root hold a copy of the root street's sizing, which the builder never reads. `Spot::board_hands` gives the `BoardHands` and `Spot::rake` the `Rake`.
 
+### Solution dump
+
+JSON, holding one river solution in a form any solver can write: the contract for a wrapper program around a reference solver, which may be written by someone who has never seen this code. It names every thing by what it is, never by an index another solver might order differently: a node by the actions that lead to it, an action by its kind and chip amount, a hand by its two cards. It carries the spot it answers, so that a dump of another spot or tree is caught before any number in it is read. The reader and writer are `pk_postflop::dump`, and `pk_postflop::import` maps a dump onto our tree ([Cross-solver comparison](#cross-solver-comparison)). Version 1 holds spots that start on the river.
+
+Abridged from the dump of `toy_polarized`; the whole file lists every hand of both ranges and all four decision nodes:
+
+```json
+{
+  "format": "pk-solution-dump",
+  "version": 1,
+  "solver": {"name": "pk-postflop", "iterations": 310, "exploitability": 0.27},
+  "spot": {
+    "name": "toy_polarized",
+    "board": "Ks9h6d3c2s",
+    "pot": 1000,
+    "effective_stack": 2000,
+    "rake": {"percent": 0.0, "cap": 0},
+    "hands": {
+      "oop": {"9s9d": 1.0, "JsTs": 1.0, "JhTs": 1.0},
+      "ip": {"KcQs": 1.0, "KhQh": 1.0}
+    }
+  },
+  "values": {"oop": 363.64, "ip": 636.36},
+  "nodes": [
+    {
+      "path": [],
+      "player": "oop",
+      "actions": [{"kind": "check"}, {"kind": "bet", "amount": 500}],
+      "strategy": {"9s9d": [0.0, 1.0], "JsTs": [0.875, 0.125], "JhTs": [1.0, 0.0]},
+      "ev": {"9s9d": 1333.33, "JsTs": 0.0, "JhTs": 0.0}
+    },
+    {
+      "path": [{"kind": "bet", "amount": 500}],
+      "player": "ip",
+      "actions": [{"kind": "fold"}, {"kind": "call", "amount": 500}],
+      "strategy": {"KcQs": [0.33, 0.67], "KhQh": [0.33, 0.67]},
+      "ev": {"KcQs": 0.0, "KhQh": 0.0}
+    }
+  ]
+}
+```
+
+`crates/postflop/tests/data/toy_equilibrium.json` is a complete dump written by hand: the toy game's analytical equilibrium with its EVs.
+
+**What every number means.**
+
+| Quantity | Meaning |
+| --- | --- |
+| amounts | whole chips, 1bb = 100 chips: `pot`, `effective_stack`, `rake.cap`, and every action's `amount` |
+| `pot`, `effective_stack` | the pot at the start of the river, and what each player has left to bet then |
+| `rake` | `percent`, of the pot, from 0 to less than 100 (5 for 5%), and `cap`, in chips. The rake is `min(cap, percent / 100 × (pot + 2c))` when each player has put in `c` (the folder's `c` after a fold), in fractions of a chip; the uncalled part of a bet is not raked |
+| an action's `amount` | the acting player's total for the street once the action is taken, on the river all it has put in since the spot started: a bet's size, a raise's total (raise *to*, not the increment), a call's the bet it calls. Fold and check have none. All-in is not a kind: it is the bet or raise whose amount is the whole `effective_stack`. These are the street totals of `reference/README.md` |
+| a hand | two cards, rank `23456789TJQKA` then suit `cdhs`, either order and case: `AsKs`. Each player's hands are the combos of its range with a positive weight that miss the board, each with its range weight in `(0, 1]` |
+| the deal | OOP gets `h` and IP `o` with probability proportional to `weight(h) · weight(o)` when they share no card. "Per hand dealt" means averaged over it |
+| a payoff | the chips a player ends the hand with less those it had when the spot started. The starting pot belongs to neither player: winning a showdown with `c` put in each pays `pot + c − rake`, losing it `−c`, a split `(pot − rake) / 2`; after a fold the winner gets `pot + c − rake` and the folder `−c`. The two payoffs sum to the pot less the rake |
+| `strategy[h]` | the probability of each action, in the order of the node's `actions`, for the acting player holding `h`. Every hand of the acting player has a row at every node, even one that never plays to it, and each row sums to 1 within 1e-5 |
+| `ev[h]` | the acting player's expected payoff holding `h`, counted from the start of the spot as above, not from the node, given that play has reached the node and both follow the dump's strategy from there. The opponent's hand is weighted by its range weight and its own probability of playing to the node, among the hands that miss `h`; the acting player's own probability of reaching the node does not enter. `null` where no hand of the opponent that `h` allows plays to the node |
+| `values` | each player's expected payoff per hand dealt: its root EVs averaged over the deal. They sum to the pot less the expected rake |
+| `solver.exploitability` | the solver's own figure, in chips per hand dealt, as it defines it. Reported, never relied on: the comparison measures every strategy itself |
+
+A dump carries per-hand numbers only: no frequency or EV summed over a range, a class or a node. Solvers sum a range in different ways, with or without card removal by the opponent's range for one, and the sums differ by several points, so the comparison computes every aggregate itself, by one function for both sides. A solver whose EVs count from another baseline converts before writing: from the node (chips already put in are sunk) by subtracting the acting player's chips in at the node, from a zero-sum baseline (each player credited half the pot) by adding `pot / 2`, and from big blinds by multiplying by 100.
+
+| Key | Holds |
+| --- | --- |
+| `format`, `version` | the string `"pk-solution-dump"` and the integer 1 |
+| `solver` | `name`, required; `iterations` and `exploitability`, optional |
+| `spot` | `name`, optional; `board`, five cards; `pot`; `effective_stack`; `rake`, with `percent` and `cap`; `hands`, with `oop` and `ip`, each an object from hand to weight |
+| `values` | optional: `oop` and `ip` |
+| `nodes` | every decision node once, in any order, each with `path` (the actions from the root, oldest first; `[]` at the root), `player` (`"oop"` or `"ip"`), `actions` (in any order), `strategy` and, at every node or at none, `ev` |
+
+An action is `{"kind": k}` for `fold` and `check`, or `{"kind": k, "amount": n}` for `call`, `bet` and `raise`. An optional key may also be `null`.
+
+**Reading is strict.** `SolutionDump::from_json` checks the structure and types, then the values, which `SolutionDump::validate` also checks on a dump built in code. A dump is rejected for text that is not JSON or repeats a key in an object, another format or version, a missing or unknown key or a value of the wrong type, an amount that is not a whole number of chips, a blank name, a number that is not finite, a board of other than five cards, a hand that does not parse, holds a board card, appears twice (in either card order) or has a weight outside `(0, 1]`, two nodes with one path, a node with no actions or one action twice, an amount on a fold or check or none on a call, bet or raise, a strategy or EV row missing for a hand of the acting player or present for one that is not, a row of the wrong length, a probability outside 0 to 1, a row that does not sum to 1, and EVs at some nodes but not others. Each error names the field, such as `nodes[3].strategy.AsKs`. Whether the dump answers a given spot is checked when it is mapped onto that spot's tree.
+
+**Writing** gives the layout above: keys in that order, nodes in our tree's order, hands in our hand order, and each number as the shortest decimal that reads back exactly, an `f32` probability as the shortest decimal that reads back as that `f32`. Read back, our strategies come back bit for bit and every other number exactly, and writing again gives the same text.
+
 ### Solution file
 
 - **Structure.** The magic `PKSOL`, a `u16` format version and a JSON header, followed by zstd-compressed sections. The header records the inputs, tree config, tree hash, iterations, exploitability and solver version. The sections hold the tree, `u16`-quantized strategies per node and EVs per node.
@@ -472,7 +568,7 @@ Checkpoints are described under [Checkpoints](#checkpoints) and bucket tables un
 | Exhaustive (slow) | all 133,784,560 seven-card hands | by hand, results pasted in the gate issue |
 | Analytical | Kuhn value −1/18, polarized river toy game | every push |
 | Invariants (`pk_postflop::check_solution`) | strategies sum to 1, reaches follow from the parent, values sum to the pot less the expected rake, nothing NaN or infinite | every solve in a build with debug assertions, and every test solve |
-| Cross-solver | `reference/spots/**` diffed against the reference binary | gate issues |
+| Cross-solver | `reference/spots/**` diffed against the reference binary, through [solution dumps](#solution-dump) and `pk_postflop::compare`; without a reference, the comparison is shown to catch each kind of wrong input | gate issues, and every push for the comparison's own tests |
 | Regression | frozen exploitability numbers per spot | every push |
 | Benchmarks (`criterion`) | showdown sweep, one DCFR iteration, best response | before and after perf work |
 

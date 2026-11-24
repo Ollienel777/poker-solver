@@ -501,6 +501,8 @@ dependencies = [
  "pk-game",
  "proptest",
  "rand_chacha",
+ "serde",
+ "serde_json",
  "thiserror",
  "toml",
 ]

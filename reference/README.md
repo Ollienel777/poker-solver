@@ -73,6 +73,15 @@ The amounts in each tree, as the street total each bet or raise goes to:
 | `deep_high_spr` | 2.75, 5.5bb | 8.25, 16.5, 24.75, 49.5, 74.25bb | 97.5bb |
 | `double_paired_ties` | 8bb | none | 24bb |
 
+### Reading a reference's answer
+
+A reference solver's solution of a spot is read as a [solution dump](../docs/ARCHITECTURE.md#solution-dump), a JSON file that a wrapper program around the reference writes. The format says what every number means; what a wrapper also needs to know:
+
+- It is run as a command template with `{spot}`, the path of one of these spot files, and `{out}`, where to write the dump. `PK_REFERENCE_SOLVER` holds the template as a JSON array of strings, such as `["C:/tools/ref-wrapper.exe", "{spot}", "{out}"]`, and `cargo test -p pk-postflop --release -- --ignored the_configured_reference_solver_matches_ours` then compares it with this solver on every spot. A failing run should exit with a non-zero code and say why on standard error.
+- Its amounts are the street totals in the table above, in chips, with an all-in written as a bet or raise of the whole stack. The tree is checked before anything else, node by node, so a tree that differs anywhere is reported with the actions each side offers there.
+- It lists every decision node, with a probability row for every hand of the acting player at each, and EVs counted from the start of the river, converted if the reference counts them otherwise. It writes no frequencies over a range: this solver sums every range itself, the same way for both sides.
+- How far to solve is for #34 to settle. Measured between two sound solves of these spots (`honest_solvers_table` in `crates/postflop/tests/compare.rs`), the frequencies proposed there to agree within 2 points did so on every spot with both at 0.03% of the pot, and differed by up to 6.2 points with both at 0.1%.
+
 ### The toy game
 
 `toy_polarized` is not a real poker spot. It is the polarized river game, whose solution is known, so it is the solver's first correctness check. OOP is the bettor, because OOP acts first. On `Ks9h6d3c2s`:

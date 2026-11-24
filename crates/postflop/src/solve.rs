@@ -249,10 +249,26 @@ impl Solution {
         self.game.hand_weights(&self.strategy, node)
     }
 
-    /// How often the acting player takes each action at `node`, over its whole range, under
-    /// the average strategy: see [`RiverGame::action_frequencies`].
+    /// The probability of each action once `node` is reached under the average strategy, card
+    /// removal by the opponent's range included: see [`RiverGame::action_frequencies`]. This
+    /// is how often each action is actually taken there, not what a range view shows.
     pub fn action_frequencies(&self, node: u32) -> Option<Vec<f64>> {
         self.game.action_frequencies(&self.strategy, node)
+    }
+
+    /// Each hand's share of the acting player's range at `node` by its own combos alone, range
+    /// weight times own reach, under the average strategy: see
+    /// [`RiverGame::range_view_weights`].
+    pub fn range_view_weights(&self, node: u32) -> Option<Vec<f64>> {
+        self.game.range_view_weights(&self.strategy, node)
+    }
+
+    /// Each action's frequency at `node` as a solver's range view shows it, over the acting
+    /// player's own combos with no card removal by the opponent's range, under the average
+    /// strategy: see [`RiverGame::range_view_frequencies`]. Use it to compare with another
+    /// solver; use [`Solution::action_frequencies`] for how often an action is taken.
+    pub fn range_view_frequencies(&self, node: u32) -> Option<Vec<f64>> {
+        self.game.range_view_frequencies(&self.strategy, node)
     }
 }
 

@@ -10,6 +10,9 @@ publish = false
 [workspace.dependencies]
 rand_chacha = "0.10"
 serde = { version = "1", features = ["derive"] }
+# `float_roundtrip` reads every decimal as the nearest f64, so that a number written with
+# enough digits reads back exactly.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
 toml = "1"
 

@@ -45,17 +45,39 @@
 //! # Ranges at a node
 //!
 //! For reading a strategy, [`RiverGame::reach`] gives each player's own probability of playing
-//! to a node with each hand, and [`RiverGame::hand_weights`] the probability that the acting
-//! player holds each hand once the node is reached. For the acting player `i`, the opponent `j`
-//! and own reaches `π` under a profile,
+//! to a node with each hand. Summing a strategy over the acting player's range at a node can
+//! then answer two different questions, and the two answers differ.
+//!
+//! **The probability of each action once the node is reached.** [`RiverGame::hand_weights`]
+//! gives the probability that the acting player holds each hand once the node is reached. For
+//! the acting player `i`, the opponent `j` and own reaches `π` under a profile,
 //!
 //! ```text
 //! P(h | n) ∝ deal(i)[h] · π_i(n, h) · Σ_o deal(j)[o] · π_j(n, o)    over o sharing no card with h
 //! ```
 //!
 //! which is exact, card removal by the opponent's range at the node included.
-//! [`RiverGame::action_frequencies`] is then the probability of each action at the node,
-//! `Σ_h P(h | n) · σ(a | h)`: how often the acting player takes it over its whole range there.
+//! [`RiverGame::action_frequencies`] is then `Σ_h P(h | n) · σ(a | h)`: how often the action
+//! is actually taken when play reaches the node. Use it for the probabilities of the play, such
+//! as how often a bet is called, or for anything weighted by how often a line happens.
+//!
+//! **What a range view shows.** [`RiverGame::range_view_weights`] weighs each hand by the
+//! player's own combos alone, its range weight times its own reach:
+//!
+//! ```text
+//! W(h | n) = w_i(h) · π_i(n, h) / Σ_h' w_i(h') · π_i(n, h')
+//! ```
+//!
+//! with no card removal by the opponent's range, and [`RiverGame::range_view_frequencies`] is
+//! `Σ_h W(h | n) · σ(a | h)`. This is what a solver's range view shows, and what a person
+//! compares between two solvers, so the cross-solver comparison
+//! ([`compare`](mod@crate::compare)) uses it.
+//!
+//! The two differ wherever the opponent's range at the node blocks some of the player's hands
+//! more than others. On `four_flush`, solved to 0.05% of the pot, IP's re-raise facing OOP's
+//! check-raise, a node reached about 4% of the time, is 10.1% by the first and 18.7% by the
+//! second: the hands IP re-raises with share cards with OOP's check-raising range more often
+//! than its other hands do. A test pins the two apart.
 //!
 //! [`VectorCfr`]: pk_cfr::VectorCfr
 
@@ -267,28 +289,79 @@ impl RiverGame {
 
     /// At a player node, the probability of each action once the node is reached under
     /// `profile`: `Σ_h P(h | n) · σ(a | h)` over the acting player's hands, with the weights of
-    /// [`RiverGame::hand_weights`]. These are the frequencies of a range view: how often the
-    /// acting player takes each action there, over its whole range.
+    /// [`RiverGame::hand_weights`], card removal by the opponent's range included. This is how
+    /// often each action is actually taken when play reaches the node. It is not what a range
+    /// view shows, which [`RiverGame::range_view_frequencies`] gives: see the
+    /// [module documentation](self#ranges-at-a-node).
     ///
     /// `None` if `node` is a terminal, or if `profile` reaches it with probability zero. Panics
     /// as [`RiverGame::reach`] does, or if `profile` has no strategy at `node`.
     pub fn action_frequencies(&self, profile: &PublicProfile, node: u32) -> Option<Vec<f64>> {
         let weights = self.hand_weights(profile, node)?;
+        Some(self.frequencies_with(profile, node, &weights))
+    }
+
+    /// At a player node, each hand's share of the acting player's range there by its own
+    /// combos alone: its range weight times its own reach of the node under `profile`,
+    /// normalised to sum to 1. The opponent's range does not enter, so there is no card removal
+    /// by it. This is the weighting of a solver's range view: see the
+    /// [module documentation](self#ranges-at-a-node).
+    ///
+    /// `None` if `node` is a terminal, or if the acting player's own reach of it is zero with
+    /// every hand. Panics as [`RiverGame::reach`] does.
+    pub fn range_view_weights(&self, profile: &PublicProfile, node: u32) -> Option<Vec<f64>> {
+        let Node::Player { actor, .. } = self.tree.node(node) else {
+            return None;
+        };
+        let me = actor.index();
+        let reach = self.reach(profile, node);
+        // The deal is the range weight over √Z, which the normalisation cancels.
+        let mut weights: Vec<f64> = self.deal[me]
+            .iter()
+            .zip(&reach[me])
+            .map(|(d, r)| d * r)
+            .collect();
+        let total: f64 = weights.iter().sum();
+        if total <= 0.0 {
+            return None;
+        }
+        for weight in &mut weights {
+            *weight /= total;
+        }
+        Some(weights)
+    }
+
+    /// At a player node, each action's frequency as a range view shows it:
+    /// `Σ_h W(h | n) · σ(a | h)` with the weights of [`RiverGame::range_view_weights`], the
+    /// acting player's own combos weighted by range weight and own reach, with no card removal
+    /// by the opponent's range. Use it to compare a strategy with another solver's range view.
+    /// For how often each action is actually taken at the node, use
+    /// [`RiverGame::action_frequencies`].
+    ///
+    /// `None` if `node` is a terminal, or if the acting player's own reach of it is zero with
+    /// every hand. Panics as [`RiverGame::reach`] does, or if `profile` has no strategy at
+    /// `node`.
+    pub fn range_view_frequencies(&self, profile: &PublicProfile, node: u32) -> Option<Vec<f64>> {
+        let weights = self.range_view_weights(profile, node)?;
+        Some(self.frequencies_with(profile, node, &weights))
+    }
+
+    /// `Σ_h weights[h] · σ(a | h)` for each action at the player node `node`.
+    fn frequencies_with(&self, profile: &PublicProfile, node: u32, weights: &[f64]) -> Vec<f64> {
         let Node::Player { actions, .. } = self.tree.node(node) else {
-            unreachable!("hand_weights is None at a terminal");
+            unreachable!("the weights are None at a terminal");
         };
         let strategy = self.strategy_at(profile, node, actions.len(), weights.len());
-        let frequencies = strategy
+        strategy
             .chunks_exact(weights.len())
             .map(|probabilities| {
                 probabilities
                     .iter()
-                    .zip(&weights)
+                    .zip(weights)
                     .map(|(&p, &w)| f64::from(p) * w)
                     .sum()
             })
-            .collect();
-        Some(frequencies)
+            .collect()
     }
 
     /// The strategy `profile` holds at the player node `node`, checked against its shape.
@@ -631,6 +704,89 @@ river = { bets = [0.5], raises = [3.0], allin = false }
                 other => panic!("{board}: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn the_two_read_outs_of_a_range_are_different_quantities() {
+        // They must stay two: the probability of each action once a node is reached, with card
+        // removal by the opponent's range, and a range view's frequency over the player's own
+        // combos. On `four_flush`, solved to 0.05% of the pot, at IP's node facing OOP's
+        // check-raise, they are 10.1% and 18.7% for IP's re-raise. Each is checked against
+        // its definition, summed here pair by pair.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../reference/spots/river/four_flush.toml"
+        );
+        let options = crate::solve::SolveOptions {
+            target: Some(0.05),
+            check_every: 1,
+            ..crate::solve::SolveOptions::default()
+        };
+        let solution = crate::solve::solve(&Spot::load(path).unwrap(), &options, |_| {}).unwrap();
+        let (game, profile) = (solution.game(), solution.strategy());
+        // Check, bet 8bb, raise to 20bb.
+        let tree = game.tree();
+        let node = [0, 1, 2]
+            .iter()
+            .fold(0, |at, &action| tree.node(at).children()[action]);
+        let Node::Player { actor, actions, .. } = tree.node(node) else {
+            panic!("IP decides facing the check-raise");
+        };
+        assert_eq!(*actor, Player::Ip);
+        assert_eq!(actions.len(), 3, "fold, call, re-raise");
+        let reach = game.reach(profile, node);
+        let (ip, oop) = (game.hands(Player::Ip), game.hands(Player::Oop));
+        let strategy = profile.get(node as usize).unwrap();
+        let n = ip.len();
+        let (mut removal, mut own) = ([0.0; 3], [0.0; 3]);
+        let (mut removal_total, mut own_total) = (0.0, 0.0);
+        let mut reached = 0.0;
+        for (h, combo) in ip.combos().iter().enumerate() {
+            let w = ip.weights()[h] * reach[1][h];
+            let met: f64 = oop
+                .combos()
+                .iter()
+                .enumerate()
+                .filter(|(_, other)| !other.cards().intersects(combo.cards()))
+                .map(|(o, _)| oop.weights()[o] * reach[0][o])
+                .sum();
+            for a in 0..3 {
+                let p = f64::from(strategy[a * n + h]);
+                removal[a] += w * met * p;
+                own[a] += w * p;
+            }
+            removal_total += w * met;
+            own_total += w;
+            reached += w * met;
+        }
+        let removal = removal.map(|x| x / removal_total);
+        let own = own.map(|x| x / own_total);
+        let measured = game.action_frequencies(profile, node).unwrap();
+        let shown = game.range_view_frequencies(profile, node).unwrap();
+        for a in 0..3 {
+            assert!(
+                (measured[a] - removal[a]).abs() < 1e-12,
+                "{measured:?} {removal:?}"
+            );
+            assert!((shown[a] - own[a]).abs() < 1e-12, "{shown:?} {own:?}");
+        }
+        assert_eq!(solution.action_frequencies(node).unwrap(), measured);
+        assert_eq!(solution.range_view_frequencies(node).unwrap(), shown);
+        // The node is reached about 4% of the time: the pairs that play to it over all pairs.
+        let reached = reached / game.pair_weight();
+        assert!((0.03..0.05).contains(&reached), "{reached}");
+        // The re-raise: 10.06% and 18.72%, measured.
+        assert!((measured[2] - 0.1006).abs() < 5e-4, "{measured:?}");
+        assert!((shown[2] - 0.1872).abs() < 5e-4, "{shown:?}");
+        assert!(shown[2] - measured[2] > 0.08);
+        // The weights behind them: a range view's sum to 1 and ignore the opponent.
+        let weights = game.range_view_weights(profile, node).unwrap();
+        assert!((weights.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        assert_eq!(solution.range_view_weights(node).unwrap(), weights);
+        assert_ne!(Some(weights), game.hand_weights(profile, node));
+        // At a terminal there is neither.
+        let terminal = tree.node(node).children()[0];
+        assert_eq!(game.range_view_frequencies(profile, terminal), None);
     }
 
     #[test]
