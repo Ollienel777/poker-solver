@@ -6,6 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+rand_chacha.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
