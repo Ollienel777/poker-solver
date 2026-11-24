@@ -1,0 +1,18 @@
+[package]
+name = "pk-core"
+description = "Cards, ranges, hand evaluation and equity"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+rand_chacha.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "evaluate"
+harness = false

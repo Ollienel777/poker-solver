@@ -13,7 +13,7 @@ The backlog lives in GitHub Issues: `gh issue list --milestone "M1 · Foundation
 
 - **Work one milestone at a time.** A milestone's build issues are blocked by the previous milestone's `type: gate` issue. Plan the milestone from its issues and wait for approval before writing code.
 - **Gates close only when every acceptance test in them passes.** For slow tests, paste the output into the gate issue.
-- **One issue per branch and PR**, with `Closes #N` in the PR body.
+- **One branch and PR per milestone, one commit per issue.** The commit message names its issue, and the PR body closes them all with `Closes #N`.
 - **Correctness before speed.** Optimize nothing until its test passes and a benchmark shows it matters. Perf PRs post before/after numbers.
 - **Tests come with the code**, and you run them before saying something is done. Slow tests are marked `#[ignore = "slow"]`.
 - **Never copy code from AGPL solvers** (postflop-solver, TexasSolver). Use them only as external binaries for comparison. Implement algorithms from papers and cite the paper in a doc comment.
@@ -26,15 +26,17 @@ The backlog lives in GitHub Issues: `gh issue list --milestone "M1 · Foundation
 
 ## Commands
 
-These work once the workspace exists (#6):
-
 ```bash
 cargo build --release
 cargo test                                  # fast suite
 cargo test --release -- --ignored           # slow suite
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
 ```
+
+Tests are built optimized (`[profile.test] opt-level = 3`) with debug assertions on, because they enumerate boards and run solves.
+
+The toolchain is stable Rust, set in `rust-toolchain.toml`. On Windows, use the MSVC host (`x86_64-pc-windows-msvc`), which needs the Visual Studio "Desktop development with C++" workload. The GNU host, as rustup installs it, fails with a `dlltool` error on any dependency that links Windows libraries, which includes proptest and criterion.
 
 ## Layout
 

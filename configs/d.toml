@@ -1,0 +1,49 @@
+name = "D"
+description = "200bb, 8-handed, 2bb UTG straddle, 0.5bb ante from every seat"
+players = 8
+stack_bb = 200.0
+
+[[forced_bets]]
+position = "SB"
+amount_bb = 0.5
+kind = "blind"
+
+[[forced_bets]]
+position = "BB"
+amount_bb = 1.0
+kind = "blind"
+
+[[forced_bets]]
+position = "UTG"
+amount_bb = 2.0
+kind = "blind"          # the straddle: one more live blind
+
+[[forced_bets]]
+position = "ALL"        # every seat posts
+amount_bb = 0.5
+kind = "ante"           # dead money: never counts toward a call
+
+[rake]
+percent = 5.0
+cap_bb = 6.0            # 3 x the effective blind
+no_flop_no_drop = true
+
+[preflop]
+open = 2.5              # x the effective blind (the largest live forced bet)
+open_sb = 3.0
+threebet_ip = 3.0       # x the raise faced
+threebet_oop = 4.0
+fourbet = 2.3
+allin_threshold = 0.40  # offer all-in once a raise would commit more than 40% of the stack
+limps = false
+max_raises = 4
+
+[postflop]              # the exact postflop solver
+flop = { bets = [0.33, 0.75], raises = [3.0], allin = false }
+turn = { bets = [0.33, 0.75], raises = [3.0], allin = false }
+river = { bets = [0.33, 0.75], raises = [3.0], allin = true }
+
+[abstract_postflop]     # the small tree inside the preflop solve
+bets = [0.75]
+raises = [3.0]
+allin = true
