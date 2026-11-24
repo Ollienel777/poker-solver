@@ -80,7 +80,7 @@ A reference solver's solution of a spot is read as a [solution dump](../docs/ARC
 - It is run as a command template with `{spot}`, the path of one of these spot files, and `{out}`, where to write the dump. `PK_REFERENCE_SOLVER` holds the template as a JSON array of strings, such as `["C:/tools/ref-wrapper.exe", "{spot}", "{out}"]`, and `cargo test -p pk-postflop --release -- --ignored the_configured_reference_solver_matches_ours` then compares it with this solver on every spot. A failing run should exit with a non-zero code and say why on standard error.
 - Its amounts are the street totals in the table above, in chips, with an all-in written as a bet or raise of the whole stack. The tree is checked before anything else, node by node, so a tree that differs anywhere is reported with the actions each side offers there.
 - It lists every decision node, with a probability row for every hand of the acting player at each, and EVs counted from the start of the river, converted if the reference counts them otherwise. It writes no frequencies over a range: this solver sums every range itself, the same way for both sides.
-- How far to solve is for #34 to settle. Measured between two sound solves of these spots (`honest_solvers_table` in `crates/postflop/tests/compare.rs`), the frequencies proposed there to agree within 2 points did so on every spot with both at 0.03% of the pot, and differed by up to 6.2 points with both at 0.1%.
+- Both solvers are run to 0.03% of the pot (DECISIONS D20). Measured between two sound solves of these spots (`honest_solvers_table` in `crates/postflop/tests/compare.rs`), frequencies agreed within the gate's 2 points on every spot with both at 0.03% of the pot, and differed by up to 6.2 points with both at 0.1%.
 
 ### The toy game
 
@@ -98,7 +98,7 @@ At equilibrium:
 
 - OOP bets all 6 nut combos, and bluffs with 2 of its 16 air combos in total, so that bluffs are b / (1 + 2b) = 1/4 of its bets. It checks the other 14 air combos. With more air than that, some air must check, and the bluffs' indifference fixes IP's calling frequency.
 - IP calls a bet 1 / (1 + b) = 2/3 of the time, which leaves the bluffs indifferent: they win the 10bb pot a third of the time and lose the 5bb bet two thirds of the time. A bet's 25% of bluffs leaves IP indifferent in turn: calling 5bb wins 15bb a quarter of the time.
-- After OOP checks, IP wins the 10bb pot whether it checks or bets, so its play there is only bounded: it bets at most 2/3 of the time, or OOP's nuts would rather check. Two correct solvers can differ there: our solve bets about half the time, and postflop-solver never does.
+- After OOP checks, IP wins the 10bb pot whether it checks or bets, so its play there is only bounded: it bets at most 2/3 of the time, or OOP's nuts would rather check. Two correct solvers can differ there: our solve bets about half the time, and postflop-solver never does. The comparison holds each to the bound at that node, in place of matching their frequencies.
 - In the payoffs of `pk_postflop::payoff`, which count from the start of the river, each nut combo wins 10 + 5 × 2/3 = 40/3bb and each air combo 0. Over the 22 × 12 deals, which are all possible, OOP's value is 40/11 ≈ 3.64bb and IP's is 70/11 ≈ 6.36bb, adding up to the 10bb pot.
 
 The frequencies are over each range as a whole: any split of the 2 bluffs among the air combos, or of the calls among IP's combos, is an equilibrium.

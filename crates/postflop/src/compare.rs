@@ -71,10 +71,10 @@
 //! between two sound solutions, so they are reported and not checked.
 //!
 //! The defaults for exploitability, values, frequencies and the reach of a checked node are the
-//! tolerance proposed on issue #34 for the M3 gate, which assumes both solvers at 0.1% of the
-//! pot or better: an exploitability under 0.3% of the pot, frequencies within 2 points at every
-//! node reached more than 1% of the time, and values within 0.2% of the pot. The proposal sets
-//! no limit for EVs. [`Tolerances::ev`] defaults to 5% of the pot and
+//! tolerance of the M3 gate (DECISIONS D20), which has both solvers at 0.03% of the pot or
+//! better: an exploitability under 0.3% of the pot, frequencies within 2 points at every node
+//! reached more than 1% of the time, and values within 0.2% of the pot. The gate sets no
+//! limit for EVs. [`Tolerances::ev`] defaults to 5% of the pot and
 //! [`Tolerances::reported_ev`] to 0.1%, from the measurements of the slow test
 //! `honest_solvers_table` in `tests/compare.rs`.
 //!
@@ -94,8 +94,8 @@ use crate::node_values::NodeValues;
 use crate::river::RiverGame;
 use crate::spot::Spot;
 
-/// The limits of a comparison's verdict. [`Tolerances::default`] gives the ones proposed for
-/// the M3 gate: see the [module documentation](self#the-verdict).
+/// The limits of a comparison's verdict. [`Tolerances::default`] gives those of the M3 gate:
+/// see the [module documentation](self#the-verdict).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tolerances {
     /// The most exploitable either strategy may be, in percent of the pot. Defaults to 0.3.

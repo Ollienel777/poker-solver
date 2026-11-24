@@ -1,5 +1,5 @@
-//! The cross-solver comparison, shown to tell right from wrong while no reference solver is
-//! installed:
+//! The cross-solver comparison, shown to tell right from wrong on a machine with no reference
+//! solver installed:
 //!
 //! - every river spot's solution, written as a dump, read back and compared with itself, is
 //!   identical;
@@ -10,11 +10,14 @@
 //!   EVs on another baseline;
 //! - a hand-written dump of the toy game's analytical equilibrium, which plays every combo
 //!   purely where our solve mixes, passes against our solve;
+//! - at the one node the toy game's solution leaves free, a solution is held to the analytical
+//!   bound and not to our frequencies, and a difference at any other node still fails;
 //! - an external program, played here by this test binary itself, is run on a spot file and
 //!   its dump read and compared, and each way it can fail is reported.
 //!
 //! With `PK_REFERENCE_SOLVER` set, the slow test `the_configured_reference_solver_matches_ours`
-//! runs the reference on every spot; without it, it does nothing.
+//! runs the reference on every spot, which is the M3 gate's comparison (DECISIONS D20); without
+//! it, it does nothing.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -507,6 +510,153 @@ fn the_toy_games_hand_written_equilibrium_passes_against_our_solve() {
     );
 }
 
+/// The path of the toy game's free node: IP's, after OOP checks.
+///
+/// IP's bluff-catchers win the pot there whether they check or bet, because OOP's nuts never
+/// check, and any betting frequency up to 2/3 is an equilibrium (`reference/README.md`). Two
+/// correct solvers need not agree on it, so the M3 gate (DECISIONS D20) holds each solver to
+/// that bound there in place of the frequency check.
+const TOY_FREE_NODE: [DumpAction; 1] = [DumpAction::Check];
+
+/// The most IP may bet at the toy game's free node at an equilibrium.
+const TOY_FREE_BET_LIMIT: f64 = 2.0 / 3.0;
+
+/// What a comparison of two solutions of `toy_polarized` fails once its free node is held to
+/// its bound: every failure but those of the frequency check at that node, and each solution
+/// that bets there more than 2/3 of the time, give or take the frequency tolerance.
+fn toy_game_failures(comparison: &Comparison) -> Vec<String> {
+    let free = comparison
+        .nodes
+        .iter()
+        .find(|node| node.path == TOY_FREE_NODE)
+        .expect("the toy game has a node after a check");
+    let mut failures: Vec<String> = comparison
+        .failures
+        .iter()
+        .filter(|f| !(f.check() == Check::Frequency && f.node() == Some(free.node)))
+        .map(Failure::to_string)
+        .collect();
+    let limit = TOY_FREE_BET_LIMIT + comparison.tolerances.frequency;
+    for (side, frequencies) in free.frequencies.iter().enumerate() {
+        let Some(frequencies) = frequencies else {
+            continue;
+        };
+        let bet: f64 = free
+            .actions
+            .iter()
+            .zip(frequencies)
+            .filter(|(action, _)| matches!(action, DumpAction::Bet(_)))
+            .map(|(_, &frequency)| frequency)
+            .sum();
+        if bet > limit {
+            failures.push(format!(
+                "frequency: at {} {} bets {:.2}% of the time, more than the 2/3 an equilibrium \
+                 allows",
+                PathText(&free.path),
+                ["A", "B"][side],
+                100.0 * bet
+            ));
+        }
+    }
+    failures
+}
+
+/// The hand-written equilibrium of the toy game without its EVs and values, which hold only
+/// for the strategy as written.
+fn toy_equilibrium() -> SolutionDump {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/toy_equilibrium.json"
+    );
+    let mut dump = SolutionDump::load(path).unwrap();
+    dump.values = None;
+    for node in &mut dump.nodes {
+        node.ev = None;
+    }
+    dump
+}
+
+/// Makes every hand at the dump's node at `path` play one action: the one `pick` gives for the
+/// hand's place in the node's list and its cards.
+fn play_purely(
+    dump: &mut SolutionDump,
+    path: &[DumpAction],
+    pick: impl Fn(usize, &str) -> DumpAction,
+) {
+    let node = dump
+        .nodes
+        .iter_mut()
+        .find(|node| node.path == path)
+        .unwrap_or_else(|| panic!("no node at {}", PathText(path)));
+    for (place, (combo, row)) in node.strategy.iter_mut().enumerate() {
+        let action = pick(place, &combo.to_string());
+        let chosen = node.actions.iter().position(|&a| a == action).unwrap();
+        for (index, probability) in row.iter_mut().enumerate() {
+            *probability = if index == chosen { 1.0 } else { 0.0 };
+        }
+    }
+}
+
+#[test]
+fn the_toy_games_free_node_is_held_to_its_bound_and_nothing_else_is_excused() {
+    let spot = load("toy_polarized");
+    let ours = SolutionDump::from_solution(&solve_to(&spot, dcfr(), 0.03));
+    let against =
+        |theirs: &SolutionDump| compare(&spot, &ours, theirs, &Tolerances::default()).unwrap();
+    // IP bets after a check with the first `bets` of its 12 combos.
+    let betting = |bets: usize| {
+        let mut dump = toy_equilibrium();
+        play_purely(&mut dump, &TOY_FREE_NODE, |place, _| {
+            if place < bets {
+                DumpAction::Bet(500)
+            } else {
+                DumpAction::Check
+            }
+        });
+        dump
+    };
+
+    // Never betting there is an equilibrium, as is betting 2/3 of the time. Each is far from
+    // our solve's 50%, which is all the comparison finds, and the gate excuses it.
+    for bets in [0, 8] {
+        let comparison = against(&betting(bets));
+        assert_eq!(checks(&comparison), [Check::Frequency], "{comparison}");
+        let at_free_node = node_at(&comparison, &TOY_FREE_NODE);
+        assert!(
+            comparison
+                .failures
+                .iter()
+                .all(|f| f.node() == Some(at_free_node)),
+            "{comparison}"
+        );
+        let failures = toy_game_failures(&comparison);
+        assert!(failures.is_empty(), "{bets}: {failures:?}");
+    }
+
+    // Betting with 9 of the 12 is past the bound: OOP's nuts would now rather check and call.
+    let failures = toy_game_failures(&against(&betting(9)));
+    assert!(
+        failures.iter().any(|f| f.contains("B bets 75.00%")),
+        "{failures:?}"
+    );
+
+    // A difference at any other node is a failure as before: here OOP never bluffs.
+    let mut no_bluffs = betting(0);
+    play_purely(&mut no_bluffs, &[], |_, combo| {
+        let cards = combo.as_bytes();
+        if cards[0] == cards[2] {
+            DumpAction::Bet(500)
+        } else {
+            DumpAction::Check
+        }
+    });
+    let failures = toy_game_failures(&against(&no_bluffs));
+    assert!(
+        failures.iter().any(|f| f.starts_with("frequency: at []")),
+        "{failures:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Two honest solvers
 
@@ -833,9 +983,10 @@ fn each_way_an_external_program_can_fail_is_reported() {
 #[test]
 #[ignore = "slow"]
 fn the_configured_reference_solver_matches_ours() {
-    // The M3 gate's comparison, when `PK_REFERENCE_SOLVER` names a reference: each spot
-    // solved by it and by us to 0.03% of the pot, compared under the default tolerances.
-    // Without a reference it does nothing.
+    // The M3 gate's comparison (DECISIONS D20), when `PK_REFERENCE_SOLVER` names a reference:
+    // each spot solved by it and by us to 0.03% of the pot, compared under the default
+    // tolerances, with the toy game's free node held to its bound. Without a reference it
+    // does nothing.
     let Some(reference) = ExternalSolver::from_env().unwrap() else {
         println!("no reference solver: `PK_REFERENCE_SOLVER` is not set, so nothing to compare");
         return;
@@ -848,7 +999,14 @@ fn the_configured_reference_solver_matches_ours() {
         match compare(&spot, &ours, &dump, &Tolerances::default()) {
             Ok(comparison) => {
                 println!("{}:\n{comparison}", spot.name);
-                if !comparison.passes() {
+                let passes = if spot.name == "toy_polarized" {
+                    let failures = toy_game_failures(&comparison);
+                    println!("With the free node held to its bound: {failures:?}");
+                    failures.is_empty()
+                } else {
+                    comparison.passes()
+                };
+                if !passes {
                     failed.push(spot.name.clone());
                 }
             }
