@@ -430,6 +430,41 @@ impl<G: PublicGame> VectorCfr<G> {
         Some(&self.row(node)?.possible)
     }
 
+    /// Replaces the stored regrets and strategy sum of a player node, each laid out
+    /// `[actions × hands]` as [`VectorCfr::regrets`] and [`VectorCfr::strategy_sum`] give them.
+    /// The iteration count is left as it is, so the next iteration is still number
+    /// `iterations() + 1` and applies that iteration's discount.
+    ///
+    /// This is for checks that run one iteration from a state set from outside, such as another
+    /// solver's, and compare what comes out. The values are not checked against what a run
+    /// could produce: a hand ruled out at the node should hold zeros, as the
+    /// [module documentation](self) explains, and a test may set them otherwise.
+    ///
+    /// Panics if `node` is not a player node reachable from the root, if either slice has the
+    /// wrong length, if a value is not finite, or if a strategy-sum entry is negative.
+    pub fn set_stored(&mut self, node: usize, regrets: &[f32], strategy_sum: &[f32]) {
+        let position =
+            self.row_of.get(node).copied().flatten().unwrap_or_else(|| {
+                panic!("node {node} is not a player node reachable from the root")
+            });
+        let row = &mut self.rows[position];
+        assert!(
+            regrets.len() == row.regrets.len() && strategy_sum.len() == row.strategy_sum.len(),
+            "node {node} stores {} values in each slice",
+            row.regrets.len()
+        );
+        assert!(
+            regrets.iter().all(|r| r.is_finite()),
+            "a regret set at node {node} is not finite"
+        );
+        assert!(
+            strategy_sum.iter().all(|&s| s.is_finite() && s >= 0.0),
+            "a strategy-sum entry set at node {node} is negative or not finite"
+        );
+        row.regrets.copy_from_slice(regrets);
+        row.strategy_sum.copy_from_slice(strategy_sum);
+    }
+
     fn row(&self, node: usize) -> Option<&NodeRow> {
         let position = (*self.row_of.get(node)?)?;
         Some(&self.rows[position])
@@ -919,6 +954,79 @@ mod tests {
                 .count();
             assert!(mixed > 100, "{schedule:?}: {mixed}");
         }
+    }
+
+    #[test]
+    fn a_state_set_from_outside_is_the_state_the_next_iteration_starts_from() {
+        // Two solvers run 12 iterations of the same schedule. Every row of the second is
+        // overwritten with random values, which the getters and strategies then show, and
+        // then with the first solver's values. Both then run the same 13th iteration, so their
+        // states must match bit for bit after it.
+        let mut rng = ChaCha8Rng::seed_from_u64(27);
+        let mut random = move || (rng.next_u64() >> 40) as f32 / (1u64 << 24) as f32;
+        let schedule = Schedule::Discounted(Dcfr::default());
+        let mut source = VectorCfr::new(PublicLeduc::new(), schedule);
+        source.run(12, |_| {});
+        let mut copy = VectorCfr::new(PublicLeduc::new(), schedule);
+        copy.run(12, |_| {});
+        let nodes = player_nodes(&source);
+        for &node in &nodes {
+            let len = copy.regrets(node).unwrap().len();
+            let noise: Vec<f32> = (0..len).map(|_| random()).collect();
+            copy.set_stored(node, &noise, &noise);
+            assert_eq!(copy.regrets(node).unwrap(), noise);
+            assert_eq!(copy.strategy_sum(node).unwrap(), noise);
+        }
+        assert_ne!(copy.current_strategy(), source.current_strategy());
+        assert_ne!(copy.average_strategy(), source.average_strategy());
+        for &node in &nodes {
+            let regrets = source.regrets(node).unwrap().to_vec();
+            let sums = source.strategy_sum(node).unwrap().to_vec();
+            copy.set_stored(node, &regrets, &sums);
+        }
+        // Setting the state leaves the iteration count, which sets the next discount.
+        assert_eq!(copy.iterations(), 12);
+        assert_eq!(copy.current_strategy(), source.current_strategy());
+        assert_eq!(copy.average_strategy(), source.average_strategy());
+        source.iterate();
+        copy.iterate();
+        let bits = |values: &[f32]| -> Vec<u32> { values.iter().map(|v| v.to_bits()).collect() };
+        for &node in &nodes {
+            assert_eq!(
+                bits(source.regrets(node).unwrap()),
+                bits(copy.regrets(node).unwrap())
+            );
+            assert_eq!(
+                bits(source.strategy_sum(node).unwrap()),
+                bits(copy.strategy_sum(node).unwrap())
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "not a player node")]
+    fn a_state_cannot_be_set_at_a_terminal() {
+        let mut solver = VectorCfr::new(PublicLeduc::new(), Schedule::Vanilla);
+        let fold = (0..solver.game().num_nodes())
+            .find(|&node| solver.game().node(node) == PublicNode::Terminal)
+            .unwrap();
+        solver.set_stored(fold, &[], &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "stores 12 values")]
+    fn a_state_needs_one_value_per_action_and_hand() {
+        let mut solver = VectorCfr::new(PublicLeduc::new(), Schedule::Vanilla);
+        solver.set_stored(0, &[0.0; 6], &[0.0; 12]);
+    }
+
+    #[test]
+    #[should_panic(expected = "negative or not finite")]
+    fn a_strategy_sum_cannot_be_negative() {
+        let mut solver = VectorCfr::new(PublicLeduc::new(), Schedule::Vanilla);
+        let mut sums = [0.0; 12];
+        sums[3] = -1.0;
+        solver.set_stored(0, &[0.0; 12], &sums);
     }
 
     #[test]
