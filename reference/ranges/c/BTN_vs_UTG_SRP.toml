@@ -1,0 +1,15 @@
+format = 1
+config = "c"
+formation = "BTN_vs_UTG_SRP"
+line = "UTG1 f, LJ f, HJ f, CO f, BTN r2.5, SB f, BB f, UTG c"
+pot_bb = 15.5
+effective_stack_bb = 94.5
+source = "illustrative, not from a reference"
+
+[oop]
+position = "UTG"
+range = "22-TT,A2s-AJs,K7s+,Q9s+,J9s+,T8s+,98s,87s,76s,65s,ATo-AJo,KJo+,JJ:0.5,AQs:0.5,AQo:0.5"
+
+[ip]
+position = "BTN"
+range = "22+,A2s+,K2s+,Q4s+,J6s+,T6s+,96s+,85s+,75s+,64s+,54s,A4o+,K9o+,Q9o+,J9o+,T9o,A2o-A3o:0.5,K8o:0.5,98o:0.5"

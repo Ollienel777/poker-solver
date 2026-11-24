@@ -1,0 +1,15 @@
+format = 1
+config = "c"
+formation = "BTN_vs_BB_SRP"
+line = "UTG1 f, LJ f, HJ f, CO f, BTN r2.5, SB f, BB c, UTG f"
+pot_bb = 16.5
+effective_stack_bb = 94.5
+source = "illustrative, not from a reference"
+
+[oop]
+position = "BB"
+range = "22-JJ,A2s-AJs,K2s+,Q2s+,J4s+,T5s+,95s+,85s+,74s+,63s+,53s+,43s,A2o-AJo,K8o+,Q9o+,J9o+,T8o+,98o,QQ:0.5,87o:0.5,AQs:0.25"
+
+[ip]
+position = "BTN"
+range = "22+,A2s+,K2s+,Q4s+,J6s+,T6s+,96s+,85s+,75s+,64s+,54s,A4o+,K9o+,Q9o+,J9o+,T9o,A2o-A3o:0.5,K8o:0.5,98o:0.5"

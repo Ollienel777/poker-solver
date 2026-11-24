@@ -34,8 +34,8 @@ flowchart BT
 
 | Folder | Package | Holds |
 | --- | --- | --- |
-| `crates/core` | `pk-core` | cards, card sets, combos, 169 classes, ranges, evaluator, equity, suit isomorphism, hand indexer, range-file format |
-| `crates/game` | `pk-game` | `GameConfig`, positions and action order, betting-tree builders |
+| `crates/core` | `pk-core` | cards, card sets, combos, 169 classes, ranges, evaluator, equity, suit isomorphism, hand indexer |
+| `crates/game` | `pk-game` | `GameConfig`, positions and action order, betting-tree builders, range-file format |
 | `crates/cfr` | `pk-cfr` | regret matching, discount schedules, toy-game CFR and MCCFR, best response, vector-form helpers |
 | `crates/abstraction` | `pk-abstraction` | equity histograms, k-means, bucket tables |
 | `crates/postflop` | `pk-postflop` | heads-up flop-to-river solver, solution files |
@@ -300,7 +300,7 @@ A node path is a space-separated list of actions:
 
 ### Range file
 
-TOML, designed to be typed by hand while reading a reference solver's range view.
+TOML, designed to be typed by hand while reading a reference solver's range view. `export-ranges` writes the same format. The reader and writer are `pk_game::range_file`, because a range file needs both `Range` and `Position` (DECISIONS P16).
 
 ```toml
 format = 1
@@ -321,6 +321,37 @@ range = "22+,A2+,K2s+,K8o+,Q5s+,Q9o+,J7s+,J9o+,T7s+,T9o,97s+,86s+,75s+,65s,54s"
 ```
 
 The ranges shown are illustrative, not reference ranges. A range string is a comma-separated list. Each item is a hand class (`AKs`, `QQ`), a class range (`QQ+`, `A2s-A5s`, `KTo+`) or a specific combo (`AsKs`), optionally followed by `:weight` with a weight from 0 to 1. Later items override earlier ones.
+
+| Key | Holds |
+| --- | --- |
+| `format` | the format version, 1 |
+| `config` | the game config's name: `a` for config A (`configs/a.toml`) |
+| `formation` | the formation name, as under [Output](#output). Free text for now |
+| `line` | the preflop actions that reach the flop. Free text for now. The examples write each size as a path token from the config's sizes: `r2.5` is the 2.5× open, which is 5bb under a 2bb straddle, and `r4` a 3-bet out of position to 4× the open |
+| `pot_bb` | the pot at the flop, antes and folded blinds included |
+| `effective_stack_bb` | what each of the two players has left to bet at the flop |
+| `source` | where the ranges came from: a reference and a date, or `illustrative, not from a reference` |
+| `[oop]`, `[ip]` | the player who acts first after the flop and the one who acts last, each with a `position` and a `range` |
+
+**Loading is strict**, so that a mistyped file fails instead of loading as something else. Every key is required and no other key is allowed. Each error names the field, such as `oop.range` or `pot_bb`, and says what is wrong. A file is rejected for:
+
+- a format other than 1
+- a missing or unknown key, or a value of the wrong type
+- a blank `config`, `formation`, `line` or `source`
+- a position that is not a name such as `BB`, or the same position on both sides
+- a range that does not parse, including a weight outside 0 to 1, with the range parser's message passed on, or a range that holds no hands
+- a pot or stack that is not a positive whole number of chips, at most 1,000,000bb
+
+Keys may come in any order, positions in any case, and amounts as integers or decimals.
+
+**Checking against the config.** A caller that has the config checks the file against it as well:
+
+- `config` must be the config's name, ignoring case.
+- Both positions must exist at the config's table.
+- `[oop]` must act before `[ip]` after the flop. This catches the two tables typed the wrong way round.
+- The pot and stack must be reachable under the config's forced bets. Both players have put in the live stack less the effective stack, which is at least the effective blind. The pot holds the antes and both players' chips. It also holds each other seat's folded chips: at least that seat's blind, and at most what either player put in.
+
+**Writing** produces the layout above: the keys in that order, canonical range strings, positions in capitals and amounts as decimals. A hand-typed file and an exported one therefore look alike. Reading what was written gives back an equal value, and a file read from disk rewrites to the same text every time.
 
 ### Solution file
 

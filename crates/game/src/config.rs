@@ -222,18 +222,19 @@ struct RawRake {
 
 /// The largest amount a config may hold, in big blinds. At 9 seats, every stack plus every
 /// forced bet then sums to well under `Chips::MAX`, so pot arithmetic cannot overflow.
-const MAX_BB: f64 = 1_000_000.0;
+pub(crate) const MAX_BB: f64 = 1_000_000.0;
 
-/// Converts big blinds to chips, rejecting amounts that are not whole chips.
-fn to_chips(field: &str, bb: f64) -> Result<Chips, ConfigError> {
+/// Converts big blinds to chips, rejecting amounts that are negative, above [`MAX_BB`] or not
+/// whole chips. Range files share it with the config loader.
+pub(crate) fn to_chips(field: &str, bb: f64) -> Result<Chips, Invalid> {
     if !(0.0..=MAX_BB).contains(&bb) {
         let reason = format!("is {bb}; an amount must be from 0 to {MAX_BB}bb");
-        return Err(invalid(field, reason));
+        return Err(Invalid::new(field, reason));
     }
     let chips = bb * f64::from(CHIPS_PER_BB);
     if (chips - chips.round()).abs() > 1e-6 {
         let reason = format!("is {bb}bb, which is not a whole number of chips (1bb = 100 chips)");
-        return Err(invalid(field, reason));
+        return Err(Invalid::new(field, reason));
     }
     Ok(chips.round() as Chips)
 }
