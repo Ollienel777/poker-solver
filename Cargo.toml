@@ -9,7 +9,9 @@ publish = false
 
 [workspace.dependencies]
 rand_chacha = "0.10"
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+toml = "1"
 
 criterion = "0.8"
 proptest = "1"
