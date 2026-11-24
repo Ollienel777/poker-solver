@@ -150,15 +150,17 @@ struct RawRake {
     no_flop_no_drop: bool,
 }
 
+/// The largest amount a config may hold, in big blinds. At 9 seats, every stack plus every
+/// forced bet then sums to well under `Chips::MAX`, so pot arithmetic cannot overflow.
+const MAX_BB: f64 = 1_000_000.0;
+
 /// Converts big blinds to chips, rejecting amounts that are not whole chips.
 fn to_chips(field: &str, bb: f64) -> Result<Chips, ConfigError> {
-    let chips = bb * f64::from(CHIPS_PER_BB);
-    if !chips.is_finite() || chips < 0.0 || chips > f64::from(Chips::MAX) {
-        return Err(invalid(
-            field,
-            format!("is {bb}, which is not a valid amount"),
-        ));
+    if !(0.0..=MAX_BB).contains(&bb) {
+        let reason = format!("is {bb}; an amount must be from 0 to {MAX_BB}bb");
+        return Err(invalid(field, reason));
     }
+    let chips = bb * f64::from(CHIPS_PER_BB);
     if (chips - chips.round()).abs() > 1e-6 {
         let reason = format!("is {bb}bb, which is not a whole number of chips (1bb = 100 chips)");
         return Err(invalid(field, reason));
@@ -450,6 +452,33 @@ mod tests {
             rejected_field("players = 8", "players = 5"),
             "forced_bets[2].position"
         );
+    }
+
+    #[test]
+    fn amounts_too_large_to_add_up_are_rejected() {
+        // 42,949,672.5bb fits in `Chips` by itself, but not once the 0.5bb ante is added.
+        assert_eq!(
+            rejected_field("amount_bb = 1.0", "amount_bb = 42949672.5"),
+            "forced_bets[1].amount_bb"
+        );
+        assert_eq!(
+            rejected_field("stack_bb = 100.0", "stack_bb = 1000000.01"),
+            "stack_bb"
+        );
+        assert_eq!(
+            rejected_field("stack_bb = 100.0", "stack_bb = inf"),
+            "stack_bb"
+        );
+        assert_eq!(
+            rejected_field("stack_bb = 100.0", "stack_bb = nan"),
+            "stack_bb"
+        );
+
+        // The largest stack loads, and its totals stay in range.
+        let text = CONFIG_C.replacen("stack_bb = 100.0", "stack_bb = 1000000.0", 1);
+        let config = GameConfig::from_toml(&text).unwrap();
+        assert_eq!(config.stack, 100_000_000);
+        assert_eq!(config.stack_behind(Position::Utg), 100_000_000 - 250);
     }
 
     #[test]
