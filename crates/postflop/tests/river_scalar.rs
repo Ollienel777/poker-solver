@@ -16,7 +16,8 @@
 //! values, and [`exploitability`]) must agree with the scalar side ([`Cfr`],
 //! [`expected_values`], [`best_response`]): the deal probability of every pair, the payoff of
 //! every pair at every terminal, each player's value and best-response value under several
-//! profiles, and every stored value after one iteration from the same stored state.
+//! profiles, and every stored value after one iteration from the same stored state. The scalar
+//! values also sum to what [`expected_rake`] says they must.
 
 use pk_cfr::{
     Cfr, Dcfr, Game, Node as ScalarNode, Profile, PublicGame, PublicNode, PublicProfile, Schedule,
@@ -24,7 +25,7 @@ use pk_cfr::{
 };
 use pk_core::{CardSet, Combo, evaluate};
 use pk_game::{Chips, Node, Outcome, Player, PostflopTree};
-use pk_postflop::{RiverGame, Spot, exploitability};
+use pk_postflop::{RiverGame, Spot, expected_rake, exploitability};
 use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
 
@@ -486,10 +487,12 @@ fn profiles(scalar: &ScalarRiver) -> Vec<(&'static str, Profile<Key>)> {
 #[test]
 fn values_and_best_responses_match_the_scalar_game() {
     // For each profile: both players' expected values, both best-response values, the value
-    // of playing the vector best response in the scalar game, and the exploitability. Measured,
-    // the largest differences are 6.8e-13 chips for the values, 3.4e-13 for the best responses
-    // and 2.8e-13 for the exploitability, in games whose values run to hundreds of chips.
-    let mut largest = [0.0f64; 3];
+    // of playing the vector best response in the scalar game, and the exploitability; and the
+    // sum of the scalar values against `pot · M − E[rake]` from `expected_rake`. Measured, the
+    // largest differences are 6.8e-13 chips for the values, 3.4e-13 for the best responses,
+    // 2.8e-13 for the exploitability and 4.5e-13 for the value sum, in games whose values run
+    // to hundreds of chips.
+    let mut largest = [0.0f64; 4];
     for sides in sides() {
         let (game, scalar) = (&sides.game, &sides.scalar);
         let name = &sides.name;
@@ -498,6 +501,15 @@ fn values_and_best_responses_match_the_scalar_game() {
             let public = public_profile(game, &profile);
             let scalar_values = expected_values(scalar, &profile);
             let vector_values = vector_expected_values(game, &public);
+            // The scalar values sum to what the expected rake says they must, the pot weighted
+            // by the probability of ending less the expected rake.
+            let expected = expected_rake(game, &public);
+            let difference = (scalar_values[0] + scalar_values[1] - expected.value_sum()).abs();
+            largest[3] = largest[3].max(difference);
+            assert!(
+                difference < 1e-9,
+                "{what}: {scalar_values:?} against {expected:?}"
+            );
             let mut scalar_responses = [0.0; 2];
             for player in 0..2 {
                 let difference = (vector_values[player] - scalar_values[player]).abs();
@@ -557,8 +569,9 @@ fn values_and_best_responses_match_the_scalar_game() {
         }
     }
     println!(
-        "largest differences: values {:e}, best responses {:e}, exploitability {:e}",
-        largest[0], largest[1], largest[2]
+        "largest differences: values {:e}, best responses {:e}, exploitability {:e}, value \
+         sum {:e}",
+        largest[0], largest[1], largest[2], largest[3]
     );
 }
 

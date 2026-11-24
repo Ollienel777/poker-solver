@@ -1,14 +1,24 @@
 //! Solving the river test spots under `reference/spots/river/`: the polarized toy game against
-//! its analytical equilibrium, and every spot to below the target exploitability.
+//! its analytical equilibrium, every spot to below the target exploitability, and the rake:
+//! on every spot the two players' values sum to the root pot less the expected rake.
+//!
+//! The expected rake comes from [`expected_rake`], which works out the probability of ending at
+//! each terminal and the rake taken there from the chips and the spot's rake settings, sharing
+//! none of the code of the payoffs and the expected values it is compared with. Here it is
+//! also checked against the sum over every pair of hands, and against the same solution's
+//! values in the rake-free game.
 
 use std::cell::Cell;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use pk_cfr::{Dcfr, PublicGame, PublicNode, Schedule, VectorCfr};
+use pk_cfr::{Dcfr, PublicGame, PublicNode, Schedule, VectorCfr, vector_expected_values};
 use pk_game::{Node, Player};
-use pk_postflop::{RiverGame, SolveOptions, Spot, StopReason, exploitability, solve};
+use pk_postflop::{
+    RiverGame, Solution, SolveOptions, Spot, StopReason, expected_rake, exploitability, solve,
+};
 
 fn repo_path(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -29,6 +39,20 @@ fn all_spots() -> Vec<Spot> {
         .collect();
     paths.sort();
     paths.iter().map(|path| Spot::load(path).unwrap()).collect()
+}
+
+/// Every river spot, sorted by name, solved by the default solve once for all the tests here.
+fn solved() -> &'static [(Spot, Solution)] {
+    static SOLVED: OnceLock<Vec<(Spot, Solution)>> = OnceLock::new();
+    SOLVED.get_or_init(|| {
+        all_spots()
+            .into_iter()
+            .map(|spot| {
+                let solution = solve(&spot, &SolveOptions::default(), |_| {}).unwrap();
+                (spot, solution)
+            })
+            .collect()
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -125,8 +149,7 @@ fn every_river_spot_solves_below_the_target() {
     // The default solve: DCFR(1.5, 0, 2) to 0.3% of the pot, measured every 10 iterations.
     // Measured, the nine spots take 30 to 350 iterations and 0.35 s in all (see
     // `river_spot_table`).
-    for spot in all_spots() {
-        let solution = solve(&spot, &SolveOptions::default(), |_| {}).unwrap();
+    for (spot, solution) in solved() {
         let name = &spot.name;
         assert_eq!(solution.stop(), StopReason::Target, "{name}");
         let measured = solution.exploitability();
@@ -151,9 +174,247 @@ fn every_river_spot_solves_below_the_target() {
             max_iterations: 0,
             ..SolveOptions::default()
         };
-        let uniform = solve(&spot, &start, |_| {}).unwrap();
+        let uniform = solve(spot, &start, |_| {}).unwrap();
         assert!(uniform.exploitability().percent_of_pot > 3.0, "{name}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rake at terminal nodes
+
+fn is_raked(spot: &Spot) -> bool {
+    spot.rake_percent > 0.0
+}
+
+/// Neumaier's compensated sum.
+#[derive(Debug, Default)]
+struct Compensated {
+    sum: f64,
+    compensation: f64,
+}
+
+impl Compensated {
+    fn add(&mut self, x: f64) {
+        let sum = self.sum + x;
+        self.compensation += if self.sum.abs() >= x.abs() {
+            (self.sum - sum) + x
+        } else {
+            (x - sum) + self.sum
+        };
+        self.sum = sum;
+    }
+
+    fn total(&self) -> f64 {
+        self.sum + self.compensation
+    }
+}
+
+#[test]
+fn the_values_sum_to_the_pot_less_the_expected_rake() {
+    // Measured on the nine spots solved to 0.3% of the pot, with `--nocapture` printing the
+    // table: `v_0 + v_1` is within 4.2e-5 chips of `pot − E[rake]`, at most 1.9e-8 of the pot.
+    // That difference is the f32 rounding of the strategies, whose rows sum to 1 only to a few
+    // f32 ulps, so that the terminal probabilities sum to `M`, within 1.9e-8 of 1, and it is
+    // `pot · (M − 1)`. Against `pot · M − E[rake]` the difference is at most 6.9e-13 chips, or
+    // 6.7e-17 of the pot plus the stack, the size of the largest payoff: the rounding of the
+    // f64 sums alone. The bounds are about 5 and 150 times those.
+    println!(
+        "| Spot | Rake | Pot | v_0 + v_1 | E[rake] | v_0 + v_1 − (pot − E[rake]) | M − 1 | \
+         v_0 + v_1 − (pot · M − E[rake]) |"
+    );
+    println!("|---|---|---:|---:|---:|---:|---:|---:|");
+    for (spot, solution) in solved() {
+        let name = &spot.name;
+        let expected = expected_rake(solution.game(), solution.strategy());
+        let [v0, v1] = solution.values();
+        let pot = f64::from(spot.pot);
+        let sum = v0 + v1;
+        let difference = sum - (pot - expected.rake);
+        let tight = sum - expected.value_sum();
+        println!(
+            "| `{name}` | {} | {pot} | {sum:.9} | {:.9} | {difference:+.2e} | {:+.2e} | \
+             {tight:+.2e} |",
+            if is_raked(spot) {
+                "5%, cap 3bb"
+            } else {
+                "none"
+            },
+            expected.rake,
+            expected.probability - 1.0,
+        );
+
+        // Every terminal of the tree is listed once, and the probabilities sum to 1.
+        let terminals = solution
+            .tree()
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node, Node::Terminal { .. }))
+            .count();
+        assert_eq!(expected.terminals.len(), terminals, "{name}");
+        assert!(
+            (expected.probability - 1.0).abs() < 1e-7,
+            "{name}: the terminal probabilities sum to {}",
+            expected.probability
+        );
+        assert!(
+            expected
+                .terminals
+                .iter()
+                .all(|t| (0.0..=1.0).contains(&t.probability)),
+            "{name}"
+        );
+
+        // The rake: none on the rake-free spots; on the raked ones, some at every terminal, and
+        // in all no more than the cap.
+        if is_raked(spot) {
+            assert!(expected.terminals.iter().all(|t| t.rake > 0.0), "{name}");
+            assert!(expected.rake > 0.0, "{name}");
+            assert!(
+                expected.rake <= f64::from(spot.rake_cap) * expected.probability,
+                "{name}"
+            );
+        } else {
+            assert!(expected.terminals.iter().all(|t| t.rake == 0.0), "{name}");
+            assert_eq!(expected.rake, 0.0, "{name}");
+        }
+
+        // The issue's check, to the f32 rounding of the strategies, and the same at f64
+        // precision with the pot weighted by the probability of ending at all.
+        assert!(
+            difference.abs() < 1e-7 * pot,
+            "{name}: {sum} against {pot} − {}",
+            expected.rake
+        );
+        let scale = pot + f64::from(spot.effective_stack);
+        assert!(
+            tight.abs() < 1e-14 * scale,
+            "{name}: {sum} against {}",
+            expected.value_sum()
+        );
+    }
+}
+
+#[test]
+fn terminal_probabilities_are_the_sum_over_every_pair_of_hands() {
+    // The O(n²) double loop over the pairs of hands that share no card, with the reaches from
+    // `RiverGame::reach`, against the expected rake's card counting and its own walk. Measured,
+    // they agree within 4.5e-16 at every terminal of the nine solved spots.
+    let mut largest = 0.0f64;
+    for (spot, solution) in solved() {
+        let name = &spot.name;
+        let game = solution.game();
+        let expected = expected_rake(game, solution.strategy());
+        let (oop, ip) = (game.hands(Player::Oop), game.hands(Player::Ip));
+        let compatible: Vec<Vec<bool>> = oop
+            .combos()
+            .iter()
+            .map(|a| {
+                ip.combos()
+                    .iter()
+                    .map(|b| !a.cards().intersects(b.cards()))
+                    .collect()
+            })
+            .collect();
+        // Tens of thousands of terms: summed with compensation, so that the reference is
+        // accurate to a few ulps.
+        let pair_sum = |a: &[f64], b: &[f64]| -> f64 {
+            let mut sum = Compensated::default();
+            for (h, row) in compatible.iter().enumerate() {
+                for (o, &ok) in row.iter().enumerate() {
+                    if ok {
+                        sum.add(a[h] * b[o]);
+                    }
+                }
+            }
+            sum.total()
+        };
+        let total = pair_sum(oop.weights(), ip.weights());
+        let mut checked = 0;
+        for terminal in &expected.terminals {
+            assert_eq!(game.node(terminal.node as usize), PublicNode::Terminal);
+            let reach = solution.reach(terminal.node);
+            let weighted = [(oop, &reach[0]), (ip, &reach[1])].map(|(list, reach)| -> Vec<f64> {
+                list.weights()
+                    .iter()
+                    .zip(reach)
+                    .map(|(w, r)| w * r)
+                    .collect()
+            });
+            let probability = pair_sum(&weighted[0], &weighted[1]) / total;
+            let difference = (terminal.probability - probability).abs();
+            largest = largest.max(difference);
+            assert!(
+                difference < 5e-15,
+                "{name}, node {}: {} against {probability}",
+                terminal.node,
+                terminal.probability
+            );
+            checked += 1;
+        }
+        assert!(checked >= 4, "{name}");
+    }
+    println!("largest difference: {largest:e}");
+}
+
+#[test]
+fn raked_values_are_lower_than_rake_free_values_by_the_expected_rake() {
+    // The solved strategy of each spot, played in the same spot without rake: the tree and the
+    // hands are the same, and only the payoffs change. Each player's value can only go up, and
+    // together they go up by the expected rake. Measured, the gain differs from the expected
+    // rake by at most 1.2e-12 chips, and the rake-free values sum to `pot · M` within 1.9e-12:
+    // about 2.6e-16 of the pot plus the stack, the size of the largest payoff.
+    println!(
+        "| Spot | Values with the rake | Values without | Gained | Gained − E[rake] | \
+         Sum without − pot · M |"
+    );
+    println!("|---|---:|---:|---:|---:|---:|");
+    let mut raked = 0;
+    for (spot, solution) in solved() {
+        let name = &spot.name;
+        let mut free_spot = spot.clone();
+        free_spot.rake_percent = 0.0;
+        free_spot.rake_cap = 0;
+        let free = RiverGame::new(&free_spot).unwrap();
+        assert_eq!(free.tree(), solution.tree(), "{name}");
+        for player in [Player::Oop, Player::Ip] {
+            assert_eq!(free.hands(player), solution.hands(player), "{name}");
+        }
+        let without = vector_expected_values(&free, solution.strategy());
+        let with = solution.values();
+        let expected = expected_rake(solution.game(), solution.strategy());
+        let gained = (without[0] + without[1]) - (with[0] + with[1]);
+        let pot = f64::from(spot.pot);
+        let scale = pot + f64::from(spot.effective_stack);
+        let free_sum = without[0] + without[1];
+        println!(
+            "| `{name}` | {:.6}, {:.6} | {:.6}, {:.6} | {gained:.9} | {:+.2e} | {:+.2e} |",
+            with[0],
+            with[1],
+            without[0],
+            without[1],
+            gained - expected.rake,
+            free_sum - pot * expected.probability
+        );
+        assert!(
+            (gained - expected.rake).abs() < 1e-14 * scale,
+            "{name}: {gained} against {}",
+            expected.rake
+        );
+        // Without rake the values sum to the pot, weighted by the probability of ending.
+        assert!(
+            (free_sum - pot * expected.probability).abs() < 1e-14 * scale,
+            "{name}: {free_sum}"
+        );
+        if is_raked(spot) {
+            raked += 1;
+            for player in 0..2 {
+                assert!(without[player] > with[player], "{name}, player {player}");
+            }
+        } else {
+            assert_eq!(without, with, "{name}");
+        }
+    }
+    assert_eq!(raked, 4);
 }
 
 // ---------------------------------------------------------------------------------------------

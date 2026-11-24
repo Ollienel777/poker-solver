@@ -60,7 +60,7 @@
 //! [`VectorCfr`]: pk_cfr::VectorCfr
 
 use pk_cfr::{PublicGame, PublicNode, PublicProfile};
-use pk_game::{Chips, Node, Player, PostflopTree};
+use pk_game::{Chips, Node, Player, PostflopTree, Rake};
 
 use crate::hands::HandList;
 use crate::payoff::Payoff;
@@ -74,6 +74,7 @@ pub struct RiverGame {
     tree: PostflopTree,
     hands: BoardHands,
     pot: Chips,
+    rake: Rake,
     /// `Z`, the total weight of the pairs of hands that can be dealt.
     pair_weight: f64,
     /// [`PublicGame::deal`] for OOP, then IP.
@@ -138,6 +139,7 @@ impl RiverGame {
             tree,
             hands,
             pot: spot.pot,
+            rake,
             pair_weight,
             deal,
             payoffs,
@@ -162,6 +164,11 @@ impl RiverGame {
     /// The pot at the root, in chips.
     pub fn pot(&self) -> Chips {
         self.pot
+    }
+
+    /// The spot's rake, from which the terminal payoffs were computed.
+    pub fn rake(&self) -> &Rake {
+        &self.rake
     }
 
     /// `Z`, the sum of `w_0(h) · w_1(o)` over the pairs of hands that share no card.
