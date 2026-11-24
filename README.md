@@ -7,7 +7,7 @@ A personal-use No-Limit Hold'em cash-game solver in Rust.
 
 There are four configs: 100bb and 200bb, each with and without a straddle and ante.
 
-**Status: M1 (Foundations) is built.** `pk-core` has cards, ranges, the hand evaluator and equity, and `pk-game` has `GameConfig`, configs A to D and the action order. The other crates are stubs. Next is M2, the CFR core validated on Leduc. The backlog is in [Issues](https://github.com/Ollienel777/poker-solver/issues), grouped into [milestones](https://github.com/Ollienel777/poker-solver/milestones) M1 to M10.
+**Status: M2 (CFR on toy games) is built.** `pk-core` has cards, ranges, the hand evaluator and equity. `pk-game` has `GameConfig`, configs A to D and the action order. `pk-cfr` has regret matching with the CFR, CFR+, linear and discounted schedules, tabular CFR, best response, external-sampling MCCFR and vector-form CFR, all validated on Kuhn and Leduc. The other crates are stubs. Next is M3, the river solver. The backlog is in [Issues](https://github.com/Ollienel777/poker-solver/issues), grouped into [milestones](https://github.com/Ollienel777/poker-solver/milestones) M1 to M10.
 
 ## Docs
 

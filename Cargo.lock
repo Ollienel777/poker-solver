@@ -462,6 +462,9 @@ version = "0.1.0"
 [[package]]
 name = "pk-cfr"
 version = "0.1.0"
+dependencies = [
+ "rand_chacha",
+]
 
 [[package]]
 name = "pk-cli"

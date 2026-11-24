@@ -138,6 +138,7 @@ MCCFR over the abstracted full game, two players. Gate: plausible BTN open / BB 
 | [#58](https://github.com/Ollienel777/poker-solver/issues/58) | Decide: how 3+-way pots are played inside the preflop solve | decision | none |
 | [#59](https://github.com/Ollienel777/poker-solver/issues/59) | game: preflop tree builder | build | [#56](https://github.com/Ollienel777/poker-solver/issues/56), [#57](https://github.com/Ollienel777/poker-solver/issues/57) |
 | [#60](https://github.com/Ollienel777/poker-solver/issues/60) | preflop: abstracted full game and information-set layout | build | [#59](https://github.com/Ollienel777/poker-solver/issues/59), [#58](https://github.com/Ollienel777/poker-solver/issues/58) |
+| [#84](https://github.com/Ollienel777/poker-solver/issues/84) | preflop: carry the M2 review notes on MCCFR at scale into the design | build | [#20](https://github.com/Ollienel777/poker-solver/issues/20) |
 | [#61](https://github.com/Ollienel777/poker-solver/issues/61) | preflop: external-sampling MCCFR solve loop | build | [#60](https://github.com/Ollienel777/poker-solver/issues/60) |
 | [#62](https://github.com/Ollienel777/poker-solver/issues/62) | preflop: checkpoint and resume | build | [#61](https://github.com/Ollienel777/poker-solver/issues/61) |
 | [#63](https://github.com/Ollienel777/poker-solver/issues/63) | preflop: strategy export and convergence diagnostics | build | [#61](https://github.com/Ollienel777/poker-solver/issues/61) |
