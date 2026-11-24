@@ -159,17 +159,26 @@ Button (Mississippi) straddles are not modelled (DECISIONS D15). They can't be d
 
 ## cfr
 
+Each module's doc comment is the exact specification of what it computes. This section is the map.
+
 - **`regret`.** Regret matching and regret matching+ over `[actions × hands]` slices, with these schedules:
   - vanilla CFR
   - CFR+
   - linear CFR
   - discounted CFR with α, β, γ, defaulting to 1.5, 0 and 2 as in Brown and Sandholm (2019)
 
-  These are pure functions that every solver shares.
-- **`tabular`.** A `Game` trait for small games (Kuhn, Leduc), with full-traversal CFR, external-sampling MCCFR and exact best response.
-- **`vector`.** Helpers for public-tree CFR. Each player node holds per-hand arrays. A traversal passes the opponent's reach vector down and returns per-hand counterfactual values.
+  These are pure functions that every solver shares. Iterations count from 1, and the discount of iteration `t` is applied after that iteration's regret and strategy have been added (DECISIONS P18).
+- **`tabular`.** A `Game` trait for small games with any number of players, and `Cfr`, which walks the whole tree on every iteration. Players update in turn within an iteration, player 0 first. `Profile` holds a strategy per information set, and `expected_values` gives each player's value under one.
+- **`best_response`.** The exact best response, chosen per information set, and exploitability for two-player zero-sum games: the average of the two best-response values.
+- **`kuhn` and `leduc`.** The two test games. Leduc treats its six cards as distinct, which gives 936 information sets (DECISIONS P21).
+- **`mccfr`.** External-sampling MCCFR over the same `Game` trait, seeded and reproducible. The average strategy accumulates in a separate pass that samples the player's own actions, and discounts are applied lazily when an information set is next touched (DECISIONS P19).
+- **`vector`.** `PublicGame` is the trait a game implements for public-tree CFR: the tree, the deal, the hands a chance outcome rules out, and the values at a terminal given the opponent's reach. `VectorCfr` is the solver over it. Each player node holds per-hand arrays, and a traversal passes the opponent's reach vector down and returns per-hand counterfactual values. `public_leduc` puts Leduc on the trait, and `vector_best_response` gives best response and exploitability in the same form.
 
 The preflop solver samples private cards, so its regret updates are scalar per information set. The postflop solver needs the vector form so that range-against-range terminal evaluation costs O(n) instead of O(n²). Both forms are validated on Leduc in M2, before either poker solver exists.
+
+**How the vector form is held to the scalar one.** From the same stored state, one iteration of each agrees within one `f32` rounding under every schedule. Run side by side, vanilla CFR and DCFR match exactly, while CFR+ and linear CFR part after tens of iterations, because those two schedules amplify a one-ulp difference in a single regret (DECISIONS P20). Any change that reorders a sum, such as a faster terminal sweep or a threaded reduction, should therefore be checked one iteration at a time from the same state, not by comparing long runs.
+
+**Precision.** With `f32` storage, CFR+ and DCFR stop improving on Leduc near an exploitability of 1e-5 chips. That is far below the postflop target, but it is the floor to expect before any 16-bit storage.
 
 ## postflop
 
