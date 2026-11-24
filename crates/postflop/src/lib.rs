@@ -7,10 +7,14 @@
 //! solve loop, and [`exploitability`](mod@exploitability) measures how far a strategy is from
 //! an equilibrium. [`expected_rake`](mod@expected_rake) works out the rake a strategy pays,
 //! apart from the payoffs, and so what the players' values must sum to.
+//!
+//! [`invariants`] checks a solution against the invariants every solve must keep, and in a
+//! build with debug assertions every solve checks the solution it returns.
 
 pub mod expected_rake;
 pub mod exploitability;
 pub mod hands;
+pub mod invariants;
 pub mod payoff;
 pub mod river;
 pub mod solve;
@@ -20,6 +24,7 @@ pub mod terminal;
 pub use expected_rake::{ExpectedRake, TerminalOutcome, expected_rake};
 pub use exploitability::{Exploitability, exploitability};
 pub use hands::HandList;
+pub use invariants::{Invariant, Report, Violation, check_solution};
 pub use payoff::{Payoff, ShowdownPayoff, fold_payoffs, rake_on, showdown_payoff};
 pub use river::RiverGame;
 pub use solve::{Progress, Solution, SolveError, SolveOptions, StopReason, solve};

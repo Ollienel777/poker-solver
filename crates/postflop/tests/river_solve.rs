@@ -7,6 +7,9 @@
 //! none of the code of the payoffs and the expected values it is compared with. Here it is
 //! also checked against the sum over every pair of hands, and against the same solution's
 //! values in the rake-free game.
+//!
+//! Every solution here is checked against the invariants of `pk_postflop::invariants`, in a
+//! release build too, where the solve does not check them itself.
 
 use std::cell::Cell;
 use std::fs;
@@ -17,7 +20,8 @@ use std::time::{Duration, Instant};
 use pk_cfr::{Dcfr, PublicGame, PublicNode, Schedule, VectorCfr, vector_expected_values};
 use pk_game::{Node, Player};
 use pk_postflop::{
-    RiverGame, Solution, SolveOptions, Spot, StopReason, expected_rake, exploitability, solve,
+    RiverGame, Solution, SolveOptions, Spot, StopReason, check_solution, expected_rake,
+    exploitability, solve,
 };
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -49,10 +53,18 @@ fn solved() -> &'static [(Spot, Solution)] {
             .into_iter()
             .map(|spot| {
                 let solution = solve(&spot, &SolveOptions::default(), |_| {}).unwrap();
+                assert_sound(&solution, &spot.name);
                 (spot, solution)
             })
             .collect()
     })
+}
+
+/// Asserts that a solution keeps every invariant. The solve checks it too in a build with debug
+/// assertions, but not in a release build, where the slow tests run.
+fn assert_sound(solution: &Solution, what: &str) {
+    let report = check_solution(solution);
+    assert!(report.is_valid(), "{what}: {report}");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -80,6 +92,7 @@ fn toy(iterations: u64) -> Toy {
         ..SolveOptions::default()
     };
     let solution = solve(&spot, &options, |_| {}).unwrap();
+    assert_sound(&solution, "the toy game");
     let root = 0;
     let Node::Player {
         actions, children, ..
@@ -175,6 +188,7 @@ fn every_river_spot_solves_below_the_target() {
             ..SolveOptions::default()
         };
         let uniform = solve(spot, &start, |_| {}).unwrap();
+        assert_sound(&uniform, name);
         assert!(uniform.exploitability().percent_of_pot > 3.0, "{name}");
     }
 }
@@ -515,6 +529,7 @@ fn measure(spot: &Spot, cap: u64) -> Row {
         }
     })
     .unwrap();
+    assert_sound(&curve, &spot.name);
     let stays = last_above.map(|t| (t < cap).then_some(t + 1));
 
     // Iterations alone, with the terminal evaluations timed.
@@ -543,6 +558,7 @@ fn measure(spot: &Spot, cap: u64) -> Row {
             ..SolveOptions::default()
         };
         let solution = solve(spot, &options, |_| {}).unwrap();
+        assert_sound(&solution, &spot.name);
         (solution.iterations(), solution.elapsed().as_secs_f64())
     };
     Row {

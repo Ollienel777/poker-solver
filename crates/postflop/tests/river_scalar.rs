@@ -18,6 +18,8 @@
 //! every pair at every terminal, each player's value and best-response value under several
 //! profiles, and every stored value after one iteration from the same stored state. The scalar
 //! values also sum to what [`expected_rake`] says they must.
+//!
+//! Every solve here is checked with [`check_solution`], in a release build too.
 
 use pk_cfr::{
     Cfr, Dcfr, Game, Node as ScalarNode, Profile, PublicGame, PublicNode, PublicProfile, Schedule,
@@ -25,7 +27,7 @@ use pk_cfr::{
 };
 use pk_core::{CardSet, Combo, evaluate};
 use pk_game::{Chips, Node, Outcome, Player, PostflopTree};
-use pk_postflop::{RiverGame, Spot, expected_rake, exploitability};
+use pk_postflop::{RiverGame, Spot, check_solution, expected_rake, exploitability};
 use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::{Rng, SeedableRng};
 
@@ -589,6 +591,8 @@ fn a_solved_test_spot_has_the_exploitability_the_scalar_game_measures() {
         let spot = Spot::load(path).unwrap();
         let solution =
             pk_postflop::solve(&spot, &pk_postflop::SolveOptions::default(), |_| {}).unwrap();
+        let report = check_solution(&solution);
+        assert!(report.is_valid(), "{name}: {report}");
         let scalar = ScalarRiver::new(&spot);
         let profile = scalar_profile(solution.game(), solution.strategy());
         let values = expected_values(&scalar, &profile);
@@ -617,6 +621,31 @@ fn a_solved_test_spot_has_the_exploitability_the_scalar_game_measures() {
             responses[0] - measured.best_responses[0],
             responses[1] - measured.best_responses[1]
         );
+    }
+}
+
+#[test]
+fn the_scalar_check_spots_solve_to_solutions_that_keep_the_invariants() {
+    // The two spots built here, solved to 0.3% of the pot, break no invariant, and the value
+    // sum the check expects is the one the scalar game gives the solved strategy. Measured, it
+    // agrees within 3.5e-13 chips.
+    for spot in spots() {
+        let name = &spot.name;
+        let solution =
+            pk_postflop::solve(&spot, &pk_postflop::SolveOptions::default(), |_| {}).unwrap();
+        let report = check_solution(&solution);
+        assert!(report.is_valid(), "{name}: {report}");
+        let value_sum = report.value_sum.expect("the value sum is checked");
+        assert!(value_sum.rake > 0.0, "{name}");
+        let scalar = ScalarRiver::new(&spot);
+        let profile = scalar_profile(solution.game(), solution.strategy());
+        let values = expected_values(&scalar, &profile);
+        let difference = values[0] + values[1] - value_sum.expected();
+        assert!(
+            difference.abs() < 1e-9,
+            "{name}: {values:?} against {value_sum:?}"
+        );
+        println!("{name}: the scalar values sum to {difference:+e} from the expected sum");
     }
 }
 

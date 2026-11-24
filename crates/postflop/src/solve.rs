@@ -28,6 +28,9 @@
 //! does not change the rule reported: a solve stopped by a cap reports the cap, even if the
 //! measurement turns out to be at or below the target.
 //!
+//! In a build with debug assertions, which the tests are, the solve then checks the solution
+//! against its [invariants](crate::invariants) and panics with the report if it breaks any.
+//!
 //! # Progress
 //!
 //! The callback is called once per measurement, in iteration order, with a [`Progress`]: every
@@ -59,6 +62,7 @@ use thiserror::Error;
 
 use crate::exploitability::{Exploitability, exploitability};
 use crate::hands::HandList;
+use crate::invariants::debug_assert_valid;
 use crate::river::RiverGame;
 use crate::spot::{Spot, SpotError};
 
@@ -204,6 +208,7 @@ impl Solution {
     }
 
     /// The time the solve took, from the call until it returned, the last measurement included.
+    /// The check of the solution that a build with debug assertions makes is not counted.
     pub fn elapsed(&self) -> Duration {
         self.elapsed
     }
@@ -303,14 +308,17 @@ pub fn solve(
         }
         _ => measure(&solver),
     };
-    Ok(Solution {
+    let solution = Solution {
         game: solver.game().clone(),
         strategy,
         stop,
         iterations: measured.iterations,
         elapsed: start.elapsed(),
         exploitability: measured.exploitability,
-    })
+    };
+    // A debug assertion, which the elapsed time does not count.
+    debug_assert_valid(&solution);
+    Ok(solution)
 }
 
 #[cfg(test)]
