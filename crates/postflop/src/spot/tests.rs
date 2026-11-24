@@ -236,8 +236,8 @@ fn writing_then_reading_gives_an_equal_spot() {
                 max_raises: u32::MAX,
                 allin_threshold: 0.67,
                 river: Some(street(
-                    &[0.1 + 0.2, 1e-7, 0.33, 2.0 / 3.0, 1e21],
-                    &[1.0 + f64::EPSILON, 2.5, 1e300],
+                    &[0.1 + 0.2, 1e-7, 0.33, 2.0 / 3.0, MAX_BET_FRACTION],
+                    &[1.0 + f64::EPSILON, 2.5, MAX_RAISE_MULTIPLE],
                     true,
                 )),
                 ..base.tree.clone()
@@ -327,7 +327,7 @@ fn any_bet() -> impl Strategy<Value = f64> {
         4 => 0.01f64..5.0,
         1 => Just(0.33),
         1 => Just(1e-7),
-        1 => Just(1e21),
+        1 => Just(MAX_BET_FRACTION),
         1 => Just(0.1 + 0.2),
     ]
 }
@@ -337,7 +337,7 @@ fn any_raise() -> impl Strategy<Value = f64> {
         4 => (1.0f64..10.0).prop_map(|multiple| multiple + 0.5),
         1 => Just(1.0 + f64::EPSILON),
         1 => Just(2.5),
-        1 => Just(1e300),
+        1 => Just(MAX_RAISE_MULTIPLE),
     ]
 }
 
@@ -883,6 +883,18 @@ fn the_sizes_are_checked() {
             "bets = [nan]",
             "tree.river.bets",
             "has NaN",
+        ),
+        (
+            "bets = [0.5, 1.0]",
+            "bets = [33.0, 75.0]",
+            "tree.river.bets",
+            "has 33",
+        ),
+        (
+            "raises = [3.0]",
+            "raises = [250.0]",
+            "tree.river.raises",
+            "has 250",
         ),
         (
             "raises = [3.0]",

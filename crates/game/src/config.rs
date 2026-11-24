@@ -239,8 +239,21 @@ pub(crate) fn to_chips(field: &str, bb: f64) -> Result<Chips, Invalid> {
     Ok(chips.round() as Chips)
 }
 
+/// The largest bet size, as a fraction of the pot. A larger number is almost certainly a percent
+/// typed where a fraction belongs, such as 33 for 0.33.
+pub const MAX_BET_FRACTION: f64 = 10.0;
+
+/// The largest raise size, as a multiple of the bet or blind it raises. A larger number is
+/// almost certainly a percent typed where a multiple belongs, such as 250 for 2.5.
+pub const MAX_RAISE_MULTIPLE: f64 = 20.0;
+
 fn check_multiple(field: &str, value: f64) -> Result<(), Invalid> {
-    if value.is_finite() && value > 1.0 {
+    if value > MAX_RAISE_MULTIPLE {
+        let reason = format!(
+            "is {value}; a raise size is a multiple, at most {MAX_RAISE_MULTIPLE} (write 2.5, not 250)"
+        );
+        Err(Invalid::new(field, reason))
+    } else if value.is_finite() && value > 1.0 {
         Ok(())
     } else {
         Err(Invalid::new(
@@ -263,6 +276,12 @@ fn check_street(prefix: &str, street: &StreetSizing) -> Result<(), Invalid> {
         .find(|bet| !(bet.is_finite() && **bet > 0.0))
     {
         let reason = format!("has {bet}; a bet size must be a positive fraction of the pot");
+        return Err(Invalid::new(format!("{prefix}.bets"), reason));
+    }
+    if let Some(bet) = street.bets.iter().find(|bet| **bet > MAX_BET_FRACTION) {
+        let reason = format!(
+            "has {bet}; a bet size is a fraction of the pot, at most {MAX_BET_FRACTION} (write 0.33 for 33%)"
+        );
         return Err(Invalid::new(format!("{prefix}.bets"), reason));
     }
     for &raise in &street.raises {
@@ -645,6 +664,19 @@ mod tests {
             "postflop.river.raises"
         );
         assert_eq!(rejected_field("open = 2.5", "open = 0.5"), "preflop.open");
+        // Percents typed where a fraction or a multiple belongs.
+        assert_eq!(
+            rejected_field(flop, "flop = { bets = [33.0, 75.0]"),
+            "postflop.flop.bets"
+        );
+        assert_eq!(
+            rejected_field(
+                "raises = [3.0], allin = true",
+                "raises = [250.0], allin = true"
+            ),
+            "postflop.river.raises"
+        );
+        assert_eq!(rejected_field("open = 2.5", "open = 250.0"), "preflop.open");
         assert_eq!(
             rejected_field("fourbet = 2.3", "fourbet = 1.0"),
             "preflop.fourbet"

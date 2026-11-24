@@ -87,8 +87,8 @@ use std::path::{Path, PathBuf};
 
 use pk_core::{CardSet, Range};
 use pk_game::{
-    CHIPS_PER_BB, Chips, Player, PostflopSizing, PostflopTree, Rake, Street, StreetSizing,
-    TreeError, TreeSpec,
+    CHIPS_PER_BB, Chips, MAX_BET_FRACTION, MAX_RAISE_MULTIPLE, Player, PostflopSizing,
+    PostflopTree, Rake, Street, StreetSizing, TreeError, TreeSpec,
 };
 use thiserror::Error;
 use toml::{Table, Value};
@@ -565,6 +565,22 @@ fn check_street(field: &str, sizing: &StreetSizing) -> Result<(), SpotError> {
     {
         let reason = format!("has {bet}; a bet size must be a positive fraction of the pot");
         return Err(invalid(format!("{field}.bets"), reason));
+    }
+    if let Some(bet) = sizing.bets.iter().find(|bet| **bet > MAX_BET_FRACTION) {
+        let reason = format!(
+            "has {bet}; a bet size is a fraction of the pot, at most {MAX_BET_FRACTION} (write 0.33 for 33%)"
+        );
+        return Err(invalid(format!("{field}.bets"), reason));
+    }
+    if let Some(raise) = sizing
+        .raises
+        .iter()
+        .find(|raise| **raise > MAX_RAISE_MULTIPLE)
+    {
+        let reason = format!(
+            "has {raise}; a raise size is a multiple, at most {MAX_RAISE_MULTIPLE} (write 2.5, not 250)"
+        );
+        return Err(invalid(format!("{field}.raises"), reason));
     }
     if let Some(raise) = sizing
         .raises

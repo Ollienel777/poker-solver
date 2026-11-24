@@ -12,8 +12,8 @@ pub mod rules;
 pub mod tree;
 
 pub use config::{
-    CHIPS_PER_BB, Chips, ConfigError, ForcedBet, ForcedBetKind, GameConfig, PostflopSizing,
-    PreflopSizing, Rake, StreetSizing,
+    CHIPS_PER_BB, Chips, ConfigError, ForcedBet, ForcedBetKind, GameConfig, MAX_BET_FRACTION,
+    MAX_RAISE_MULTIPLE, PostflopSizing, PreflopSizing, Rake, StreetSizing,
 };
 pub use position::{ParsePositionError, Position};
 pub use range_file::{PlayerRange, RANGE_FILE_FORMAT, RangeFile, RangeFileError};

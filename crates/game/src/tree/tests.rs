@@ -947,7 +947,7 @@ fn inputs_that_make_no_sense_are_rejected() {
     let just_fits = TreeSpec {
         pot: 1,
         stack: Chips::MAX / 2,
-        sizing: PostflopSizing::uniform(street(&[100.0], &[], false), 0, 1.0),
+        sizing: PostflopSizing::uniform(street(&[10.0], &[], false), 0, 1.0),
         ..good.clone()
     };
     assert!(PostflopTree::build(just_fits).is_ok());
@@ -963,6 +963,18 @@ fn inputs_that_make_no_sense_are_rejected() {
         bad.sizing.allin_threshold = threshold;
         assert_eq!(rejected_field(bad), "sizing.allin_threshold");
     }
+
+    // Percents typed where a fraction or a multiple belongs.
+    let mut percent_bets = good.clone();
+    percent_bets.sizing.river.bets = vec![33.0, 75.0];
+    assert_eq!(rejected_field(percent_bets), "sizing.river.bets");
+    let mut percent_raise = good.clone();
+    percent_raise.sizing.flop.raises = vec![250.0];
+    assert_eq!(rejected_field(percent_raise), "sizing.flop.raises");
+    let mut largest = good.clone();
+    largest.sizing.river.bets = vec![crate::MAX_BET_FRACTION];
+    largest.sizing.river.raises = vec![crate::MAX_RAISE_MULTIPLE];
+    assert!(PostflopTree::build(largest).is_ok());
 }
 
 #[test]

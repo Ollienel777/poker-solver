@@ -134,7 +134,7 @@ Preflop sizes are multiples of the **effective blind**, which is the largest liv
 
 In configs C and D the pot holds 7.5bb before the first action: 0.5 + 1 + 2 from the blinds and straddle, and 8 × 0.5 from the antes. Every seat is left with 99.5bb (C) or 199.5bb (D) to bet.
 
-The loader rejects configs with fewer than 2 or more than 9 players, unknown positions, amounts that are not whole chips, stacks smaller than the forced bets, forced bets that leave unequal live stacks, empty bet lists, or an all-in threshold that is not more than 0 and at most 1. Every error names the field.
+The loader rejects configs with fewer than 2 or more than 9 players, unknown positions, amounts that are not whole chips, stacks smaller than the forced bets, forced bets that leave unequal live stacks, empty bet lists, a bet size above 10 pots or a raise size above 20 times (almost certainly a percent typed where a fraction or a multiple belongs), or an all-in threshold that is not more than 0 and at most 1. Every error names the field.
 
 ### Positions and action order
 
@@ -230,7 +230,7 @@ M3 builds this for river spots; flop and turn spots, with their chance nodes, co
 | `max_time` | none | the time cap, counted from the call |
 | `check_every` | 10 | measure exploitability after every this many iterations |
 
-The target is checked after each measurement, and the caps before each iteration. When several rules hold at once, the target wins, then the iteration cap, then the time cap. If the solve stops after an iteration it did not measure, it measures once more. So the `progress` callback receives one `Progress` (iterations, elapsed time, exploitability) per measurement, in order, and its last call matches the solution. The library never prints. Measuring only reads the average strategy, so the strategy after `t` iterations is bit-identical whatever the measurement interval and caps.
+The target is checked after each measurement, and the caps before each iteration. When several rules hold at once, the target wins, then the iteration cap, then the time cap. If the solve stops after an iteration it did not measure, it measures once more. That last measurement does not change the rule reported: a solve stopped by a cap reports the cap even when the measurement turns out to be at or below the target, so compare the exploitability with the target to know whether it was met. The `progress` callback receives one `Progress` (iterations, elapsed time, exploitability) per measurement, in order, and its last call matches the solution. The library never prints. Measuring only reads the average strategy, so the strategy after `t` iterations is bit-identical whatever the measurement interval and caps.
 
 The `Solution` lives in memory; the solution file comes in M5. It holds the stopping rule that ended the solve, the iterations, the elapsed time, the `Exploitability` (each player's value, best-response value, and the exploitability in chips and as a percent of the pot) and the average strategy. Read access covers each hand's action probabilities at each node, and the reach and both read-outs above: hand weights and action frequencies, and range-view weights and frequencies.
 
