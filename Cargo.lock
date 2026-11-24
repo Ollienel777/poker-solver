@@ -484,6 +484,8 @@ dependencies = [
 name = "pk-game"
 version = "0.1.0"
 dependencies = [
+ "pk-core",
+ "proptest",
  "serde",
  "thiserror",
  "toml",
@@ -492,6 +494,18 @@ dependencies = [
 [[package]]
 name = "pk-postflop"
 version = "0.1.0"
+dependencies = [
+ "criterion",
+ "pk-cfr",
+ "pk-core",
+ "pk-game",
+ "proptest",
+ "rand_chacha",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+]
 
 [[package]]
 name = "pk-preflop"

@@ -23,4 +23,7 @@ pub use regret::{
 };
 pub use tabular::{Cfr, Game, Node, Profile, expected_values};
 pub use vector::{PublicGame, PublicNode, PublicProfile, VectorCfr};
-pub use vector_best_response::{VectorBestResponse, vector_best_response, vector_exploitability};
+pub use vector_best_response::{
+    VectorBestResponse, VectorExpectedValue, vector_best_response, vector_expected_value,
+    vector_expected_values, vector_exploitability,
+};

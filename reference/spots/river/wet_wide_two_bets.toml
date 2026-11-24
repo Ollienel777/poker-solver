@@ -1,0 +1,17 @@
+format = 1
+name = "wet_wide_two_bets"
+description = "Illustrative ranges, written for this fixture: a wide single-raised pot on a wet board, BTN (IP) against BB (OOP). The flop 9s 8s 6h was bet and called and the turn Td checked through; the river 2s completes the flush, and any 7 or QJ makes a straight. Both ranges hold flushes, straights, two pair, pairs and missed draws. Two bet sizes, a third and three quarters of the pot, and one raise to 2.5x. Rake-free."
+board = "Td9s8s6h2s"
+pot_bb = 20.0
+effective_stack_bb = 80.0
+oop_range = "77,A9s,A7s,A2s-A5s,K9s,Q9s+,J9s+,J7s,T7s+,96s+,86s+,75s+,64s+,JTo,T9o,T7o,97o+,87o,76o,TT-JJ:0.5,55:0.5,A8s:0.5,A6s:0.5,54s:0.5,A9o:0.5,K9o:0.5,QJo:0.5,Q9o:0.5,J7o:0.5,86o:0.5,75o:0.5,88-99:0.25,66:0.25"
+ip_range = "77,55,A8s+,A3s-A5s,K8s+,Q9s+,J9s,T9s,98s,65s,54s,AQo+,A9o,TT-QQ:0.5,33-44:0.5,Q8s:0.5,JTs:0.5,J8s:0.5,87s:0.5,76s:0.5,KQo:0.5,K9o:0.5,T9o:0.5,98o:0.5,KK:0.25"
+
+[rake]
+percent = 0.0
+cap_bb = 0.0
+
+[tree]
+max_raises = 1
+allin_threshold = 1.0
+river = { bets = [0.33, 0.75], raises = [2.5], allin = false }

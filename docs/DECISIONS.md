@@ -27,18 +27,20 @@ When an open question is answered, move it to Decided with the date, update any 
 | D13 | All four configs are 8-handed, with positions UTG, UTG1, LJ, HJ, CO, BTN, SB, BB | Answered 2026-11-23, [#2](https://github.com/Ollienel777/poker-solver/issues/2) |
 | D14 | Configs C and D have an ante of 0.5bb from every seat, which is 4bb of dead money | Answered 2026-11-23, [#3](https://github.com/Ollienel777/poker-solver/issues/3) |
 | D15 | Configs C and D have a 2bb live straddle from UTG, posted every hand. Button straddles are not modelled | Answered 2026-11-23, [#4](https://github.com/Ollienel777/poker-solver/issues/4) |
-| D16 | Rake is 5% of the pot with no flop no drop. The cap is 3 times the effective blind: 3bb in A and B, 6bb in C and D | Answered 2026-11-23, [#5](https://github.com/Ollienel777/poker-solver/issues/5) |
+| D16 | Rake is 5% of the pot with no flop no drop, capped at 6bb in all four configs | Answered 2026-11-23, [#5](https://github.com/Ollienel777/poker-solver/issues/5); the cap in A and B confirmed 2026-11-24 |
+| D17 | A local solve may use at most 10 GB of memory. The dev machine is an AMD Ryzen 7 7730U with 16 logical processors, 16 GB of RAM and about 390 GB free on a 953 GB disk | Answered 2026-11-24, [#23](https://github.com/Ollienel777/poker-solver/issues/23) |
+| D18 | The reference solver is postflop-solver (AGPL-3.0-or-later), pinned at commit 9d1509f. It is run through `postflop-ref`, a small wrapper program kept in a repository of its own under the same licence, which reads a spot file and writes a solution dump. No code of either is in this repository | Answered 2026-11-24, [#24](https://github.com/Ollienel777/poker-solver/issues/24) |
+| D19 | The M2 gate's check of the vector form against scalar CFR is read as P20 states it | Answered 2026-11-24, [#22](https://github.com/Ollienel777/poker-solver/issues/22) |
+| D20 | The M3 gate compares our solver with the reference with both run to 0.03% of the pot. Each strategy must be under 0.3% of the pot exploitable as our code measures it, each action's frequency over the range within 2 points at every node reached more than 1% of the time, and each player's value within 0.2% of the pot. At the one node the toy game's solution leaves free, IP's after a check, each solver is held to the analytical bound, a bet at most 2/3 of the time, in place of the frequency check | Answered 2026-11-24, after the first comparison had been run under the tolerance as proposed, [#34](https://github.com/Ollienel777/poker-solver/issues/34) |
 
 Notes on the 2026-11-23 answers:
 
 - **D13 raises the preflop cost.** The brief's estimates assumed 6-max, and it puts 8 players at 3 to 5 times the preflop cost. See the risk list in [ROADMAP.md](ROADMAP.md#risks).
 - **D14 and D15 together** put 7.5bb in the pot before the first action in C and D: 0.5 + 1 + 2 from the blinds and straddle, and 4 from the antes.
-- **D16's cap for A and B is a reading of the answer.** The answer was "capped at 6bb (x3 straddle)". That is recorded as 3 times the effective blind, which gives 3bb where there is no straddle. If A and B should also be 6bb, change `cap_bb` in those two configs.
+- **D16's cap is 6bb in every config.** The answer was "capped at 6bb (x3 straddle)". It was first recorded as 3 times the effective blind, which gave 3bb in A and B, and on 2026-11-24 it was confirmed as 6bb there too. The raked river test spots keep a cap of 3bb of their own, which binds in more of their pots.
 - **D16 replaces the brief's "zero rake for validation".** Test spots set their own rake, so the first reference comparisons can still be rake-free.
 
 ## Proposed
-
-P15 to P17 are taken by milestone M3.
 
 | ID | Proposal | Why |
 | --- | --- | --- |
@@ -56,10 +58,14 @@ P15 to P17 are taken by milestone M3.
 | P12 | The straddler keeps the position name UTG | Formation names stay the same across configs |
 | P13 | Packages are prefixed `pk-` | A crate named `core` collides with Rust's built-in `core` |
 | P14 | Each milestone has one gate issue holding its acceptance tests | Makes the brief's "tests pass before moving on" rule visible in the tracker |
+| P15 | `[postflop]` has two table-level fields that apply to every street. `max_raises` caps the raises per street after the opening bet (0 means none). `allin_threshold`, more than 0 and at most 1, turns into all-in a bet or raise that would commit more than that fraction of the effective stack. Configs A to D set 3 and 0.67 | Issue [#25](https://github.com/Ollienel777/poker-solver/issues/25) names both rules, the schema had no field for either, and reference solvers expose both knobs |
+| P16 | The range-file format lives in `pk-game`, in `pk_game::range_file`, not in `pk-core` as first planned | A range file needs both `Range` and `Position`. `Position` is in `pk-game`, which depends on `pk-core`, so only `pk-game` can see both |
+| P17 | Postflop exploitability is the average gain from deviating, `((BR_0 − v_0) + (BR_1 − v_1)) / 2`, where `v_i` is player `i`'s expected value when both play the strategy and `BR_i` its value when it best-responds. Values are in chips per hand dealt, with the deal normalised so that the weights of all the pairs of hands that can be held together sum to 1, and the result is reported as a percent of the pot at the root | Payoffs count from the start of the tree, so the two values sum to the pot minus the expected rake. The game is constant-sum only without rake, since a rake grows with the pot up to its cap. `(BR_0 + BR_1) / 2` would be about half the pot at an equilibrium. In a zero-sum game the two definitions agree |
 | P18 | One CFR iteration is specified exactly in the `pk_cfr::regret` and `pk_cfr::tabular` module docs. Iterations count from 1. Players update in turn within an iteration, player 0 first. The discount of iteration `t` is applied after that iteration's regret and strategy are added. Values are computed in `f64` and rounded to `f32` only when stored | CFR+ and DCFR are defined with alternating updates, and one written specification is what lets the vector form and the postflop solver reproduce the scalar solver |
 | P19 | MCCFR accumulates the average strategy in a separate pass that samples the player's own actions, and applies discounts lazily from a last-update stamp per information set | Adding the strategy at sampled opponent nodes also weights by the other opponents' reach once there are three or more players. Lazy discounting is exact and never walks every information set |
 | P20 | The vector form is held to the scalar solver one iteration at a time from the same stored state, under every schedule. Side-by-side runs are required to match only under vanilla CFR and DCFR on Leduc | CFR+, linear CFR and DCFR can all grow a one-ulp `f32` difference past 1e-6 within tens of iterations, so two correct solvers that sum in different orders can part ways. On Leduc that happens under CFR+ and linear CFR after about 10 and 130 iterations. Measured in [#21](https://github.com/Ollienel777/poker-solver/issues/21) |
 | P21 | Leduc treats its six cards as distinct, which gives 936 information sets | The vector form keeps one entry per private card, so the scalar game is a one-to-one target and exercises card removal the way hold'em will |
+| P22 | A node's strategy over a range has two read-outs. `range_view_frequencies` weighs each hand by the player's own range weight and reach, and is what comparisons and range views use. `action_frequencies` also weighs by how much of the opponent's range each hand leaves possible, and is the probability of the action at the node | The two differ by up to 8.7 percentage points on the river test spots. Other solvers' range views use the first, and a comparison must use one weighting on both sides. Found by the review of [#85](https://github.com/Ollienel777/poker-solver/pull/85) |
 
 ## Open
 
@@ -67,8 +73,6 @@ The M1 questions are answered, so `GameConfig` ([#12](https://github.com/Olliene
 
 | Question | Default until answered | Blocks | Issue |
 | --- | --- | --- | --- |
-| Dev machine specs | none | Local test sizes, memory limit | [#23](https://github.com/Ollienel777/poker-solver/issues/23) |
-| Reference solver | postflop-solver or TexasSolver, as a binary | Cross-solver checks | [#24](https://github.com/Ollienel777/poker-solver/issues/24) |
 | Output format for study | terminal grids | `cli` export | [#44](https://github.com/Ollienel777/poker-solver/issues/44) |
 | Limps in the preflop tree | none | Preflop tree | [#57](https://github.com/Ollienel777/poker-solver/issues/57) |
 | 3+-way pots in the preflop solve | option C (minimal tree) | Preflop game layout | [#58](https://github.com/Ollienel777/poker-solver/issues/58) |

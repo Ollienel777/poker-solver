@@ -10,6 +10,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::position::Position;
+use crate::tree::Street;
 
 /// An amount of chips. All pot and stack arithmetic is in whole chips.
 pub type Chips = u32;
@@ -29,11 +30,34 @@ pub enum ConfigError {
     Invalid { field: String, reason: String },
 }
 
-fn invalid(field: impl Into<String>, reason: impl Into<String>) -> ConfigError {
-    ConfigError::Invalid {
-        field: field.into(),
-        reason: reason.into(),
+/// A field that holds a value out of range. The loader and the tree builders share the checks
+/// that produce it, and each turns it into its own error type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Invalid {
+    pub(crate) field: String,
+    pub(crate) reason: String,
+}
+
+impl Invalid {
+    pub(crate) fn new(field: impl Into<String>, reason: impl Into<String>) -> Invalid {
+        Invalid {
+            field: field.into(),
+            reason: reason.into(),
+        }
     }
+}
+
+impl From<Invalid> for ConfigError {
+    fn from(invalid: Invalid) -> ConfigError {
+        ConfigError::Invalid {
+            field: invalid.field,
+            reason: invalid.reason,
+        }
+    }
+}
+
+fn invalid(field: impl Into<String>, reason: impl Into<String>) -> ConfigError {
+    Invalid::new(field, reason).into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -82,23 +106,69 @@ pub struct PreflopSizing {
     pub max_raises: u32,
 }
 
-/// Bet and raise sizes for one street.
+/// Bet and raise sizes for one street. [`crate::tree`] states exactly how they become actions.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreetSizing {
     /// Bet sizes as fractions of the pot.
     pub bets: Vec<f64>,
-    /// Raise sizes as multiples of the bet faced. Empty means no raising.
+    /// Raise sizes: a raise to this multiple of the bet faced. Empty means no sized raises.
     pub raises: Vec<f64>,
+    /// When true, all-in is offered as one more bet and one more raise.
     pub allin: bool,
 }
 
+/// The sizing of a postflop betting tree: one [`StreetSizing`] per street, and two rules that
+/// apply to every street.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostflopSizing {
     pub flop: StreetSizing,
     pub turn: StreetSizing,
     pub river: StreetSizing,
+    /// The most raises a street may have after its opening bet, all-in raises included. Once a
+    /// street has had this many, a player facing a bet may only fold or call. 0 means no raises.
+    pub max_raises: u32,
+    /// A bet or raise that would leave a player with more than this fraction of the tree's
+    /// starting effective stack put in becomes all-in. More than 0 and at most 1, where 1 means
+    /// no size is ever converted this way.
+    pub allin_threshold: f64,
+}
+
+impl PostflopSizing {
+    /// The same sizing on every street, as in `[abstract_postflop]`.
+    pub fn uniform(street: StreetSizing, max_raises: u32, allin_threshold: f64) -> PostflopSizing {
+        PostflopSizing {
+            flop: street.clone(),
+            turn: street.clone(),
+            river: street,
+            max_raises,
+            allin_threshold,
+        }
+    }
+
+    /// The sizing for one street.
+    pub fn street(&self, street: Street) -> &StreetSizing {
+        match street {
+            Street::Flop => &self.flop,
+            Street::Turn => &self.turn,
+            Street::River => &self.river,
+        }
+    }
+
+    /// Checks every size and both rules. Fields are named under `prefix`, such as `postflop`.
+    pub(crate) fn check(&self, prefix: &str) -> Result<(), Invalid> {
+        check_street(&format!("{prefix}.flop"), &self.flop)?;
+        check_street(&format!("{prefix}.turn"), &self.turn)?;
+        check_street(&format!("{prefix}.river"), &self.river)?;
+        // `max_raises` needs no check: every count from 0 up is a rule that can be applied.
+        let threshold = self.allin_threshold;
+        if !(threshold > 0.0 && threshold <= 1.0) {
+            let reason = format!("is {threshold}; it must be more than 0 and at most 1");
+            return Err(Invalid::new(format!("{prefix}.allin_threshold"), reason));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -152,36 +222,50 @@ struct RawRake {
 
 /// The largest amount a config may hold, in big blinds. At 9 seats, every stack plus every
 /// forced bet then sums to well under `Chips::MAX`, so pot arithmetic cannot overflow.
-const MAX_BB: f64 = 1_000_000.0;
+pub(crate) const MAX_BB: f64 = 1_000_000.0;
 
-/// Converts big blinds to chips, rejecting amounts that are not whole chips.
-fn to_chips(field: &str, bb: f64) -> Result<Chips, ConfigError> {
+/// Converts big blinds to chips, rejecting amounts that are negative, above [`MAX_BB`] or not
+/// whole chips. Range files share it with the config loader.
+pub(crate) fn to_chips(field: &str, bb: f64) -> Result<Chips, Invalid> {
     if !(0.0..=MAX_BB).contains(&bb) {
         let reason = format!("is {bb}; an amount must be from 0 to {MAX_BB}bb");
-        return Err(invalid(field, reason));
+        return Err(Invalid::new(field, reason));
     }
     let chips = bb * f64::from(CHIPS_PER_BB);
     if (chips - chips.round()).abs() > 1e-6 {
         let reason = format!("is {bb}bb, which is not a whole number of chips (1bb = 100 chips)");
-        return Err(invalid(field, reason));
+        return Err(Invalid::new(field, reason));
     }
     Ok(chips.round() as Chips)
 }
 
-fn check_multiple(field: &str, value: f64) -> Result<(), ConfigError> {
-    if value.is_finite() && value > 1.0 {
+/// The largest bet size, as a fraction of the pot. A larger number is almost certainly a percent
+/// typed where a fraction belongs, such as 33 for 0.33.
+pub const MAX_BET_FRACTION: f64 = 10.0;
+
+/// The largest raise size, as a multiple of the bet or blind it raises. A larger number is
+/// almost certainly a percent typed where a multiple belongs, such as 250 for 2.5.
+pub const MAX_RAISE_MULTIPLE: f64 = 20.0;
+
+fn check_multiple(field: &str, value: f64) -> Result<(), Invalid> {
+    if value > MAX_RAISE_MULTIPLE {
+        let reason = format!(
+            "is {value}; a raise size is a multiple, at most {MAX_RAISE_MULTIPLE} (write 2.5, not 250)"
+        );
+        Err(Invalid::new(field, reason))
+    } else if value.is_finite() && value > 1.0 {
         Ok(())
     } else {
-        Err(invalid(
+        Err(Invalid::new(
             field,
             format!("is {value}; a raise size must be more than 1"),
         ))
     }
 }
 
-fn check_street(prefix: &str, street: &StreetSizing) -> Result<(), ConfigError> {
+fn check_street(prefix: &str, street: &StreetSizing) -> Result<(), Invalid> {
     if street.bets.is_empty() {
-        return Err(invalid(
+        return Err(Invalid::new(
             format!("{prefix}.bets"),
             "is empty; a street needs at least one bet size",
         ));
@@ -192,7 +276,13 @@ fn check_street(prefix: &str, street: &StreetSizing) -> Result<(), ConfigError> 
         .find(|bet| !(bet.is_finite() && **bet > 0.0))
     {
         let reason = format!("has {bet}; a bet size must be a positive fraction of the pot");
-        return Err(invalid(format!("{prefix}.bets"), reason));
+        return Err(Invalid::new(format!("{prefix}.bets"), reason));
+    }
+    if let Some(bet) = street.bets.iter().find(|bet| **bet > MAX_BET_FRACTION) {
+        let reason = format!(
+            "has {bet}; a bet size is a fraction of the pot, at most {MAX_BET_FRACTION} (write 0.33 for 33%)"
+        );
+        return Err(Invalid::new(format!("{prefix}.bets"), reason));
     }
     for &raise in &street.raises {
         check_multiple(&format!("{prefix}.raises"), raise)?;
@@ -344,10 +434,9 @@ impl GameConfig {
             return Err(invalid("preflop.max_raises", "is 0; it must be at least 1"));
         }
 
-        check_street("postflop.flop", &self.postflop.flop)?;
-        check_street("postflop.turn", &self.postflop.turn)?;
-        check_street("postflop.river", &self.postflop.river)?;
-        check_street("abstract_postflop", &self.abstract_postflop)
+        self.postflop.check("postflop")?;
+        check_street("abstract_postflop", &self.abstract_postflop)?;
+        Ok(())
     }
 
     fn forced(&self, position: Position, kind: ForcedBetKind) -> Chips {
@@ -397,8 +486,8 @@ mod tests {
     #[test]
     fn all_four_configs_load() {
         for (name, stack_bb, cap_bb, forced) in [
-            ("a", 100, 3, 2),
-            ("b", 200, 3, 2),
+            ("a", 100, 6, 2),
+            ("b", 200, 6, 2),
             ("c", 100, 6, 11),
             ("d", 200, 6, 11),
         ] {
@@ -413,6 +502,8 @@ mod tests {
             assert_eq!(config.preflop.open, 2.5);
             assert_eq!(config.postflop.river.bets, [0.33, 0.75]);
             assert!(config.postflop.river.allin && !config.postflop.flop.allin);
+            assert_eq!(config.postflop.max_raises, 3);
+            assert_eq!(config.postflop.allin_threshold, 0.67);
             assert_eq!(config.abstract_postflop.bets, [0.75]);
         }
     }
@@ -573,6 +664,19 @@ mod tests {
             "postflop.river.raises"
         );
         assert_eq!(rejected_field("open = 2.5", "open = 0.5"), "preflop.open");
+        // Percents typed where a fraction or a multiple belongs.
+        assert_eq!(
+            rejected_field(flop, "flop = { bets = [33.0, 75.0]"),
+            "postflop.flop.bets"
+        );
+        assert_eq!(
+            rejected_field(
+                "raises = [3.0], allin = true",
+                "raises = [250.0], allin = true"
+            ),
+            "postflop.river.raises"
+        );
+        assert_eq!(rejected_field("open = 2.5", "open = 250.0"), "preflop.open");
         assert_eq!(
             rejected_field("fourbet = 2.3", "fourbet = 1.0"),
             "preflop.fourbet"
@@ -589,6 +693,62 @@ mod tests {
             rejected_field("percent = 5.0", "percent = 150.0"),
             "rake.percent"
         );
+    }
+
+    #[test]
+    fn the_postflop_threshold_is_more_than_zero_and_at_most_one() {
+        for bad in ["0.0", "-0.5", "1.01", "nan"] {
+            assert_eq!(
+                rejected_field(
+                    "allin_threshold = 0.67",
+                    &format!("allin_threshold = {bad}")
+                ),
+                "postflop.allin_threshold"
+            );
+        }
+        let never = CONFIG_C.replacen("allin_threshold = 0.67", "allin_threshold = 1.0", 1);
+        assert_eq!(
+            GameConfig::from_toml(&never)
+                .unwrap()
+                .postflop
+                .allin_threshold,
+            1.0
+        );
+    }
+
+    #[test]
+    fn the_postflop_raise_cap_may_be_zero_but_not_negative() {
+        let no_raises = CONFIG_C.replacen("max_raises = 3", "max_raises = 0", 1);
+        assert_ne!(no_raises, CONFIG_C);
+        assert_eq!(
+            GameConfig::from_toml(&no_raises)
+                .unwrap()
+                .postflop
+                .max_raises,
+            0
+        );
+
+        let negative = CONFIG_C.replacen("max_raises = 3", "max_raises = -1", 1);
+        match GameConfig::from_toml(&negative) {
+            Err(ConfigError::Toml(error)) => {
+                let message = error.to_string();
+                println!("{message}");
+                assert!(message.contains("max_raises = -1"), "{message}");
+            }
+            other => panic!("expected a TOML error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_postflop_rules_are_required() {
+        for line in ["max_raises = 3", "allin_threshold = 0.67"] {
+            let missing = CONFIG_C.replacen(line, "", 1);
+            assert_ne!(missing, CONFIG_C);
+            assert!(matches!(
+                GameConfig::from_toml(&missing),
+                Err(ConfigError::Toml(_))
+            ));
+        }
     }
 
     #[test]

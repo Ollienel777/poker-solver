@@ -34,7 +34,7 @@ These are defaults chosen to get started. Change any of them in the first sessio
 | Blinds | SB 0.5bb, BB 1bb | Standard |
 | Straddle | 2bb, posted UTG every hand, acts last preflop. No button straddle | Decided 2026-11-23 |
 | Ante | 0.5bb from every player in configs C and D | Decided 2026-11-23 |
-| Rake | 5% with no flop no drop, capped at 3 times the largest blind (3bb in A and B, 6bb in C and D). Test spots can still set zero rake | Decided 2026-11-23 |
+| Rake | 5% with no flop no drop, capped at 6bb in all four configs. Test spots can still set zero rake | Decided 2026-11-23; the cap in A and B confirmed 2026-11-24 |
 | Preflop sizing | Open 2.5bb (3bb from SB), 3-bet 3x in position and 4x out of position, 4-bet 2.3x, all-in always allowed once a raise would commit over 40% of stack | Assumed, tunable |
 | Postflop sizing | Two bet sizes per street (33% and 75% pot), one raise size, all-in on river | Assumed, tunable |
 | Postflop scope | Heads-up only | Decided |

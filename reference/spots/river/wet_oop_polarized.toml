@@ -1,0 +1,17 @@
+format = 1
+name = "wet_oop_polarized"
+description = "Illustrative ranges, written for this fixture: BB (OOP) check-raised the turn on Jh Tc 7h 6d and BTN (IP) called; the river 3h completes the flush and the 54 straight. OOP is polarized, with straights, flushes and sets against missed straight draws; IP is condensed, mostly top pair, overpairs and two pair, with few straights and flushes. Two bet sizes, half pot and an overbet of 1.5 pots, and no raises. 5% rake, cap 3bb."
+board = "JhTc7h6d3h"
+pot_bb = 30.0
+effective_stack_bb = 60.0
+oop_range = "66-77,K9s,Q9s,98s,85s,54s,98o,TT-JJ:0.5,Q9o:0.5,K9o:0.25,85o:0.25,AhKh,AhQh,Ac9c:0.5,Ad9d:0.5,Ah9h,As9s:0.5,Ah8h,Ah5h,Ah4h,KhQh,Qh8h"
+ip_range = "QQ+,AJs,KJs,QJs,J9s+,T9s,AJo,88-99:0.5,J7s:0.5,T8s:0.5,98s:0.5,KJo:0.5,QJo:0.5,AhKh:0.5,AhQh:0.5,KhQh:0.5"
+
+[rake]
+percent = 5.0
+cap_bb = 3.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+river = { bets = [0.5, 1.5], raises = [], allin = false }

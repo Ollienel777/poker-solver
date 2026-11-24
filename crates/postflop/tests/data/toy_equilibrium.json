@@ -1,0 +1,98 @@
+{
+  "format": "pk-solution-dump",
+  "version": 1,
+  "solver": {"name": "analytical equilibrium, written by hand", "exploitability": 0.0},
+  "spot": {
+    "name": "toy_polarized",
+    "board": "Ks9h6d3c2s",
+    "pot": 1000,
+    "effective_stack": 2000,
+    "rake": {"percent": 0.0, "cap": 0},
+    "hands": {
+      "oop": {
+        "9s9d": 1.0, "9s9c": 1.0, "9d9c": 1.0, "6s6h": 1.0, "6s6c": 1.0, "6h6c": 1.0,
+        "JsTs": 1.0, "JsTh": 1.0, "JsTd": 1.0, "JsTc": 1.0,
+        "JhTs": 1.0, "JhTh": 1.0, "JhTd": 1.0, "JhTc": 1.0,
+        "JdTs": 1.0, "JdTh": 1.0, "JdTd": 1.0, "JdTc": 1.0,
+        "JcTs": 1.0, "JcTh": 1.0, "JcTd": 1.0, "JcTc": 1.0
+      },
+      "ip": {
+        "KhQs": 1.0, "KhQh": 1.0, "KhQd": 1.0, "KhQc": 1.0,
+        "KdQs": 1.0, "KdQh": 1.0, "KdQd": 1.0, "KdQc": 1.0,
+        "KcQs": 1.0, "KcQh": 1.0, "KcQd": 1.0, "KcQc": 1.0
+      }
+    }
+  },
+  "values": {"oop": 363.6363636363636, "ip": 636.3636363636364},
+  "nodes": [
+    {
+      "path": [],
+      "player": "oop",
+      "actions": [{"kind": "check"}, {"kind": "bet", "amount": 500}],
+      "strategy": {
+        "9s9d": [0, 1], "9s9c": [0, 1], "9d9c": [0, 1], "6s6h": [0, 1], "6s6c": [0, 1], "6h6c": [0, 1],
+        "JsTs": [1, 0], "JsTh": [1, 0], "JsTd": [1, 0], "JsTc": [1, 0],
+        "JhTs": [1, 0], "JhTh": [0, 1], "JhTd": [1, 0], "JhTc": [1, 0],
+        "JdTs": [1, 0], "JdTh": [1, 0], "JdTd": [1, 0], "JdTc": [1, 0],
+        "JcTs": [1, 0], "JcTh": [1, 0], "JcTd": [1, 0], "JcTc": [0, 1]
+      },
+      "ev": {
+        "9s9d": 1333.3333333333333, "9s9c": 1333.3333333333333, "9d9c": 1333.3333333333333,
+        "6s6h": 1333.3333333333333, "6s6c": 1333.3333333333333, "6h6c": 1333.3333333333333,
+        "JsTs": 0, "JsTh": 0, "JsTd": 0, "JsTc": 0,
+        "JhTs": 0, "JhTh": 0, "JhTd": 0, "JhTc": 0,
+        "JdTs": 0, "JdTh": 0, "JdTd": 0, "JdTc": 0,
+        "JcTs": 0, "JcTh": 0, "JcTd": 0, "JcTc": 0
+      }
+    },
+    {
+      "path": [{"kind": "check"}],
+      "player": "ip",
+      "actions": [{"kind": "check"}, {"kind": "bet", "amount": 500}],
+      "strategy": {
+        "KhQs": [0, 1], "KhQh": [0, 1], "KhQd": [0, 1], "KhQc": [0, 1],
+        "KdQs": [0, 1], "KdQh": [0, 1], "KdQd": [1, 0], "KdQc": [1, 0],
+        "KcQs": [1, 0], "KcQh": [1, 0], "KcQd": [1, 0], "KcQc": [1, 0]
+      },
+      "ev": {
+        "KhQs": 1000, "KhQh": 1000, "KhQd": 1000, "KhQc": 1000,
+        "KdQs": 1000, "KdQh": 1000, "KdQd": 1000, "KdQc": 1000,
+        "KcQs": 1000, "KcQh": 1000, "KcQd": 1000, "KcQc": 1000
+      }
+    },
+    {
+      "path": [{"kind": "check"}, {"kind": "bet", "amount": 500}],
+      "player": "oop",
+      "actions": [{"kind": "fold"}, {"kind": "call", "amount": 500}],
+      "strategy": {
+        "9s9d": [0, 1], "9s9c": [0, 1], "9d9c": [0, 1], "6s6h": [0, 1], "6s6c": [0, 1], "6h6c": [0, 1],
+        "JsTs": [1, 0], "JsTh": [1, 0], "JsTd": [1, 0], "JsTc": [1, 0],
+        "JhTs": [1, 0], "JhTh": [1, 0], "JhTd": [1, 0], "JhTc": [1, 0],
+        "JdTs": [1, 0], "JdTh": [1, 0], "JdTd": [1, 0], "JdTc": [1, 0],
+        "JcTs": [1, 0], "JcTh": [1, 0], "JcTd": [1, 0], "JcTc": [1, 0]
+      },
+      "ev": {
+        "9s9d": 1500, "9s9c": 1500, "9d9c": 1500, "6s6h": 1500, "6s6c": 1500, "6h6c": 1500,
+        "JsTs": 0, "JsTh": 0, "JsTd": 0, "JsTc": 0,
+        "JhTs": 0, "JhTh": 0, "JhTd": 0, "JhTc": 0,
+        "JdTs": 0, "JdTh": 0, "JdTd": 0, "JdTc": 0,
+        "JcTs": 0, "JcTh": 0, "JcTd": 0, "JcTc": 0
+      }
+    },
+    {
+      "path": [{"kind": "bet", "amount": 500}],
+      "player": "ip",
+      "actions": [{"kind": "fold"}, {"kind": "call", "amount": 500}],
+      "strategy": {
+        "KhQs": [0, 1], "KhQh": [0, 1], "KhQd": [0, 1], "KhQc": [0, 1],
+        "KdQs": [0, 1], "KdQh": [0, 1], "KdQd": [0, 1], "KdQc": [0, 1],
+        "KcQs": [1, 0], "KcQh": [1, 0], "KcQd": [1, 0], "KcQc": [1, 0]
+      },
+      "ev": {
+        "KhQs": 0, "KhQh": 0, "KhQd": 0, "KhQc": 0,
+        "KdQs": 0, "KdQh": 0, "KdQd": 0, "KdQc": 0,
+        "KcQs": 0, "KcQh": 0, "KcQd": 0, "KcQc": 0
+      }
+    }
+  ]
+}

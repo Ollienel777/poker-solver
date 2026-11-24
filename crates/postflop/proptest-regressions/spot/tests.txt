@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e6baa47fbafcaaa2c802814ec4929868b997ef3a948b5f63392f63d80d3f7dce # shrinks to spot = Spot { name: "x", description: "x", board: CardSet(JsJc4d), pot: 1, effective_stack: 1, oop_range: Range(8d6d:0.01), ip_range: Range(Jh9c:0.01), rake_percent: 0.0, rake_cap: 0, tree: TreeSizing { max_raises: 0, allin_threshold: 1.0, flop: Some(StreetSizing { bets: [1e21], raises: [], allin: false }), turn: Some(StreetSizing { bets: [0.01], raises: [], allin: false }), river: Some(StreetSizing { bets: [0.01], raises: [], allin: false }) } }

@@ -1,0 +1,17 @@
+format = 1
+name = "dry_wide_single_bet"
+description = "Illustrative ranges, written for this fixture: a wide single-raised pot on a dry board, BTN (IP) against BB (OOP). The flop Kd 7s 2c was bet small and called and the turn 4h checked through, so both ranges are wide and hold few strong hands; the river 9d pairs some of them, and no straight or flush is possible. One bet size of 3/4 pot and no raises: the simplest real tree. Rake-free."
+board = "Kd9d7s4h2c"
+pot_bb = 12.0
+effective_stack_bb = 90.0
+oop_range = "TT-JJ,88,33-66,A9s,A7s,A2s-A5s,K2s+,Q9s,Q7s,J9s,J7s,T7s+,97s+,86s+,75s+,64s+,53s,A7o,K5o+,97o,87o,AKs:0.5,74s:0.5,72s:0.5,32s:0.5,AKo:0.5,T9o:0.5,98o:0.5,76o:0.5,99:0.25,77:0.25,22:0.25"
+ip_range = "TT-QQ,88,55-66,ATs-AJs,A7s,A2s-A5s,K8s-KTs,Q9s+,J9s+,T7s+,98s,86s+,76s,65s,54s,ATo-AQo,K9o-KTo,QJo,99:0.5,AQs:0.5,K5s-K6s:0.5,Q7s:0.5,97s:0.5,KJo:0.5,JTo:0.5,77:0.25,22:0.25,AKs:0.25,KQs:0.25,AKo:0.25,KQo:0.25"
+
+[rake]
+percent = 0.0
+cap_bb = 0.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+river = { bets = [0.75], raises = [], allin = false }
