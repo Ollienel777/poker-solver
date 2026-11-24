@@ -486,8 +486,8 @@ mod tests {
     #[test]
     fn all_four_configs_load() {
         for (name, stack_bb, cap_bb, forced) in [
-            ("a", 100, 3, 2),
-            ("b", 200, 3, 2),
+            ("a", 100, 6, 2),
+            ("b", 200, 6, 2),
             ("c", 100, 6, 11),
             ("d", 200, 6, 11),
         ] {

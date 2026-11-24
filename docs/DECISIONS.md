@@ -27,13 +27,16 @@ When an open question is answered, move it to Decided with the date, update any 
 | D13 | All four configs are 8-handed, with positions UTG, UTG1, LJ, HJ, CO, BTN, SB, BB | Answered 2026-11-23, [#2](https://github.com/Ollienel777/poker-solver/issues/2) |
 | D14 | Configs C and D have an ante of 0.5bb from every seat, which is 4bb of dead money | Answered 2026-11-23, [#3](https://github.com/Ollienel777/poker-solver/issues/3) |
 | D15 | Configs C and D have a 2bb live straddle from UTG, posted every hand. Button straddles are not modelled | Answered 2026-11-23, [#4](https://github.com/Ollienel777/poker-solver/issues/4) |
-| D16 | Rake is 5% of the pot with no flop no drop. The cap is 3 times the effective blind: 3bb in A and B, 6bb in C and D | Answered 2026-11-23, [#5](https://github.com/Ollienel777/poker-solver/issues/5) |
+| D16 | Rake is 5% of the pot with no flop no drop, capped at 6bb in all four configs | Answered 2026-11-23, [#5](https://github.com/Ollienel777/poker-solver/issues/5); the cap in A and B confirmed 2026-11-24 |
+| D17 | A local solve may use at most 10 GB of memory. The dev machine is an AMD Ryzen 7 7730U with 16 logical processors, 16 GB of RAM and about 390 GB free on a 953 GB disk | Answered 2026-11-24, [#23](https://github.com/Ollienel777/poker-solver/issues/23) |
+| D18 | The reference solver is postflop-solver (AGPL-3.0-or-later), pinned at commit 9d1509f. It is run through `postflop-ref`, a small wrapper program kept in a repository of its own under the same licence, which reads a spot file and writes a solution dump. No code of either is in this repository | Answered 2026-11-24, [#24](https://github.com/Ollienel777/poker-solver/issues/24) |
+| D19 | The M2 gate's check of the vector form against scalar CFR is read as P20 states it | Answered 2026-11-24, [#22](https://github.com/Ollienel777/poker-solver/issues/22) |
 
 Notes on the 2026-11-23 answers:
 
 - **D13 raises the preflop cost.** The brief's estimates assumed 6-max, and it puts 8 players at 3 to 5 times the preflop cost. See the risk list in [ROADMAP.md](ROADMAP.md#risks).
 - **D14 and D15 together** put 7.5bb in the pot before the first action in C and D: 0.5 + 1 + 2 from the blinds and straddle, and 4 from the antes.
-- **D16's cap for A and B is a reading of the answer.** The answer was "capped at 6bb (x3 straddle)". That is recorded as 3 times the effective blind, which gives 3bb where there is no straddle. If A and B should also be 6bb, change `cap_bb` in those two configs.
+- **D16's cap is 6bb in every config.** The answer was "capped at 6bb (x3 straddle)". It was first recorded as 3 times the effective blind, which gave 3bb in A and B, and on 2026-11-24 it was confirmed as 6bb there too. The raked river test spots keep a cap of 3bb of their own, which binds in more of their pots.
 - **D16 replaces the brief's "zero rake for validation".** Test spots set their own rake, so the first reference comparisons can still be rake-free.
 
 ## Proposed
@@ -69,8 +72,6 @@ The M1 questions are answered, so `GameConfig` ([#12](https://github.com/Olliene
 
 | Question | Default until answered | Blocks | Issue |
 | --- | --- | --- | --- |
-| Dev machine specs | Recorded 2026-11-24: AMD Ryzen 7 7730U with 16 logical processors, 16 GB of RAM, about 390 GB free on a 953 GB disk. Proposed limit for a local solve: 10 GB, to be confirmed | Local test sizes, memory limit | [#23](https://github.com/Ollienel777/poker-solver/issues/23) |
-| Reference solver | Recommended: postflop-solver, run through a small wrapper program kept in its own AGPL repository. It can reproduce all nine river spots, rake included; TexasSolver fits three. The research is on the issue. Nothing is installed until this is approved | Cross-solver checks | [#24](https://github.com/Ollienel777/poker-solver/issues/24) |
 | Output format for study | terminal grids | `cli` export | [#44](https://github.com/Ollienel777/poker-solver/issues/44) |
 | Limps in the preflop tree | none | Preflop tree | [#57](https://github.com/Ollienel777/poker-solver/issues/57) |
 | 3+-way pots in the preflop solve | option C (minimal tree) | Preflop game layout | [#58](https://github.com/Ollienel777/poker-solver/issues/58) |

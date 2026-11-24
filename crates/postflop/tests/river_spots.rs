@@ -123,7 +123,7 @@ fn about_half_the_spots_are_rake_free_and_the_rest_take_5_percent() {
     for (path, spot, _) in spot_files() {
         match (spot.rake_percent, spot.rake_cap) {
             (0.0, 0) => free += 1,
-            // 5% capped at 3bb, as in configs A and B (DECISIONS D16).
+            // 5% capped at 3bb, a cap low enough to bind in pots of these sizes.
             (5.0, 300) => raked += 1,
             other => panic!("{}: rake {other:?}", path.display()),
         }

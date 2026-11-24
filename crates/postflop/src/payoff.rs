@@ -141,7 +141,7 @@ impl Payoff {
 mod tests {
     use super::*;
 
-    /// 5% capped at 3bb, as in configs A and B.
+    /// 5% capped at 3bb, as in the raked river test spots.
     fn five_percent() -> Rake {
         Rake {
             percent: 5.0,

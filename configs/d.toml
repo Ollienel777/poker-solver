@@ -25,7 +25,7 @@ kind = "ante"           # dead money: never counts toward a call
 
 [rake]
 percent = 5.0
-cap_bb = 6.0            # 3 x the effective blind
+cap_bb = 6.0            # the same in all four configs (D16)
 no_flop_no_drop = true
 
 [preflop]
