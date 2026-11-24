@@ -55,11 +55,16 @@ impl GameConfig {
     }
 
     /// The seat that closes the preflop action: the poster of the largest live blind. If two
-    /// blinds are equal, the one further from the button in clockwise order closes.
+    /// blinds are equal, the one further from the button in clockwise order closes. The button
+    /// is zero seats from itself, so a blind it posts never wins a tie.
     pub fn last_to_act_preflop(&self) -> Position {
-        let seats = self.positions().iter().enumerate();
-        let (_, &last) = seats
-            .max_by_key(|&(seat, &position)| (self.blind(position), seat))
+        let table = self.positions();
+        // The table lists seats clockwise from the seat left of the button, with the button last.
+        let from_button = |seat: usize| (seat + 1) % table.len();
+        let (_, &last) = table
+            .iter()
+            .enumerate()
+            .max_by_key(|&(seat, &position)| (self.blind(position), from_button(seat)))
             .expect("a table has seats");
         last
     }
@@ -195,6 +200,30 @@ mod tests {
         assert_eq!(config.postflop_order(), [Bb, Btn]);
         assert_eq!(config.to_call(Btn), 50);
         assert_eq!(config.starting_pot(), 150);
+    }
+
+    #[test]
+    fn the_big_blind_closes_when_the_button_posts_an_equal_blind() {
+        let heads_up = table(2, &[("BTN", 1.0, "blind"), ("BB", 1.0, "blind")]);
+        assert_eq!(heads_up.last_to_act_preflop(), Bb);
+        assert_eq!(heads_up.preflop_order(), [Btn, Bb]);
+
+        let button_blind = table(6, &[("BB", 1.0, "blind"), ("BTN", 1.0, "blind")]);
+        assert_eq!(button_blind.last_to_act_preflop(), Bb);
+        assert_eq!(button_blind.preflop_order(), [Utg, Hj, Co, Btn, Sb, Bb]);
+
+        // Between two equal blinds that are not the button's, the later one closes.
+        let equal_blinds = table(6, &[("SB", 1.0, "blind"), ("BB", 1.0, "blind")]);
+        assert_eq!(equal_blinds.last_to_act_preflop(), Bb);
+        let equal_straddle = table(
+            6,
+            &[
+                ("SB", 0.5, "blind"),
+                ("BB", 1.0, "blind"),
+                ("UTG", 1.0, "blind"),
+            ],
+        );
+        assert_eq!(equal_straddle.last_to_act_preflop(), Utg);
     }
 
     #[test]
