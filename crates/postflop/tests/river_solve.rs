@@ -160,7 +160,7 @@ fn the_toy_game_reaches_its_analytical_equilibrium() {
 #[test]
 fn every_river_spot_solves_below_the_target() {
     // The default solve: DCFR(1.5, 0, 2) to 0.3% of the pot, measured every 10 iterations.
-    // Measured, the nine spots take 30 to 350 iterations and 0.35 s in all (see
+    // Measured, the nine spots take 30 to 350 iterations and 0.35 s in all in a release build, about 0.9 s in a test build (see
     // `river_spot_table`).
     for (spot, solution) in solved() {
         let name = &spot.name;

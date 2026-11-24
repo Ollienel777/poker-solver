@@ -7,7 +7,7 @@ A personal-use No-Limit Hold'em cash-game solver in Rust.
 
 There are four configs: 100bb and 200bb, each with and without a straddle and ante.
 
-**Status: M2 (CFR on toy games) is built.** `pk-core` has cards, ranges, the hand evaluator and equity. `pk-game` has `GameConfig`, configs A to D and the action order. `pk-cfr` has regret matching with the CFR, CFR+, linear and discounted schedules, tabular CFR, best response, external-sampling MCCFR and vector-form CFR, all validated on Kuhn and Leduc. The other crates are stubs. Next is M3, the river solver. The backlog is in [Issues](https://github.com/Ollienel777/poker-solver/issues), grouped into [milestones](https://github.com/Ollienel777/poker-solver/milestones) M1 to M10.
+**Status: the M3 river solver is built, and its cross-check against a reference solver is still to do.** `solve` takes a spot (a board, two ranges, a pot, a stack, a betting tree and a rake) and finds equilibrium strategies with vector-form discounted CFR. All nine river test spots in `reference/spots/river/` solve to under 0.3% of the pot, the slowest in about 0.3 seconds, and a toy game matches its analytical solution. Underneath it, `pk-core` has cards, ranges, the evaluator and equity, `pk-game` has `GameConfig`, the betting-tree builder and the range-file format, and `pk-cfr` has the CFR core validated on Kuhn and Leduc. There is no command line yet. Next is the reference comparison ([#24](https://github.com/Ollienel777/poker-solver/issues/24), [#33](https://github.com/Ollienel777/poker-solver/issues/33)), then M4, the turn and flop. The backlog is in [Issues](https://github.com/Ollienel777/poker-solver/issues), grouped into [milestones](https://github.com/Ollienel777/poker-solver/milestones) M1 to M10.
 
 ## Docs
 

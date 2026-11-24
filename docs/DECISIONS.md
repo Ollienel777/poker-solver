@@ -68,8 +68,8 @@ The M1 questions are answered, so `GameConfig` ([#12](https://github.com/Olliene
 
 | Question | Default until answered | Blocks | Issue |
 | --- | --- | --- | --- |
-| Dev machine specs | none | Local test sizes, memory limit | [#23](https://github.com/Ollienel777/poker-solver/issues/23) |
-| Reference solver | postflop-solver or TexasSolver, as a binary | Cross-solver checks | [#24](https://github.com/Ollienel777/poker-solver/issues/24) |
+| Dev machine specs | Recorded 2026-11-24: AMD Ryzen 7 7730U with 16 logical processors, 16 GB of RAM, about 390 GB free on a 953 GB disk. Proposed limit for a local solve: 10 GB, to be confirmed | Local test sizes, memory limit | [#23](https://github.com/Ollienel777/poker-solver/issues/23) |
+| Reference solver | Recommended: postflop-solver, run through a small wrapper program kept in its own AGPL repository. It can reproduce all nine river spots, rake included; TexasSolver fits three. The research is on the issue. Nothing is installed until this is approved | Cross-solver checks | [#24](https://github.com/Ollienel777/poker-solver/issues/24) |
 | Output format for study | terminal grids | `cli` export | [#44](https://github.com/Ollienel777/poker-solver/issues/44) |
 | Limps in the preflop tree | none | Preflop tree | [#57](https://github.com/Ollienel777/poker-solver/issues/57) |
 | 3+-way pots in the preflop solve | option C (minimal tree) | Preflop game layout | [#58](https://github.com/Ollienel777/poker-solver/issues/58) |
