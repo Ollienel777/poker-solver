@@ -11,7 +11,8 @@
 //! 2. **Reach.** Each player's reach of the root ([`Solution::reach`]) is 1 with every hand. At
 //!    every other node, the reach of the player who acted at the parent is its reach of the
 //!    parent times the probability of the action that leads here, and the other player's is
-//!    its reach of the parent, within [`REACH_TOLERANCE`].
+//!    its reach of the parent, within [`REACH_TOLERANCE`]. Below a chance node, each player's
+//!    reach is its reach of the chance node, and 0 with every hand that holds the card dealt.
 //! 3. **Values.** The two players' values ([`Solution::values`]) sum to the pot less the
 //!    expected rake. The expected rake comes from [`expected_rake`], which works it out from the
 //!    chips and the strategy, apart from the payoffs and the expected values it is compared
@@ -24,10 +25,13 @@
 //! 4. **Finite.** No number is NaN or infinite: no probability of a strategy, no reach, and
 //!    none of the values, best-response values and exploitability the solution reports.
 //!
+//! The checks walk the public tree ([`crate::game`]), so they hold on the flop and the turn as
+//! on the river: every node below every card that can fall is checked, and the expected rake
+//! sums over every runout.
+//!
 //! The fifth invariant of the brief and of issue #30, identical results on suit-isomorphic
-//! boards, is not checked yet. It needs suit isomorphism, which comes in M4 (#35), and two
-//! solves: a board and a suit permutation of it, whose strategies and values must match hand
-//! for hand once the permutation maps the combos.
+//! boards, is not checked yet. It needs two solves: a board and a suit permutation of it, whose
+//! strategies and values must match hand for hand once the permutation maps the combos.
 //!
 //! # Reporting
 //!
@@ -87,14 +91,18 @@
 
 use std::fmt;
 
-use pk_cfr::PublicProfile;
-use pk_core::Combo;
-use pk_game::{Chips, Node, Player, PostflopTree};
+use pk_cfr::{PublicGame, PublicProfile};
+use pk_core::{CardSet, Combo};
+use pk_game::{Chips, Player, PostflopTree};
 
 use crate::expected_rake::expected_rake;
 use crate::exploitability::Exploitability;
-use crate::river::{RiverGame, player_of};
+use crate::game::{PostflopGame, player_of};
 use crate::solve::Solution;
+
+// The tests below build the river game by the name they were written with.
+#[cfg(test)]
+use crate::river::RiverGame;
 
 /// How far each hand's probabilities at a node may sum from 1. Measured, at most 2.1e-7: see
 /// the [module documentation](self#tolerances).
@@ -252,7 +260,8 @@ pub enum Violation {
     /// give.
     Reach {
         node: u32,
-        /// The parent and the index of the action that leads to `node`, or `None` at the root.
+        /// The parent and the index of the action, or of the card at a chance node, that leads
+        /// to `node`, or `None` at the root.
         parent: Option<(u32, usize)>,
         player: Player,
         hand: usize,
@@ -440,14 +449,14 @@ fn assert_valid(report: &Report) {
 /// What the checks read from a solution: [`Solution`]'s accessors, so that the tests can give
 /// the checks a solution with a fault put in.
 trait Reported {
-    fn game(&self) -> &RiverGame;
+    fn game(&self) -> &PostflopGame;
     fn strategy(&self) -> &PublicProfile;
     fn reach(&self, node: u32) -> [Vec<f64>; 2];
     fn exploitability(&self) -> &Exploitability;
 }
 
 impl Reported for Solution {
-    fn game(&self) -> &RiverGame {
+    fn game(&self) -> &PostflopGame {
         Solution::game(self)
     }
 
@@ -478,22 +487,19 @@ fn check(solution: &impl Reported) -> Report {
     report
 }
 
-/// The player nodes of the tree, with the acting player and the number of actions.
-fn player_nodes(tree: &PostflopTree) -> impl Iterator<Item = (u32, Player, usize)> + '_ {
-    tree.nodes()
-        .iter()
-        .enumerate()
-        .filter_map(|(node, n)| match n {
-            Node::Player { actor, actions, .. } => Some((node as u32, *actor, actions.len())),
-            _ => None,
-        })
+/// The player nodes of the public tree, with the acting player and the number of actions.
+fn player_nodes(game: &PostflopGame) -> impl Iterator<Item = (u32, Player, usize)> + '_ {
+    (0..game.num_nodes() as u32).filter_map(|node| {
+        let actor = game.actor(node)?;
+        Some((node, actor, game.children(node).len()))
+    })
 }
 
 /// (1), the shape: whether every player node has a strategy of the right size.
 fn check_shapes(solution: &impl Reported, report: &mut Report) -> bool {
     let game = solution.game();
     let mut shaped = true;
-    for (node, actor, num_actions) in player_nodes(game.tree()) {
+    for (node, actor, num_actions) in player_nodes(game) {
         let expected = num_actions * game.hands(actor).len();
         let found = solution.strategy().get(node as usize).map(<[f32]>::len);
         if found != Some(expected) {
@@ -513,7 +519,7 @@ fn check_shapes(solution: &impl Reported, report: &mut Report) -> bool {
 fn check_strategies(solution: &impl Reported, report: &mut Report) -> bool {
     let game = solution.game();
     let mut distributions = true;
-    for (node, player, num_actions) in player_nodes(game.tree()) {
+    for (node, player, num_actions) in player_nodes(game) {
         let combos = game.hands(player).combos();
         let num_hands = combos.len();
         let strategy = solution
@@ -564,46 +570,67 @@ fn check_strategies(solution: &impl Reported, report: &mut Report) -> bool {
     distributions
 }
 
-/// (2) and (4) for the reaches, down the tree from the root.
+/// (2) and (4) for the reaches, down the public tree from the root.
 fn check_reaches(solution: &impl Reported, report: &mut Report) {
     let game = solution.game();
-    let tree = game.tree();
     let ones = [Player::Oop, Player::Ip].map(|player| vec![1.0; game.hands(player).len()]);
     let root = solution.reach(PostflopTree::ROOT);
     compare_reach(game, PostflopTree::ROOT, None, &ones, &root, report);
     let mut stack = vec![(PostflopTree::ROOT, root)];
     while let Some((node, reach)) = stack.pop() {
-        let Node::Player {
-            actor, children, ..
-        } = tree.node(node)
-        else {
-            continue;
-        };
-        let me = actor.index();
-        let num_hands = game.hands(*actor).len();
-        let strategy = solution
-            .strategy()
-            .get(node as usize)
-            .expect("the shapes are checked first");
-        for (action, (&child, probabilities)) in children
-            .iter()
-            .zip(strategy.chunks_exact(num_hands))
-            .enumerate()
-        {
-            let mut expected = reach.clone();
-            for (r, &p) in expected[me].iter_mut().zip(probabilities) {
-                *r *= f64::from(p);
+        let children = game.children(node);
+        if let Some(actor) = game.actor(node) {
+            let me = actor.index();
+            let num_hands = game.hands(actor).len();
+            let strategy = solution
+                .strategy()
+                .get(node as usize)
+                .expect("the shapes are checked first");
+            for (action, (&child, probabilities)) in children
+                .iter()
+                .zip(strategy.chunks_exact(num_hands))
+                .enumerate()
+            {
+                let mut expected = reach.clone();
+                for (r, &p) in expected[me].iter_mut().zip(probabilities) {
+                    *r *= f64::from(p);
+                }
+                let found = solution.reach(child);
+                compare_reach(game, child, Some((node, action)), &expected, &found, report);
+                stack.push((child, found));
             }
-            let found = solution.reach(child);
-            compare_reach(game, child, Some((node, action)), &expected, &found, report);
-            stack.push((child, found));
+        } else {
+            // A chance node, or a terminal with no children: a card rules out the hands that
+            // hold it.
+            for (outcome, (&child, &card)) in children.iter().zip(game.outcomes(node)).enumerate() {
+                let card = CardSet::single(card);
+                let mut expected = reach.clone();
+                for (index, reach) in expected.iter_mut().enumerate() {
+                    let combos = game.hands(player_of(index)).combos();
+                    for (r, combo) in reach.iter_mut().zip(combos) {
+                        if combo.intersects(card) {
+                            *r = 0.0;
+                        }
+                    }
+                }
+                let found = solution.reach(child);
+                compare_reach(
+                    game,
+                    child,
+                    Some((node, outcome)),
+                    &expected,
+                    &found,
+                    report,
+                );
+                stack.push((child, found));
+            }
         }
     }
 }
 
 /// Compares the reaches the solution reports at `node` with what they should be.
 fn compare_reach(
-    game: &RiverGame,
+    game: &PostflopGame,
     node: u32,
     parent: Option<(u32, usize)>,
     expected: &[Vec<f64>; 2],
@@ -1267,6 +1294,60 @@ mod tests {
         assert_eq!(steps, expected);
         // The value sum does not read the reaches the solution reports.
         assert!(report.value_sum.is_some());
+    }
+
+    #[test]
+    fn a_turn_spot_keeps_every_invariant_and_a_hand_that_holds_a_dealt_card_has_no_reach() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/turn_small.toml");
+        let options = SolveOptions {
+            target: None,
+            max_iterations: 20,
+            ..SolveOptions::default()
+        };
+        let solution = solve(&Spot::load(path).unwrap(), &options, |_| {}).unwrap();
+        let report = check_solution(&solution);
+        assert!(report.is_valid(), "{report}");
+        assert!(report.worst.strategy > 0.0 && report.value_sum.is_some());
+        // Below the queen of spades on the river, OOP's KsQs keeps the reach it had: the one
+        // step into the node is wrong, and so is each step out of it, which the reaches below
+        // the node follow from the strategy.
+        let game = solution.game();
+        let chance = game.find("x x").unwrap();
+        let node = game.find("x x Qs").unwrap();
+        let outcome = game
+            .children(chance)
+            .iter()
+            .position(|&c| c == node)
+            .unwrap();
+        let queen: Combo = "KsQs".parse().unwrap();
+        let hand = game.hands(Player::Oop).position(queen).unwrap();
+        let before = solution.reach(chance)[0][hand];
+        assert!(before > 0.0);
+        let report = Faulty::new(&solution)
+            .with_reach(ReachFault::At {
+                node,
+                player: 0,
+                hand,
+                value: before,
+            })
+            .report();
+        let first = &report.violations[0];
+        assert_eq!(
+            *first,
+            Violation::Reach {
+                node,
+                parent: Some((chance, outcome)),
+                player: Player::Oop,
+                hand,
+                combo: queen,
+                expected: 0.0,
+                found: before,
+            },
+            "{report}"
+        );
+        let children = game.children(node).len();
+        assert_eq!(report.violations.len(), 1 + children, "{report}");
+        assert!(report.of(Invariant::Reach).count() == report.violations.len());
     }
 
     #[test]

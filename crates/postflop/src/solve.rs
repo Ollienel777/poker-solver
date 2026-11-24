@@ -1,14 +1,15 @@
-//! The river solve: vector-form discounted CFR on a [`RiverGame`], run until its average
-//! strategy is close enough to an equilibrium or a cap is reached.
+//! The solve: vector-form discounted CFR on a [`PostflopGame`], run until its average strategy
+//! is close enough to an equilibrium or a cap is reached.
 //!
 //! # The loop
 //!
-//! [`solve`] builds the spot's [`RiverGame`] and runs [`VectorCfr`] on it under
-//! [`SolveOptions::schedule`], DCFR(1.5, 0, 2) by default. Each iteration updates OOP, then IP
-//! against OOP's updated strategy (alternating updates), as [`pk_cfr::vector`] specifies.
-//! Regrets and strategy sums are stored as `f32`, one entry per action and in-range combo of
-//! the acting player at each player node, and the strategy the solve reports is the average
-//! strategy.
+//! [`solve`] builds the spot's [`PostflopGame`], on the flop, the turn or the river, and runs
+//! [`VectorCfr`] on it under [`SolveOptions::schedule`], DCFR(1.5, 0, 2) by default. Each
+//! iteration updates OOP, then IP against OOP's updated strategy (alternating updates), as
+//! [`pk_cfr::vector`] specifies. Regrets and strategy sums are stored as `f32`, one entry per
+//! action and in-range combo of the acting player at each player node of the public tree, and
+//! the strategy the solve reports is the average strategy. The public tree is refused before
+//! anything is allocated for it if it has more than [`SolveOptions::max_nodes`] nodes.
 //!
 //! After every [`check_every`](SolveOptions::check_every) iterations, the solve measures the
 //! [exploitability](mod@crate::exploitability) of the average strategy and calls the progress
@@ -61,26 +62,35 @@ use pk_game::{Player, PostflopTree, TreeError};
 use thiserror::Error;
 
 use crate::exploitability::{Exploitability, exploitability};
+use crate::game::{ClassView, PostflopGame};
 use crate::hands::HandList;
 use crate::invariants::debug_assert_valid;
-use crate::river::{ClassView, RiverGame};
 use crate::spot::{Spot, SpotError};
 
-/// Why a solve could not start.
+// The tests below build the river game by the name they were written with.
+#[cfg(test)]
+use crate::river::RiverGame;
+
+/// Why a game could not be built, or a solve could not start.
 #[derive(Debug, Error)]
 pub enum SolveError {
-    /// The spot does not start on the river. Flop and turn spots come in milestone M4.
-    #[error(
-        "the board has {cards} cards; the river solver needs a river board of 5, and flop and \
-         turn spots are not supported yet"
-    )]
+    /// The spot does not start on the river, and a river game was asked for: see
+    /// [`PostflopGame::new`]. [`solve`] takes spots on every street.
+    #[error("the board has {cards} cards; a river game needs a river board of 5")]
     NotRiver { cards: usize },
     /// The spot fails [`Spot::validate`].
     #[error("invalid spot: {0}")]
     Spot(#[from] SpotError),
-    /// The spot's tree has more nodes than the builder's limit.
+    /// The spot's betting tree has more nodes than the builder's limit.
     #[error("{0}")]
     Tree(#[from] TreeError),
+    /// The public tree, with a child for every card a chance node can deal, would have more
+    /// nodes than the limit: see [`PostflopGame::with_node_limit`].
+    #[error(
+        "the public tree, with a child for every card that can fall, would have {nodes} nodes, \
+         more than the limit of {limit}"
+    )]
+    PublicTreeTooLarge { nodes: u64, limit: u64 },
     /// An option is out of range.
     #[error("`{field}` {reason}")]
     Options { field: &'static str, reason: String },
@@ -102,6 +112,9 @@ pub struct SolveOptions {
     /// Measure exploitability after every this many iterations. Defaults to 10. Must be at
     /// least 1.
     pub check_every: u64,
+    /// The most nodes the public tree may have: see [`PostflopGame::with_node_limit`]. Defaults
+    /// to [`PostflopGame::DEFAULT_MAX_NODES`], one million. Must be at least 1.
+    pub max_nodes: u64,
 }
 
 impl Default for SolveOptions {
@@ -112,6 +125,7 @@ impl Default for SolveOptions {
             max_iterations: 10_000,
             max_time: None,
             check_every: 10,
+            max_nodes: PostflopGame::DEFAULT_MAX_NODES,
         }
     }
 }
@@ -130,6 +144,12 @@ impl SolveOptions {
             return Err(SolveError::Options {
                 field: "check_every",
                 reason: "is 0; exploitability is measured every 1 or more iterations".into(),
+            });
+        }
+        if self.max_nodes == 0 {
+            return Err(SolveError::Options {
+                field: "max_nodes",
+                reason: "is 0; a public tree has at least its root".into(),
             });
         }
         if let Schedule::Discounted(Dcfr { alpha, beta, gamma }) = self.schedule
@@ -169,11 +189,12 @@ pub struct Progress {
 /// The result of a solve: how it ended, and the average strategy with read access for later
 /// code. It is held in memory; the solution file comes in a later milestone.
 ///
-/// Node indices are those of the [`PostflopTree`] ([`Solution::tree`]), and hand indices those
-/// of each player's [`HandList`] ([`Solution::hands`]).
+/// Node indices are those of the game's public tree ([`Solution::game`]), which on a river spot
+/// are those of the [`PostflopTree`] ([`Solution::tree`]); [`PostflopGame::find`] gives the
+/// node of a path. Hand indices are those of each player's [`HandList`] ([`Solution::hands`]).
 #[derive(Debug, Clone)]
 pub struct Solution {
-    game: RiverGame,
+    game: PostflopGame,
     strategy: PublicProfile,
     stop: StopReason,
     iterations: u64,
@@ -183,11 +204,12 @@ pub struct Solution {
 
 impl Solution {
     /// The game that was solved.
-    pub fn game(&self) -> &RiverGame {
+    pub fn game(&self) -> &PostflopGame {
         &self.game
     }
 
-    /// The betting tree.
+    /// The betting tree. Its node indices are the public tree's on a river spot only: see
+    /// [`PostflopGame::tree_node`].
     pub fn tree(&self) -> &PostflopTree {
         self.game.tree()
     }
@@ -219,7 +241,7 @@ impl Solution {
     }
 
     /// Each player's expected value under the average strategy, in chips per hand dealt and
-    /// counted from the start of the river, indexed by [`Player::index`].
+    /// counted from the start of the spot, indexed by [`Player::index`].
     pub fn values(&self) -> [f64; 2] {
         self.exploitability.values
     }
@@ -238,19 +260,19 @@ impl Solution {
     }
 
     /// Each player's own reach of `node` with each of its hands under the average strategy:
-    /// see [`RiverGame::reach`]. Panics if `node` is out of range.
+    /// see [`PostflopGame::reach`]. Panics if `node` is out of range.
     pub fn reach(&self, node: u32) -> [Vec<f64>; 2] {
         self.game.reach(&self.strategy, node)
     }
 
     /// The probability that the acting player holds each of its hands once `node` is reached
-    /// under the average strategy: see [`RiverGame::hand_weights`].
+    /// under the average strategy: see [`PostflopGame::hand_weights`].
     pub fn hand_weights(&self, node: u32) -> Option<Vec<f64>> {
         self.game.hand_weights(&self.strategy, node)
     }
 
     /// The probability of each action once `node` is reached under the average strategy, card
-    /// removal by the opponent's range included: see [`RiverGame::action_frequencies`]. This
+    /// removal by the opponent's range included: see [`PostflopGame::action_frequencies`]. This
     /// is how often each action is actually taken there, not what a range view shows.
     pub fn action_frequencies(&self, node: u32) -> Option<Vec<f64>> {
         self.game.action_frequencies(&self.strategy, node)
@@ -258,14 +280,14 @@ impl Solution {
 
     /// Each hand's share of the acting player's range at `node` by its own combos alone, range
     /// weight times own reach, under the average strategy: see
-    /// [`RiverGame::range_view_weights`].
+    /// [`PostflopGame::range_view_weights`].
     pub fn range_view_weights(&self, node: u32) -> Option<Vec<f64>> {
         self.game.range_view_weights(&self.strategy, node)
     }
 
     /// Each action's frequency at `node` as a solver's range view shows it, over the acting
     /// player's own combos with no card removal by the opponent's range, under the average
-    /// strategy: see [`RiverGame::range_view_frequencies`]. Use it to compare with another
+    /// strategy: see [`PostflopGame::range_view_frequencies`]. Use it to compare with another
     /// solver; use [`Solution::action_frequencies`] for how often an action is taken.
     pub fn range_view_frequencies(&self, node: u32) -> Option<Vec<f64>> {
         self.game.range_view_frequencies(&self.strategy, node)
@@ -273,24 +295,25 @@ impl Solution {
 
     /// Each hand class in the acting player's range at `node`, with its share of the range and
     /// its frequency for each action, as a range view shows them, under the average strategy:
-    /// see [`RiverGame::range_view_classes`].
+    /// see [`PostflopGame::range_view_classes`].
     pub fn range_view_classes(&self, node: u32) -> Option<Vec<ClassView>> {
         self.game.range_view_classes(&self.strategy, node)
     }
 
     /// The probability that a hand dealt plays to `node` under the average strategy: see
-    /// [`RiverGame::reach_probability`]. Panics if `node` is out of range.
+    /// [`PostflopGame::reach_probability`]. Panics if `node` is out of range.
     pub fn reach_probability(&self, node: u32) -> f64 {
         self.game.reach_probability(&self.strategy, node)
     }
 }
 
-/// Solves a river spot, as the [module documentation](self) describes, calling `progress`
-/// after each exploitability measurement.
+/// Solves a spot on the flop, the turn or the river, as the [module documentation](self)
+/// describes, calling `progress` after each exploitability measurement.
 ///
-/// Fails if the spot is not a valid river spot (see [`RiverGame::new`]) or an option is out of
-/// range: a target that is negative or not finite, a `check_every` of 0, or DCFR parameters
-/// that are not finite.
+/// Fails if the game cannot be built (see [`PostflopGame::with_node_limit`]): a spot that does
+/// not pass [`Spot::validate`], or a betting or public tree over `options.max_nodes`. Fails as
+/// well if an option is out of range: a target that is negative or not finite, a `check_every`
+/// or `max_nodes` of 0, or DCFR parameters that are not finite.
 pub fn solve(
     spot: &Spot,
     options: &SolveOptions,
@@ -298,9 +321,9 @@ pub fn solve(
 ) -> Result<Solution, SolveError> {
     let start = Instant::now();
     options.check()?;
-    let game = RiverGame::new(spot)?;
+    let game = PostflopGame::with_node_limit(spot, options.max_nodes)?;
     let mut solver = VectorCfr::new(game, options.schedule);
-    let mut measure = |solver: &VectorCfr<RiverGame>| -> (Progress, PublicProfile) {
+    let mut measure = |solver: &VectorCfr<PostflopGame>| -> (Progress, PublicProfile) {
         let strategy = solver.average_strategy();
         let exploitability = exploitability(solver.game(), &strategy);
         let measured = Progress {
@@ -579,12 +602,19 @@ mod tests {
     }
 
     #[test]
-    fn a_flop_spot_is_refused_with_an_error() {
+    fn a_flop_spot_is_solved_and_only_the_river_game_refuses_it() {
+        // Until M4 the solve refused this spot. It now builds the flop game and measures it,
+        // while the river game, which the dump and the comparison build, still refuses it.
         let mut spot = load("toy_polarized");
         spot.board = "Ks9h6d".parse().unwrap();
         spot.tree.flop = spot.tree.river.clone();
         spot.tree.turn = spot.tree.river.clone();
-        let error = solve(&spot, &SolveOptions::default(), |_| {}).unwrap_err();
+        let (solution, calls) = run(&spot, capped(0, 10));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(solution.tree().spec().street, pk_game::Street::Flop);
+        assert!(solution.game().board(0) == spot.board);
+        assert!(solution.exploitability().percent_of_pot > 1.0);
+        let error = RiverGame::new(&spot).unwrap_err();
         assert!(
             matches!(error, SolveError::NotRiver { cards: 3 }),
             "{error}"

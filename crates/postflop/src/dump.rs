@@ -378,6 +378,9 @@ impl SolutionDump {
     /// with the average strategy, the EVs of [`node_values`](mod@crate::node_values), each
     /// player's value, and the iterations and exploitability of the solve. The spot's name is
     /// left out, since a solution does not hold it.
+    ///
+    /// Panics if the solution is not of a river spot: version 1 of the format holds river
+    /// solutions only.
     pub fn from_solution(solution: &Solution) -> SolutionDump {
         let solver = SolverInfo {
             name: SOLVER_NAME.to_string(),
@@ -411,6 +414,11 @@ pub(crate) fn dump_of(
     solver: SolverInfo,
     values: Option<[f64; 2]>,
 ) -> SolutionDump {
+    assert_eq!(
+        game.tree().spec().street,
+        Street::River,
+        "a solution dump holds the solution of a river spot only"
+    );
     let board = game.board_hands().board();
     let rake = game.rake();
     let hands = [Player::Oop, Player::Ip].map(|player| {

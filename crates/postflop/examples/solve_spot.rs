@@ -1,20 +1,26 @@
-//! Solves a river spot file and prints what the solver found: the spot, the solve's progress,
-//! the result, and the strategy at one node, as a range view and as a 13x13 grid of hand
-//! classes for each action.
+//! Solves a spot file and prints what the solver found: the spot, the solve's progress, the
+//! result, and the strategy at one node, as a range view and as a 13x13 grid of hand classes
+//! for each action.
 //!
 //! ```text
 //! cargo run --release -p pk-postflop --example solve_spot -- reference/spots/river/toy_polarized.toml
 //! cargo run --release -p pk-postflop --example solve_spot -- <spot> --node "x b50" --target 0.1
 //! ```
 //!
+//! On a flop or turn spot, a node after a street ends names the card that falls, as in
+//! `--node "x x 7s b50"`.
+//!
 //! This is a way to try the library, not the `solver` command line, which comes in M5. Every
 //! number it prints is one of the library's read-outs; the example only formats them.
 
 use std::process::ExitCode;
 
+use pk_cfr::PublicGame;
 use pk_core::NUM_CLASSES;
 use pk_game::{Action, CHIPS_PER_BB, Chips, Node, Outcome, Player};
-use pk_postflop::{ClassView, Progress, Solution, SolveOptions, Spot, StopReason, solve};
+use pk_postflop::{
+    ClassView, PostflopGame, Progress, Solution, SolveOptions, Spot, StopReason, solve,
+};
 
 const USAGE: &str =
     "usage: solve_spot <spot file> [--node \"x b50\"] [--target <percent>] [--iterations <cap>]";
@@ -42,17 +48,29 @@ struct Args {
 fn run() -> Result<(), String> {
     let args = parse_args(std::env::args().skip(1))?;
     let spot = Spot::load(&args.spot).map_err(|e| e.to_string())?;
-    // The solve builds the same tree. Finding the node first means a mistyped path costs no
-    // solve.
-    let tree = spot.build_tree().map_err(|e| e.to_string())?;
+    // The solve builds the same game. Finding the node first means a mistyped path costs no
+    // solve. The game is dropped before the solve builds its own.
     let path = args.path;
-    let node = tree.find(&path).map_err(|e| format!("--node: {e}"))?;
-    if let Node::Terminal { outcome, .. } = tree.node(node) {
-        return Err(format!(
-            "--node: `{path}` {}; give a node where a player acts",
-            ending(*outcome)
-        ));
-    }
+    let (node, tree_nodes, public_nodes) = {
+        let game = PostflopGame::from_spot(&spot).map_err(|e| e.to_string())?;
+        let node = game.find(&path).map_err(|e| format!("--node: {e}"))?;
+        match game.tree().node(game.tree_node(node)) {
+            Node::Terminal { outcome, .. } => {
+                return Err(format!(
+                    "--node: `{path}` {}; give a node where a player acts",
+                    ending(*outcome)
+                ));
+            }
+            Node::Chance { street, .. } => {
+                return Err(format!(
+                    "--node: `{path}` deals the {street}; add the card that falls, such as `{}`",
+                    game.outcomes(node)[0]
+                ));
+            }
+            Node::Player { .. } => {}
+        }
+        (node, game.tree().nodes().len(), game.num_nodes())
+    };
 
     let hands = spot.board_hands();
     let rake = if spot.rake_percent == 0.0 {
@@ -72,10 +90,10 @@ fn run() -> Result<(), String> {
         bb(spot.effective_stack)
     );
     println!(
-        "OOP has {} hands and IP {}; the tree has {} nodes",
+        "OOP has {} hands and IP {}; the betting tree has {tree_nodes} nodes, and with a child \
+         for every card that can fall, {public_nodes}",
         hands.hands(Player::Oop).len(),
         hands.hands(Player::Ip).len(),
-        tree.nodes().len()
     );
 
     let options = args.options;
@@ -121,16 +139,11 @@ fn print_progress(progress: &Progress) {
 
 /// The strategy at a player node, then its children.
 fn print_node(solution: &Solution, node: u32, path: &str) {
-    let tree = solution.tree();
-    let Node::Player {
-        actor,
-        actions,
-        children,
-        ..
-    } = tree.node(node)
-    else {
-        unreachable!("the node was checked to be a player node");
-    };
+    let game = solution.game();
+    let actor = game
+        .actor(node)
+        .expect("the node was checked to be a player node");
+    let (actions, children) = (game.actions(node), game.children(node));
     let name = if path.is_empty() { "the root" } else { path };
     println!(
         "\nAt {name}, {actor} acts; play reaches it {:.2}% of the time",
@@ -168,10 +181,13 @@ fn print_node(solution: &Solution, node: u32, path: &str) {
         } else {
             format!("{path} {action}")
         };
-        let what = match tree.node(child) {
+        let what = match game.tree().node(game.tree_node(child)) {
             Node::Player { actor, .. } => format!("{actor} acts"),
             Node::Terminal { outcome, .. } => ending(*outcome),
-            Node::Chance { street, .. } => format!("deals the {street}"),
+            Node::Chance { street, .. } => format!(
+                "deals the {street}: add the card that falls, such as `{}`",
+                game.outcomes(child)[0]
+            ),
         };
         println!("  {:<24} {what}", format!("\"{child_path}\""));
     }
@@ -191,16 +207,11 @@ fn label(solution: &Solution, node: u32, action: Action) -> String {
     format!("{:<6}{words}", action.to_string())
 }
 
-/// The street total a call at `node` matches: on the river, the bet or raise that led there.
+/// The street total a call at `node` matches: the bet or raise that led there.
 fn called(solution: &Solution, node: u32) -> Chips {
-    let (parent, index) = solution
-        .game()
-        .path(node)
-        .pop()
-        .expect("a call faces a bet");
-    let Node::Player { actions, .. } = solution.tree().node(parent) else {
-        unreachable!("a path passes through player nodes only");
-    };
+    let game = solution.game();
+    let (parent, index) = game.path(node).pop().expect("a call faces a bet");
+    let actions = game.actions(parent);
     actions[index].to().expect("a call faces a bet or raise")
 }
 

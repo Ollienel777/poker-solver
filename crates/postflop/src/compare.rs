@@ -36,7 +36,7 @@
 //! is what a person sees in another solver. It is not the probability of each action once the
 //! node is reached, [`RiverGame::action_frequencies`], which weighs each hand also by the
 //! opponent's hands it can meet there, and which differs from it by up to several points (see
-//! [`crate::river`]). Both sides are summed by the same functions, here, from their per-hand
+//! [`crate::game`]). Both sides are summed by the same functions, here, from their per-hand
 //! strategies and EVs, so the convention can never differ between them: a dump carries no
 //! aggregate of its own.
 //!

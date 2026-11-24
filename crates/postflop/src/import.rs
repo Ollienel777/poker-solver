@@ -31,7 +31,7 @@ use std::fmt;
 
 use pk_cfr::PublicProfile;
 use pk_core::Combo;
-use pk_game::Player;
+use pk_game::{Player, Street};
 use thiserror::Error;
 
 use crate::dump::{
@@ -300,7 +300,15 @@ pub struct MappedSolution {
 impl MappedSolution {
     /// One of our solutions, which needs no mapping. Its reported numbers are those the solve
     /// gives, and its reported EVs are the EVs our code measures, as its dump would hold.
+    ///
+    /// Panics if the solution is not of a river spot: the comparison handles river solutions
+    /// only.
     pub fn from_solution(solution: &Solution) -> MappedSolution {
+        assert_eq!(
+            solution.tree().spec().street,
+            Street::River,
+            "a mapped solution is the solution of a river spot only"
+        );
         let solver = SolverInfo {
             name: SOLVER_NAME.to_string(),
             iterations: Some(solution.iterations()),
