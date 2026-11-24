@@ -498,7 +498,10 @@ dependencies = [
  "criterion",
  "pk-core",
  "pk-game",
+ "proptest",
  "rand_chacha",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]

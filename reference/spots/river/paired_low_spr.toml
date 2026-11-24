@@ -1,0 +1,17 @@
+format = 1
+name = "paired_low_spr"
+description = "Illustrative ranges, written for this fixture: a 3-bet pot on a paired board. BB (OOP) 3-bet BTN (IP), bet the flop Qc Qd 8h and the turn 5s, and was called twice; on the river 3c only 30bb is left behind a 40bb pot (SPR 0.75), so all-in is the natural bet. Narrow ranges: OOP holds trips, overpairs and missed aces; IP holds trips, full houses and underpairs. A half-pot bet or all-in, and facing a bet only an all-in raise. 5% rake, cap 3bb, which every called bet reaches."
+board = "QdQc8h5s3c"
+pot_bb = 40.0
+effective_stack_bb = 30.0
+oop_range = "KK+,AQs+,A4s-A5s,KQs,AQo+,JJ:0.5,AJs:0.5,KJs:0.5,QJs:0.5,76s:0.5,TT:0.25"
+ip_range = "88-JJ,55,A8s,KQs,QTs+,98s,87s,66-77:0.5,ATs-AJs:0.5,KJs:0.5,JTs:0.5,AQs+:0.25,AKo:0.25"
+
+[rake]
+percent = 5.0
+cap_bb = 3.0
+
+[tree]
+max_raises = 1
+allin_threshold = 1.0
+river = { bets = [0.5], raises = [], allin = true }

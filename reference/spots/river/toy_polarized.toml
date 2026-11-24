@@ -1,0 +1,17 @@
+format = 1
+name = "toy_polarized"
+description = "Not a real poker spot: the polarized toy game, the solver's first correctness check. The ranges are illustrative, built for this game. OOP, the bettor, holds only nuts (99 and 66, sets, 6 combos) and air (JT, king high, 16 combos); IP, the caller, holds only KQ (a pair of kings, 12 combos), which beats all the air and loses to all the nuts. No card in one range is in the other, so card removal does not interfere. OOP checks or bets b = 0.5 of the pot, and no one may raise. At equilibrium OOP bets all its nuts and enough air (2 of its 16 air combos, in total) that bluffs are b / (1 + 2b) = 1/4 of its bets, and IP calls a bet 1 / (1 + b) = 2/3 of the time. After a check IP wins the pot whether it checks or bets, so its play there is not pinned down. Rake-free, so these frequencies hold exactly."
+board = "Ks9h6d3c2s"
+pot_bb = 10.0
+effective_stack_bb = 20.0
+oop_range = "99,66,JTs,JTo"
+ip_range = "KQs,KQo"
+
+[rake]
+percent = 0.0
+cap_bb = 0.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+river = { bets = [0.5], raises = [], allin = false }

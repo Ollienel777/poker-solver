@@ -200,7 +200,7 @@ The preflop solver samples private cards, so its regret updates are scalar per i
 
 ## postflop
 
-The input is `Spot { board, oop_range, ip_range, pot, eff_stack, tree, rake }`. Each iteration updates the two players in turn. For each player, a traversal carries the opponent's reach vector, computes counterfactual values, applies the DCFR discount and accumulates the average strategy. Exploitability is computed every k iterations. The solve stops at a target (default 0.3% of pot), an iteration cap or a time cap.
+The input is a `Spot` (see [Spot file](#spot-file)): the `board`, the `oop_range` and `ip_range`, the `pot` and `effective_stack`, the `tree` sizing, and the rake as `rake_percent` and `rake_cap`. From it the solver takes the starting street, the built tree, the `BoardHands` and the `Rake`. Each iteration updates the two players in turn. For each player, a traversal carries the opponent's reach vector, computes counterfactual values, applies the DCFR discount and accumulates the average strategy. Exploitability is computed every k iterations. The solve stops at a target (default 0.3% of pot), an iteration cap or a time cap.
 
 Tree shape: every flop line that closes the street leads to a chance node over up to 49 turn cards, and every turn line to one over the remaining river cards. Per-player hand vectors hold up to 1,176 combos on the flop, 1,128 on the turn and 1,081 on the river. A node stores only the combos that are in range.
 
@@ -353,6 +353,62 @@ Keys may come in any order, positions in any case, and amounts as integers or de
 
 **Writing** produces the layout above: the keys in that order, canonical range strings, positions in capitals and amounts as decimals. A hand-typed file and an exported one therefore look alike. Reading what was written gives back an equal value, and a file read from disk rewrites to the same text every time.
 
+### Spot file
+
+TOML, holding the whole input of a postflop solve: the board, both ranges, the pot and stack, the tree sizing and the rake. The test spots in `reference/spots/` are spot files, and `solve-postflop` (M5) will read one. The reader and writer are `pk_postflop::spot`, because a spot builds the postflop solver's `BoardHands`.
+
+```toml
+format = 1
+name = "example"
+description = "Illustrative ranges, not from a reference."
+board = "Ks9h7d4c2s"
+pot_bb = 20.0
+effective_stack_bb = 80.0
+oop_range = "TT-QQ,AKs,KQs,K9s,AKo:0.5"
+ip_range = "KK,99,AKs,KJs,QJs,T8s:0.5"
+
+[rake]
+percent = 5.0
+cap_bb = 3.0
+
+[tree]
+max_raises = 1
+allin_threshold = 1.0
+river = { bets = [0.5, 1.0], raises = [3.0], allin = false }
+```
+
+| Key | Holds |
+| --- | --- |
+| `format` | the format version, 1 |
+| `name` | the spot's name. A test spot is named after its file |
+| `description` | what the spot is for and where its ranges came from |
+| `board` | 3, 4 or 5 distinct cards. Their number sets the street the spot starts on |
+| `pot_bb` | the pot when the spot starts |
+| `effective_stack_bb` | what each player has left to bet when the spot starts |
+| `oop_range`, `ip_range` | the ranges of the player who acts first and the one who acts last, in [range-string syntax](#range-file) |
+| `[rake]` | `percent`, at least 0 and less than 100, and `cap_bb`. A rake-free spot writes `percent = 0.0` |
+| `[tree]` | `max_raises` and `allin_threshold`, as in [`[postflop]`](#gameconfig-schema), and a sizing `{ bets, raises, allin }` for each street the spot plays: `river` alone for a river spot, `turn` and `river` for a turn spot, all three for a flop spot |
+
+The rake has no `no_flop_no_drop`: a spot starts after the flop, so every pot it reaches is raked. Positions are not recorded, because the postflop solver knows only the player who acts first and the one who acts last.
+
+**Loading is strict**, as for range files. Every key is required, except that `[tree]` holds exactly the streets the spot plays, and no other key is allowed. Each error names the field, such as `ip_range` or `tree.river.bets`, and errors come in the order of the layout. A spot is rejected for:
+
+- a format other than 1, a missing or unknown key, or a value of the wrong type
+- a blank `name` or `description`
+- a board that does not parse, repeats a card, or has other than 3, 4 or 5 cards
+- a pot or stack that is not a positive whole number of chips, at most 1,000,000bb
+- a range that does not parse, or that holds no hand once the board's cards are removed
+- two ranges with no pair of hands, one from each, that can be dealt together
+- a rake percent outside 0 to 100, a cap that is not a whole number of chips, or a cap of 0 under a positive percent, which would take no rake
+- a size the tree builder rejects: an empty list of bets, a bet that is not a positive fraction of the pot, a raise that is not more than 1, or an all-in threshold that is not more than 0 and at most 1
+- a missing sizing for a street the spot plays, or a sizing for a street before its board
+
+Keys may come in any order, cards in any order and case, and amounts and sizes as integers or decimals. `Spot::validate` makes the same checks on a spot built in code.
+
+**Writing** produces the layout above: the keys in that order, the board from its highest card to its lowest, canonical range strings, amounts in big blinds as decimals, and sizes as the shortest decimal that reads back exactly. Reading what was written gives back an equal spot, and a spot read from a file in this layout rewrites to the same text.
+
+**What the solver takes.** `Spot::street` is the starting street, from the board's length. `Spot::tree_spec` and `Spot::build_tree` give the betting tree; a `PostflopSizing` has a field for every street, so the streets before the root hold a copy of the root street's sizing, which the builder never reads. `Spot::board_hands` gives the `BoardHands` and `Spot::rake` the `Rake`.
+
 ### Solution file
 
 - **Structure.** The magic `PKSOL`, a `u16` format version and a JSON header, followed by zstd-compressed sections. The header records the inputs, tree config, tree hash, iterations, exploitability and solver version. The sections hold the tree, `u16`-quantized strategies per node and EVs per node.
@@ -380,7 +436,7 @@ Fixtures live in `reference/`:
 - `spots/flop/*.toml`
 - reference solutions for those spots
 
-Each spot sets its own rake. The set includes rake-free spots for the first reference comparisons and raked spots at the configs' 5% (DECISIONS D16).
+Each spot sets its own rake. The set includes rake-free spots for the first reference comparisons and raked spots at the configs' 5% (DECISIONS D16). Each spot also fixes its tree sizing, with every bet and raise a whole number of chips before rounding, so that the reference solver builds the same tree. `reference/README.md` lists the spots and what each one stresses; the river set includes the polarized toy game.
 
 Each milestone has a **gate issue** that closes only when its acceptance tests pass.
 

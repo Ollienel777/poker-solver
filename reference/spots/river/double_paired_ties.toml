@@ -1,0 +1,17 @@
+format = 1
+name = "double_paired_ties"
+description = "Illustrative ranges, written for this fixture: a single-raised pot on the double-paired board 9c 9d 5h 5s Kc, BTN (IP) against BB (OOP). Many hands play the board's two pair with the king or their own ace, so about a fifth of the pairs of hands, one from each range, split the pot at showdown, which stresses the tie handling; a 9, a 5 or kings make a full house. A pot-size bet or all-in, and facing a bet only an all-in raise. Rake-free."
+board = "Kc9d9c5s5h"
+pot_bb = 8.0
+effective_stack_bb = 24.0
+oop_range = "66-88,22-44,ATs-AQs,A6s-A8s,A2s-A4s,KTs+,K7s-K8s,QTs+,JTs,T8s,87s,76s,64s,KJo+,QTo+,JTo,TT-QQ:0.5,A9s:0.5,A5s:0.5,T9s:0.5,98s:0.5,65s:0.5,A6o-AQo:0.5,KTo:0.5,AKs:0.25,K9s:0.25,AKo:0.25"
+ip_range = "TT-JJ,66-88,22-44,A2s-AJs,KJs+,QTs+,J8s+,T7s-T8s,86s+,76s,QTo+,JTo,AA:0.5,QQ:0.5,AKs:0.5,K9s:0.5,Q9s:0.5,97s:0.5,54s:0.5,AKo:0.5,A8o-AJo:0.5,KK:0.25"
+
+[rake]
+percent = 0.0
+cap_bb = 0.0
+
+[tree]
+max_raises = 1
+allin_threshold = 1.0
+river = { bets = [1.0], raises = [], allin = true }

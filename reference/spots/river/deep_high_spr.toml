@@ -1,0 +1,17 @@
+format = 1
+name = "deep_high_spr"
+description = "Illustrative ranges, written for this fixture: a deep single-raised pot. BTN (IP) opened to 2.5bb, the SB folded and BB (OOP) called, and the flop Js 7c 4d and the turn 3s were checked through; on the river Ah, 97.5bb is left behind a 5.5bb pot (SPR about 18). Both ranges are wide and capped. Half-pot and pot bets, raises to 3x, up to three raises, and all-in at every decision. 5% rake, cap 3bb."
+board = "AhJs7c4d3s"
+pot_bb = 5.5
+effective_stack_bb = 97.5
+oop_range = "88-TT,22-66,A2s-A9s,KJs,K7s,K3s-K4s,QJs,Q7s,Q3s-Q4s,J8s+,T7s,97s,87s,75s+,64s+,53s+,43s,QJo,J9o+,T9o,98o,87o,76o,65o,54o,J6s:0.5,A2o-A9o:0.5,KJo:0.5,K7o:0.5,Q7o:0.5,JJ:0.25"
+ip_range = "KJs,K7s-K9s,QJs,Q8s-Q9s,J8s+,T7s+,98s,86s+,54s,KJo+,QJo,JTo,A2s-A8s:0.75,22-TT:0.5,Q7s:0.5,65s:0.5,A2o-ATo:0.5,KTo:0.5,QTo:0.5,T9o:0.5,98o:0.5"
+
+[rake]
+percent = 5.0
+cap_bb = 3.0
+
+[tree]
+max_raises = 3
+allin_threshold = 1.0
+river = { bets = [0.5, 1.0], raises = [3.0], allin = true }

@@ -1,0 +1,17 @@
+format = 1
+name = "four_flush"
+description = "Illustrative ranges, written for this fixture: a single-raised pot where BTN (IP) bet the flop Kh 9h 2c and the turn 6h and BB (OOP) called both; the river 4h puts four hearts on the board, so any heart makes a flush, ranked by the hearts held, and the ace of hearts makes the best ones. Card removal matters: a heart in one hand takes flushes out of the other range. One bet size of half pot, and up to two raises to 2.5x. Rake-free."
+board = "Kh9h6h4h2c"
+pot_bb = 16.0
+effective_stack_bb = 64.0
+oop_range = "77-88,A9s,A5s,A3s,KTs+,K7s-K8s,K5s,K3s,QJs,Q9s,J9s+,T8s+,98s,87s,75s+,65s,KJo+,TT-JJ:0.5,55:0.5,33:0.5,97s:0.5,54s:0.5,AJo-AQo:0.5,A9o:0.5,KTo:0.5,T9o:0.5,QQ:0.25"
+ip_range = "99,66,22,ATs+,A7s-A8s,K9s+,QTs+,JTs,T8s,87s,76s,AKo,KJo+,AA:0.5,TT-QQ:0.5,A5s:0.5,65s:0.5,AQo:0.5,QJo:0.5,JTo:0.5"
+
+[rake]
+percent = 0.0
+cap_bb = 0.0
+
+[tree]
+max_raises = 2
+allin_threshold = 1.0
+river = { bets = [0.5], raises = [2.5], allin = false }
