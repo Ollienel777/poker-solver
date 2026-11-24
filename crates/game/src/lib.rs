@@ -3,6 +3,7 @@
 //! The tree builders follow in milestones M3 and M7.
 
 pub mod config;
+mod order;
 pub mod position;
 
 pub use config::{
