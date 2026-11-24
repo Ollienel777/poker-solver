@@ -2,7 +2,7 @@
 
 Nov 23, 2026 · @Nelson
 
-> Exported from the Claude Docs brief. Open questions are now tracked as `type: decision` issues; see [docs/DECISIONS.md](docs/DECISIONS.md).
+> Exported from the Claude Docs brief. Open questions are now tracked as `type: decision` issues; see [docs/DECISIONS.md](docs/DECISIONS.md). The first five open questions were answered on 2026-11-23, and this file reflects those answers.
 
 ## Goal and scope
 
@@ -29,12 +29,12 @@ These are defaults chosen to get started. Change any of them in the first sessio
 
 | Decision | Default | Status |
 | --- | --- | --- |
-| Language | Rust (rayon for parallelism, no GC, good reference solvers exist) | Assumed |
-| Table size | 6-max | Assumed. 8 or 9-handed makes the preflop tree several times larger |
+| Language | Rust (rayon for parallelism, no GC, good reference solvers exist) | Decided 2026-11-23 |
+| Table size | 8-handed | Decided 2026-11-23. The cost estimates below assumed 6-max |
 | Blinds | SB 0.5bb, BB 1bb | Standard |
-| Straddle | 2bb, posted UTG, acts last preflop | Assumed |
-| Ante | Size and type (per player or BB ante) set in config | Open, see open questions |
-| Rake | Zero for validation, then configurable percent and cap | Assumed |
+| Straddle | 2bb, posted UTG every hand, acts last preflop. No button straddle | Decided 2026-11-23 |
+| Ante | 0.5bb from every player in configs C and D | Decided 2026-11-23 |
+| Rake | 5% with no flop no drop, capped at 3 times the largest blind (3bb in A and B, 6bb in C and D). Test spots can still set zero rake | Decided 2026-11-23 |
 | Preflop sizing | Open 2.5bb (3bb from SB), 3-bet 3x in position and 4x out of position, 4-bet 2.3x, all-in always allowed once a raise would commit over 40% of stack | Assumed, tunable |
 | Postflop sizing | Two bet sizes per street (33% and 75% pot), one raise size, all-in on river | Assumed, tunable |
 | Postflop scope | Heads-up only | Decided |
@@ -101,7 +101,7 @@ Build the postflop solver first. It is the better-documented half, it can be val
    - Accept: bucketing is deterministic and hands with obviously similar strength land together on spot checks.
 7. **Preflop solver, heads-up first.** MCCFR over the abstracted full game with two players, where results can be sanity-checked against well-known heads-up ranges.
    - Accept: button opening and big blind defending frequencies are in a plausible range, and checkpoints resume correctly after a kill.
-8. **Preflop solver, 6-max.** Extend to N players, config A locally at low iteration counts, then at full scale on AWS.
+8. **Preflop solver, 8-handed.** Extend to N players, config A locally at low iteration counts, then at full scale on AWS.
    - Accept: opening ranges by position are within a few percentage points of reference ranges for config A.
    - This completes version 1 for config A.
 9. **All four configs.** Run B, C and D. Export ranges for every heads-up formation.
@@ -118,11 +118,11 @@ A solver can run, converge and still be wrong, so every layer needs an independe
 - **Invariants.** Strategies sum to 1 at every node, reach probabilities are consistent, EV of the two players sums to the pot minus rake, results are identical across suit-isomorphic boards.
 - **Cross-solver comparison.** Run the same tree in an open-source solver (postflop-solver in Rust, or TexasSolver) and diff frequencies and EVs. Use these as external reference binaries only. Both are believed to be AGPL licensed, so do not copy their code into this project without checking the licence.
 - **Reference solutions.** A paid month of a commercial solver is useful as an answer key once milestones 4 and 8 produce output. Record solutions by hand into `reference/` for a few dozen preflop formations and a handful of flop spots. Do not scrape or automate extraction; that is very likely against the terms of service. Confirm the exact configs (200bb, straddle, ante, table size) are available before paying.
-- **Multiway caveat.** There is no exploitability number that means much for 6-max. For the preflop solver, rely on stability across random seeds, convergence of average strategy over iterations, and comparison with reference ranges.
+- **Multiway caveat.** There is no exploitability number that means much for an 8-handed table. For the preflop solver, rely on stability across random seeds, convergence of average strategy over iterations, and comparison with reference ranges.
 
 ## Compute and budget
 
-The budget is a couple thousand dollars of AWS credits, which covers development, all four preflop configs and on-demand postflop solving, but not a pre-solved flop library. All figures are estimates for 6-max; check current AWS pricing and the credit terms (expiry, excluded services, spot eligibility).
+The budget is a couple thousand dollars of AWS credits, which covers development, all four preflop configs and on-demand postflop solving, but not a pre-solved flop library. All figures were estimated for 6-max. The table is now 8-handed, so expect the preflop rows to cost 3 to 5 times more (see "What moves the numbers" below). Check current AWS pricing and the credit terms (expiry, excluded services, spot eligibility).
 
 | Item | Per unit | Expected total |
 | --- | --- | --- |
@@ -148,11 +148,11 @@ The budget is a couple thousand dollars of AWS credits, which covers development
 
 Settle the first three before writing GameConfig, since they shape the preflop tree.
 
-- [ ] How many players: 6-max, or 8 to 9-handed as in most live straddle games?
-- [ ] Ante format and size: one ante per player, or a single big blind ante? How large?
-- [ ] Straddle details: 2bb from UTG only, or also button straddles?
-- [ ] Rake structure to model (percent, cap, no flop no drop), or rake-free?
-- [ ] Rust or C++? The brief assumes Rust.
+- [x] How many players: 6-max, or 8 to 9-handed as in most live straddle games? **8-handed.**
+- [x] Ante format and size: one ante per player, or a single big blind ante? How large? **0.5bb per player.**
+- [x] Straddle details: 2bb from UTG only, or also button straddles? **UTG only.**
+- [x] Rake structure to model (percent, cap, no flop no drop), or rake-free? **5%, capped at 3 times the largest blind, no flop no drop.**
+- [x] Rust or C++? The brief assumes Rust. **Rust.**
 - [ ] Are limps allowed in the preflop tree? They matter more in straddle and ante games but enlarge the tree.
 - [ ] Local machine specs (cores, RAM), which set how far milestones 3 to 7 can go before AWS is needed.
 - [ ] Output format wanted for studying: terminal grids, JSON, or a simple local HTML viewer later?

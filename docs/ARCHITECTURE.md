@@ -54,7 +54,7 @@ Rules:
 
 - **Chips are integers.** Every amount is a `u32` count of chips, with 1 bb = 100 chips. Bet sizes are computed in `f64` and rounded to whole chips by one function, and a tree never holds two actions with the same rounded amount. The config loader rejects amounts that are not whole chips.
 - **Cards.** `Card(u8)` is `4 × rank + suit`, with rank 0 the deuce and rank 12 the ace. `CardSet(u64)` is a bitmask. The 1,326 combos have a fixed index order. The 169 hand classes use the 13×13 grid order: pairs on the diagonal, suited hands above it, offsuit hands below it.
-- **Positions are named by role:** UTG, HJ, CO, BTN, SB, BB at 6-max. The straddler keeps the name UTG, because the straddle is only a forced bet attached to that position. This keeps formation names the same across configs.
+- **Positions are named by role:** UTG, UTG1, LJ, HJ, CO, BTN, SB, BB at the 8-handed table every config uses. Names for other table sizes are derived from the player count. The straddler keeps the name UTG, because the straddle is only a forced bet attached to that position. This keeps formation names the same across configs.
 - **Determinism.** Every random draw comes from a seeded `ChaCha8Rng`, and seeds are recorded in run metadata. Parallel postflop code collects per-branch results and reduces them in a fixed order, so results are bit-identical for any thread count. Multi-threaded preflop MCCFR is not deterministic, because it uses lock-free updates. It has a single-thread mode that is, and tests use that mode.
 - **Floats.** Regrets and strategies are stored as `f32`, then compressed. EVs, exploitability and test oracles accumulate in `f64`.
 - **Slow tests** are marked `#[ignore = "slow"]` and run with `cargo test --release -- --ignored`. The fast suite should stay under about a minute.
@@ -72,13 +72,13 @@ Rules:
 
 ### GameConfig schema
 
-One struct drives everything. A straddle is one more live blind, and an ante is a dead forced bet. No solver code checks whether a game has a straddle. Config C would look like this:
+One struct drives everything. A straddle is one more live blind, and an ante is a dead forced bet. No solver code checks whether a game has a straddle. Config C looks like this:
 
 ```toml
 name = "C"
 description = "100bb, UTG straddle, ante"
-players = 6
-stack_bb = 100.0
+players = 8
+stack_bb = 100.0        # before forced bets; blinds and antes come out of it
 
 [[forced_bets]]
 position = "SB"
@@ -96,13 +96,13 @@ amount_bb = 2.0
 kind = "blind"          # the straddle
 
 [[forced_bets]]
-position = "BB"         # or "ALL" for a per-player ante
-amount_bb = 1.0
+position = "ALL"        # every seat posts
+amount_bb = 0.5
 kind = "ante"           # dead: goes to the pot, never counts toward a call
 
 [rake]
-percent = 0.0
-cap_bb = 0.0
+percent = 5.0
+cap_bb = 6.0            # 3 × the effective blind; 3.0 in configs A and B
 no_flop_no_drop = true
 
 [preflop]
@@ -130,7 +130,9 @@ Bets are fractions of the pot. Raises are a multiple of the bet faced. All sizes
 
 Preflop sizes are multiples of the **effective blind**, which is the largest live forced bet. A 2.5× open is therefore 2.5bb in configs A and B and 5bb under a 2bb straddle, and the straddle needs no sizing table of its own (DECISIONS P2).
 
-The loader rejects configs with fewer than 2 or more than 9 players, unknown positions, amounts that are not whole chips, stacks smaller than the forced bets, or empty sizing lists. Every error names the field.
+In configs C and D the pot holds 7.5bb before the first action: 0.5 + 1 + 2 from the blinds and straddle, and 8 × 0.5 from the antes. Every seat is left with 99.5bb (C) or 199.5bb (D) to bet.
+
+The loader rejects configs with fewer than 2 or more than 9 players, unknown positions, amounts that are not whole chips, stacks smaller than the forced bets, forced bets that leave unequal live stacks, or empty sizing lists. Every error names the field.
 
 ### Positions and action order
 
@@ -142,12 +144,12 @@ These rules derive the order from the forced bets alone:
 
 | Config | Preflop order | Postflop order |
 | --- | --- | --- |
-| A, B | UTG HJ CO BTN SB BB | SB BB UTG HJ CO BTN |
-| C, D (UTG straddle) | HJ CO BTN SB BB UTG | SB BB UTG HJ CO BTN |
+| A, B | UTG UTG1 LJ HJ CO BTN SB BB | SB BB UTG UTG1 LJ HJ CO BTN |
+| C, D (UTG straddle) | UTG1 LJ HJ CO BTN SB BB UTG | SB BB UTG UTG1 LJ HJ CO BTN |
 
-A button (Mississippi) straddle cannot be derived this way. If one is adopted, `GameConfig` needs an explicit first-to-act field, which is why the straddle decision blocks `GameConfig`.
+Button (Mississippi) straddles are not modelled (DECISIONS D15). They can't be derived this way and would need an explicit first-to-act field in `GameConfig`.
 
-**Side pots.** The postflop solver is heads-up and plays to the effective stack, so it never needs side pots. Preflop showdowns can be multiway all-ins. Equal stacks with a per-player ante cannot produce a side pot, but a BB ante leaves the BB with a shorter live stack. The N-player showdown therefore implements layered side pots instead of assuming equal stacks (DECISIONS P7).
+**Side pots.** None are needed. The postflop solver is heads-up and plays to the effective stack. Preflop showdowns can be multiway all-ins, but every seat starts with the same stack and posts the same ante (DECISIONS D14), so live stacks are always equal. The loader rejects a config whose forced bets leave them unequal, as a big blind ante would (DECISIONS P7).
 
 ### Betting trees
 
@@ -226,7 +228,7 @@ Each street starts at about 200 buckets, tuned against the preflop memory budget
 
 ### Multiway pots
 
-In 6-max many preflop lines reach 3- or 4-way flops. The exact postflop solver is heads-up only, but the abstracted game still has to play those pots. The options and a recommendation are in the multiway decision issue. Whichever option is chosen, the abstract tree builder should handle any player count from the start: that is cheap now and expensive to add later.
+At an 8-handed table many preflop lines reach 3- or 4-way flops, and the 4bb of antes in C and D make that more common. The exact postflop solver is heads-up only, but the abstracted game still has to play those pots. The options and a recommendation are in the multiway decision issue. Whichever option is chosen, the abstract tree builder should handle any player count from the start: that is cheap now and expensive to add later.
 
 ### Checkpoints
 
@@ -277,7 +279,7 @@ TOML, designed to be typed by hand while reading a reference solver's range view
 format = 1
 config = "a"
 formation = "BTN_vs_BB_SRP"
-line = "UTG f, HJ f, CO f, BTN r2.5, SB f, BB c"
+line = "UTG f, UTG1 f, LJ f, HJ f, CO f, BTN r2.5, SB f, BB c"
 pot_bb = 5.5
 effective_stack_bb = 97.5
 source = "hand-recorded from <reference>, 2026-12-01"
@@ -320,6 +322,8 @@ Fixtures live in `reference/`:
 - `spots/flop/*.toml`
 - reference solutions for those spots
 
+Each spot sets its own rake. The set includes rake-free spots for the first reference comparisons and raked spots at the configs' 5% (DECISIONS D16).
+
 Each milestone has a **gate issue** that closes only when its acceptance tests pass.
 
 ## Compute and AWS
@@ -327,3 +331,4 @@ Each milestone has a **gate issue** that closes only when its acceptance tests p
 - **Local first.** Everything through M7 runs on the development machine.
 - **Run tooling (M8).** An `aws/` folder holds a launch script that prints an estimated cost first, and instance user data. The user data runs an idle watchdog, shuts the instance down when the run completes, syncs checkpoints to S3, and checkpoints on the 2-minute spot interruption notice. The billing alarm is set before the first launch.
 - **Sizing.** Instance sizes are chosen from the memory and time logged in M4 and M7, not guessed.
+- **Table size.** The brief's cost estimates assumed 6-max, and it puts 8 players at 3 to 5 times the preflop cost. Full preflop runs therefore use spot instances, and the memory estimate picks the instance before anything launches.

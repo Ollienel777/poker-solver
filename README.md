@@ -2,12 +2,12 @@
 
 A personal-use No-Limit Hold'em cash-game solver in Rust.
 
-- **Version 1** solves preflop for a multiway (6-max) table.
+- **Version 1** solves preflop for a multiway (8-handed) table.
 - **Version 2** adds a heads-up postflop solver, fed by the preflop ranges for a formation plus a board.
 
 There are four configs: 100bb and 200bb, each with and without a straddle and ante.
 
-**Status: planning.** There is no code yet. The backlog is in [Issues](https://github.com/Ollienel777/poker-solver/issues), grouped into [milestones](https://github.com/Ollienel777/poker-solver/milestones) M1 to M10, and starts with the M1 decisions (#1 to #5).
+**Status: planning.** There is no code yet. The backlog is in [Issues](https://github.com/Ollienel777/poker-solver/issues), grouped into [milestones](https://github.com/Ollienel777/poker-solver/milestones) M1 to M10. The M1 decisions are settled, so the next step is the workspace setup (#6).
 
 ## Docs
 
