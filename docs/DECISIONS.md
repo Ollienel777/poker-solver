@@ -2,7 +2,7 @@
 
 This file has three lists:
 
-- **Decided:** what the brief settled.
+- **Decided:** what the brief settled, plus answers given since.
 - **Proposed:** choices made while planning. Accept or overturn them by editing this file.
 - **Open:** questions that still need an answer. Each has a `type: decision` issue.
 
@@ -23,6 +23,18 @@ When an open question is answered, move it to Decided with the date, update any 
 | D9 | No AGPL code is copied; open-source solvers are used only as external binaries | Brief |
 | D10 | Everything through M7 runs locally. AWS is used only for validated code, with auto-shutdown and a billing alarm | Brief |
 | D11 | Out of scope: multiway postflop, neural value networks, ICM and tournaments, a pre-solved flop library, node locking, hand history import, a web UI | Brief |
+| D12 | The language is Rust | Answered 2026-11-23, [#1](https://github.com/Ollienel777/poker-solver/issues/1) |
+| D13 | All four configs are 8-handed, with positions UTG, UTG1, LJ, HJ, CO, BTN, SB, BB | Answered 2026-11-23, [#2](https://github.com/Ollienel777/poker-solver/issues/2) |
+| D14 | Configs C and D have an ante of 0.5bb from every seat, which is 4bb of dead money | Answered 2026-11-23, [#3](https://github.com/Ollienel777/poker-solver/issues/3) |
+| D15 | Configs C and D have a 2bb live straddle from UTG, posted every hand. Button straddles are not modelled | Answered 2026-11-23, [#4](https://github.com/Ollienel777/poker-solver/issues/4) |
+| D16 | Rake is 5% of the pot with no flop no drop. The cap is 3 times the effective blind: 3bb in A and B, 6bb in C and D | Answered 2026-11-23, [#5](https://github.com/Ollienel777/poker-solver/issues/5) |
+
+Notes on the 2026-11-23 answers:
+
+- **D13 raises the preflop cost.** The brief's estimates assumed 6-max, and it puts 8 players at 3 to 5 times the preflop cost. See the risk list in [ROADMAP.md](ROADMAP.md#risks).
+- **D14 and D15 together** put 7.5bb in the pot before the first action in C and D: 0.5 + 1 + 2 from the blinds and straddle, and 4 from the antes.
+- **D16's cap for A and B is a reading of the answer.** The answer was "capped at 6bb (x3 straddle)". That is recorded as 3 times the effective blind, which gives 3bb where there is no straddle. If A and B should also be 6bb, change `cap_bb` in those two configs.
+- **D16 replaces the brief's "zero rake for validation".** Test spots set their own rake, so the first reference comparisons can still be rake-free.
 
 ## Proposed
 
@@ -34,7 +46,7 @@ When an open question is answered, move it to Decided with the date, update any 
 | P4 | MCCFR and vector-form CFR are validated on Leduc in M2 | Removes risk from M3 and M7, where bugs are harder to see |
 | P5 | Postflop parallel work reduces in a fixed order | Results are bit-identical for any thread count, so tests can be exact |
 | P6 | The preflop solve accumulates the average strategy only at preflop nodes | Only the preflop strategy is exported, so this saves memory (Pluribus does the same) |
-| P7 | The N-player showdown implements layered side pots | A BB ante leaves the BB with a shorter live stack, so equal stacks can't be assumed |
+| P7 | The showdown assumes equal live stacks, and the config loader rejects a config whose forced bets leave them unequal (revised 2026-11-23) | Per-player antes (D14) keep live stacks equal, so side pots can't occur. A big blind ante would have needed them |
 | P8 | Range files are TOML holding standard range strings | They can be typed by hand from a reference and diffed, and the same file serves export |
 | P9 | Postflop nodes store only the combos that are in range | Memory |
 | P10 | The abstraction's river equity reuses the showdown sweep, once per board | The code is shared, and the pass takes minutes instead of hours |
@@ -45,15 +57,10 @@ When an open question is answered, move it to Decided with the date, update any 
 
 ## Open
 
-The brief says to settle table size, ante and straddle before writing `GameConfig` ([#12](https://github.com/Ollienel777/poker-solver/issues/12)). Rake belongs there too, because `GameConfig` carries the rake fields.
+The M1 questions are answered, so `GameConfig` ([#12](https://github.com/Ollienel777/poker-solver/issues/12)) is unblocked. These remain:
 
 | Question | Default until answered | Blocks | Issue |
 | --- | --- | --- | --- |
-| Rust or C++ | Rust | Workspace setup | [#1](https://github.com/Ollienel777/poker-solver/issues/1) |
-| Table size | 6-max | `GameConfig` | [#2](https://github.com/Ollienel777/poker-solver/issues/2) |
-| Ante format and size | none | `GameConfig` | [#3](https://github.com/Ollienel777/poker-solver/issues/3) |
-| Straddle rules | 2bb, live, UTG, always posted | `GameConfig` | [#4](https://github.com/Ollienel777/poker-solver/issues/4) |
-| Rake | rake-free | `GameConfig`, rake at terminals | [#5](https://github.com/Ollienel777/poker-solver/issues/5) |
 | Dev machine specs | none | Local test sizes, memory limit | [#23](https://github.com/Ollienel777/poker-solver/issues/23) |
 | Reference solver | postflop-solver or TexasSolver, as a binary | Cross-solver checks | [#24](https://github.com/Ollienel777/poker-solver/issues/24) |
 | Output format for study | terminal grids | `cli` export | [#44](https://github.com/Ollienel777/poker-solver/issues/44) |

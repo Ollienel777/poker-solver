@@ -5,7 +5,7 @@ This covers the brief's ten milestones in the brief's order, postflop first. The
 ```mermaid
 flowchart LR
   M1["M1<br/>Foundations"] --> M2["M2<br/>CFR on toy games"] --> M3["M3<br/>River solver"] --> M4["M4<br/>Turn and flop"] --> M5["M5<br/>Postflop CLI"]
-  M5 --> M6["M6<br/>Card abstraction"] --> M7["M7<br/>Preflop, heads-up"] --> M8["M8<br/>Preflop, 6-max"] --> M9["M9<br/>All four configs"] --> M10["M10<br/>Chain and polish"]
+  M5 --> M6["M6<br/>Card abstraction"] --> M7["M7<br/>Preflop, heads-up"] --> M8["M8<br/>Preflop, 8-handed"] --> M9["M9<br/>All four configs"] --> M10["M10<br/>Chain and polish"]
   M5 -.-> P(["postflop half usable<br/>with hand-recorded ranges"])
   M8 -.-> V1(["version 1<br/>for config A"])
   M10 -.-> V2(["version 2"])
@@ -14,7 +14,7 @@ flowchart LR
 ## How the backlog works
 
 - **Gates.** Each milestone ends with a `type: gate` issue that holds the brief's acceptance tests. Work in the next milestone is blocked by that gate, so the brief's rule that tests pass before moving on shows up in the tracker.
-- **Decision issues** (`type: decision`) are never blocked by a gate, so answer them early. The M1 decisions, [#1](https://github.com/Ollienel777/poker-solver/issues/1) to [#5](https://github.com/Ollienel777/poker-solver/issues/5), are needed before `GameConfig`.
+- **Decision issues** (`type: decision`) are never blocked by a gate, so answer them early. The M1 decisions, [#1](https://github.com/Ollienel777/poker-solver/issues/1) to [#5](https://github.com/Ollienel777/poker-solver/issues/5), were answered on 2026-11-23 and are recorded in [DECISIONS.md](DECISIONS.md).
 - **Manual issues** (`type: manual`) are things you do by hand: recording reference ranges and setting up AWS billing. They can be done any time their inputs exist. Record references early, because the M5, M7 and M8 gates wait on them.
 - **Blocked-by links** use GitHub's native issue dependencies and are repeated at the bottom of each issue body.
 - **One issue per branch and PR**, closed with `Closes #N`.
@@ -144,7 +144,7 @@ MCCFR over the abstracted full game, two players. Gate: plausible BTN open / BB 
 | [#64](https://github.com/Ollienel777/poker-solver/issues/64) | reference: hand-record a heads-up 100bb preflop chart | manual | [#31](https://github.com/Ollienel777/poker-solver/issues/31) |
 | [#65](https://github.com/Ollienel777/poker-solver/issues/65) | M7 gate: plausible heads-up ranges and resume after kill | gate | [#62](https://github.com/Ollienel777/poker-solver/issues/62), [#63](https://github.com/Ollienel777/poker-solver/issues/63), [#64](https://github.com/Ollienel777/poker-solver/issues/64) |
 
-### [M8 · Preflop solver, 6-max](https://github.com/Ollienel777/poker-solver/milestone/8)
+### [M8 · Preflop solver, 8-handed](https://github.com/Ollienel777/poker-solver/milestone/8)
 
 N players, config A locally then full scale on AWS. Gate: opening ranges within a few points of reference. Completes version 1 for config A.
 
@@ -156,7 +156,7 @@ N players, config A locally then full scale on AWS. Gate: opening ranges within 
 | [#69](https://github.com/Ollienel777/poker-solver/issues/69) | aws: billing alarm and budget before the first instance | manual | none |
 | [#70](https://github.com/Ollienel777/poker-solver/issues/70) | aws: run script with auto-shutdown, spot support and S3 checkpoints | build | [#65](https://github.com/Ollienel777/poker-solver/issues/65), [#69](https://github.com/Ollienel777/poker-solver/issues/69) |
 | [#71](https://github.com/Ollienel777/poker-solver/issues/71) | Full-scale config A preflop solve on AWS | build | [#68](https://github.com/Ollienel777/poker-solver/issues/68), [#70](https://github.com/Ollienel777/poker-solver/issues/70) |
-| [#72](https://github.com/Ollienel777/poker-solver/issues/72) | reference: hand-record 6-max opening ranges for config A | manual | [#31](https://github.com/Ollienel777/poker-solver/issues/31) |
+| [#72](https://github.com/Ollienel777/poker-solver/issues/72) | reference: hand-record 8-handed opening ranges for config A | manual | [#31](https://github.com/Ollienel777/poker-solver/issues/31) |
 | [#73](https://github.com/Ollienel777/poker-solver/issues/73) | M8 gate: config A opening ranges within a few points of reference | gate | [#71](https://github.com/Ollienel777/poker-solver/issues/71), [#67](https://github.com/Ollienel777/poker-solver/issues/67), [#72](https://github.com/Ollienel777/poker-solver/issues/72) |
 
 ### [M9 · All four configs](https://github.com/Ollienel777/poker-solver/milestone/9)
@@ -185,10 +185,11 @@ Preflop export feeds the postflop solver end to end. Completes version 2.
 | Risk | Why it matters | Mitigation | Issues |
 | --- | --- | --- | --- |
 | A solver converges and is still wrong | Wrong strategies look plausible | Exploitability before any perf work, invariants, brute-force oracles, and toy games with known answers (Kuhn, polarized river) | [#29](https://github.com/Ollienel777/poker-solver/issues/29), [#30](https://github.com/Ollienel777/poker-solver/issues/30) |
-| Preflop memory exceeds an affordable instance | 6-max tree × buckets × actions | Estimate before allocating, average strategy only at preflop nodes, compact regrets, fewer buckets | [#60](https://github.com/Ollienel777/poker-solver/issues/60), [#68](https://github.com/Ollienel777/poker-solver/issues/68) |
+| Preflop memory exceeds an affordable instance | 8-handed tree × buckets × actions | Estimate before allocating, average strategy only at preflop nodes, compact regrets, fewer buckets | [#60](https://github.com/Ollienel777/poker-solver/issues/60), [#68](https://github.com/Ollienel777/poker-solver/issues/68) |
 | 3+-way pots distort preflop ranges | The abstract game has to play them somehow | An explicit decision, then measurement in M8 | [#58](https://github.com/Ollienel777/poker-solver/issues/58) |
-| No ground truth at 6-max | CFR has no guarantee with 3+ players | Seed-to-seed stability, convergence diagnostics, reference ranges | [#63](https://github.com/Ollienel777/poker-solver/issues/63), [#72](https://github.com/Ollienel777/poker-solver/issues/72) |
+| No ground truth for a multiway solve | CFR has no guarantee with 3+ players | Seed-to-seed stability, convergence diagnostics, reference ranges | [#63](https://github.com/Ollienel777/poker-solver/issues/63), [#72](https://github.com/Ollienel777/poker-solver/issues/72) |
 | The reference source lacks our configs | 200bb, straddle and ante may not be covered | Confirm before paying for a commercial solver month | [#72](https://github.com/Ollienel777/poker-solver/issues/72) |
 | The dev machine is too small for the M4 flop solve | Blocks the M4 gate locally | Reduced tree, memory estimate first, specs recorded | [#23](https://github.com/Ollienel777/poker-solver/issues/23), [#38](https://github.com/Ollienel777/poker-solver/issues/38) |
+| Preflop cost at 8-handed exceeds the credits | The brief's estimates assumed 6-max, and it puts 8 players at 3 to 5 times the preflop cost | Spot instances for every full run, low-iteration local runs first, a memory estimate before launch, and fewer buckets or a smaller multiway tree if needed | [#58](https://github.com/Ollienel777/poker-solver/issues/58), [#68](https://github.com/Ollienel777/poker-solver/issues/68), [#70](https://github.com/Ollienel777/poker-solver/issues/70) |
 | AWS cost overrun | A forgotten $4/hour instance costs about $3,000 a month | Billing alarm first, auto-shutdown on completion and idle, both tested | [#69](https://github.com/Ollienel777/poker-solver/issues/69), [#70](https://github.com/Ollienel777/poker-solver/issues/70) |
 | AGPL contamination | Licence | Reference solvers only as external binaries, algorithms implemented from papers | [#24](https://github.com/Ollienel777/poker-solver/issues/24) |
