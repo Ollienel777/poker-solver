@@ -119,6 +119,8 @@ max_raises = 4
 flop  = { bets = [0.33, 0.75], raises = [3.0], allin = false }
 turn  = { bets = [0.33, 0.75], raises = [3.0], allin = false }
 river = { bets = [0.33, 0.75], raises = [3.0], allin = true }
+max_raises = 3           # raises per street after the opening bet, all-in raises included
+allin_threshold = 0.67   # a bet or raise that would commit more than 67% of the stack goes all-in
 
 [abstract_postflop]      # the small tree inside the preflop solve
 bets = [0.75]
@@ -126,13 +128,13 @@ raises = [3.0]
 allin = true
 ```
 
-Bets are fractions of the pot. Raises are a multiple of the bet faced. All sizes are placeholders to tune.
+Postflop bets are fractions of the pot, and raises go to a multiple of the bet faced. `allin = true` adds all-in as one more bet and one more raise. Two rules apply to every street (DECISIONS P15). `max_raises` caps the raises on a street after its opening bet, and 0 means no raises. `allin_threshold` turns into all-in any bet or raise that would leave a player with more than that fraction of the effective stack put in; 1 turns nothing. All sizes are placeholders to tune.
 
 Preflop sizes are multiples of the **effective blind**, which is the largest live forced bet. A 2.5× open is therefore 2.5bb in configs A and B and 5bb under a 2bb straddle, and the straddle needs no sizing table of its own (DECISIONS P2).
 
 In configs C and D the pot holds 7.5bb before the first action: 0.5 + 1 + 2 from the blinds and straddle, and 8 × 0.5 from the antes. Every seat is left with 99.5bb (C) or 199.5bb (D) to bet.
 
-The loader rejects configs with fewer than 2 or more than 9 players, unknown positions, amounts that are not whole chips, stacks smaller than the forced bets, forced bets that leave unequal live stacks, or empty sizing lists. Every error names the field.
+The loader rejects configs with fewer than 2 or more than 9 players, unknown positions, amounts that are not whole chips, stacks smaller than the forced bets, forced bets that leave unequal live stacks, empty bet lists, or an all-in threshold that is not more than 0 and at most 1. Every error names the field.
 
 ### Positions and action order
 
@@ -153,9 +155,25 @@ Button (Mississippi) straddles are not modelled (DECISIONS D15). They can't be d
 
 ### Betting trees
 
-- **Arena layout.** A tree is a `Vec<Node>` addressed by `u32` index. A node is one of `Player { actor, children }`, `Chance { street }` or `Terminal { Fold { winner } | Showdown, contributions }`.
-- **Two builders.** The preflop builder reads `[preflop]`. The postflop builder reads `[postflop]` or `[abstract_postflop]`. Both apply the same legality rules: the min-raise rule, all-in offered past the threshold, a cap on raises, and duplicate sizes removed after rounding.
-- **Node counts.** Every tree reports node counts per street. The memory estimators start from these counts.
+- **Arena layout.** A tree is a `Vec<Node>` addressed by `u32` index, in depth-first pre-order from the root at index 0, so every subtree is a contiguous range. A node is one of these:
+  - `Player { street, actor, actions, children }`
+  - `Chance { street, child }`, which deals `street`
+  - `Terminal { street, outcome: Fold { winner } | Showdown, contributions }`
+
+  Contributions are the chips each player put in during the tree, and the pot is the root pot plus both. The tree does not depend on the cards. A chance node has one child, the betting that follows whatever card falls, and the solver keeps per-card data itself.
+- **Two builders.** The heads-up postflop builder (`pk_game::tree`, M3) takes the root street, the pot, the effective stack and a `PostflopSizing`. That is `[postflop]`, or `[abstract_postflop]` repeated on every street. The N-player preflop builder (M7) reads `[preflop]`. Both use the rules in `pk_game::rules`, which never assume two players: whole-chip rounding, the minimum raise, the all-in conversions, the raise cap and duplicate removal.
+- **Postflop rules.** The `pk_game::tree` module documentation states them precisely. In short:
+  - OOP acts first on every street.
+  - With no bet to face, a player checks, or bets `f` × the pot for each entry of the street's `bets`, at least 1bb.
+  - Facing a bet, a player folds, calls, or raises to `m` × the bet faced for each entry of `raises`. A raise is lifted to the minimum raise if smaller: the bet faced plus the last bet or raise increment.
+  - `allin = true` adds all-in as one more bet and raise. After `max_raises` raises on a street, all-in raises included, only fold and call remain.
+  - A size becomes all-in if it would use every chip, or leave the player with more than `allin_threshold` of the root effective stack put in, counting earlier streets. A player short of a minimum raise may still raise all-in.
+  - Sizes are rounded to whole chips by one function: to the nearest chip, halves up. Sizes that land on the same amount are one action, named by the smallest size.
+  - Actions are ordered check, or fold then call, followed by wagers from smallest to largest. All-in, when offered, is last.
+  - A call or a check behind ends the street. On the river that is a showdown. Earlier, it leads to a chance node and the next street. Players who are all-in before the river pass through the remaining chance nodes to a showdown, with no decisions.
+- **Tokens.** Each action prints its path token: `x`, `c`, `f`, `b33` (from the size 0.33), `r3` (from the size 3) or `a`. A size lifted by the minimum bet or raise keeps its token.
+- **Size limit.** The builder refuses a tree of more than `max_nodes` nodes, one million by default (about 100 MB), instead of allocating without bound. Trees with many sizes over three streets grow fast.
+- **Node counts.** Every tree reports node counts per street: player nodes, actions, chance nodes, folds and showdowns. A chance node counts on the street it deals. The memory estimators start from these counts.
 
 ## cfr
 

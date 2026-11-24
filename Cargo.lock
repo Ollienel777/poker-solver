@@ -484,6 +484,7 @@ dependencies = [
 name = "pk-game"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "serde",
  "thiserror",
  "toml",

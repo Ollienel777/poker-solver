@@ -42,6 +42,8 @@ max_raises = 4
 flop = { bets = [0.33, 0.75], raises = [3.0], allin = false }
 turn = { bets = [0.33, 0.75], raises = [3.0], allin = false }
 river = { bets = [0.33, 0.75], raises = [3.0], allin = true }
+max_raises = 3          # raises per street after the opening bet, all-in raises included
+allin_threshold = 0.67  # a bet or raise that would commit more than 67% of the stack goes all-in
 
 [abstract_postflop]     # the small tree inside the preflop solve
 bets = [0.75]
