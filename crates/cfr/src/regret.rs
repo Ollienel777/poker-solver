@@ -49,6 +49,22 @@
 //! assert!((average[0] - 27.0 / 28.0).abs() < 1e-6);
 //! ```
 //!
+//! # Precision
+//!
+//! Values are stored as `f32`, and each iteration's factors are rounded to `f32` before they
+//! are applied. That limits how long a run keeps the weights described above:
+//!
+//! - the linear factor `t / (t + 1)` rounds to exactly 1 from `t = 2^25`, about 3.4 × 10^7, so
+//!   from then on linear CFR and CFR+ no longer discount;
+//! - a strategy sum that gains about 1 per iteration stops growing at `2^24`, about
+//!   1.7 × 10^7, where adding 1 no longer changes an `f32`.
+//!
+//! For a single information set whose strategy changes halfway through the run, the linear
+//! average is right to within 0.1% after 10^6 iterations, off by 0.6% after 10^7, and wrong
+//! after 10^8 (0.50 where 0.75 is expected). Solves of thousands of iterations are far from the
+//! limit. A solver that runs for tens of millions of iterations needs wider storage than these
+//! functions use.
+//!
 //! # References
 //!
 //! - Hart and Mas-Colell, *A Simple Adaptive Procedure Leading to Correlated Equilibrium*,
@@ -522,6 +538,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn linear_weights_hold_over_a_million_iterations() {
+        // One information set plays its first action for the first half of the run and its
+        // second for the rest. Linear weights give the second action 3/4 of the average. In
+        // `f32` the measured share is 0.74948; it drifts further in longer runs (see the module
+        // doc).
+        let total = 1_000_000u64;
+        let mut strategy_sum = [0.0f32; 2];
+        for t in 1..=total {
+            let strategy = if t <= total / 2 {
+                [1.0, 0.0]
+            } else {
+                [0.0, 1.0]
+            };
+            let discount = Schedule::Linear.discount(t);
+            accumulate_strategy(&mut strategy_sum, &strategy, &[1.0], discount);
+        }
+        let average = average_of(&strategy_sum, 1);
+        assert!((average[1] - 0.75).abs() < 1e-3, "{average:?}");
     }
 
     #[test]

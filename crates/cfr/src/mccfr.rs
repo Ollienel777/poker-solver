@@ -180,6 +180,12 @@
 //! products have no closed form, one table entry of two `f64` per iteration. Nothing ever
 //! walks every information set.
 //!
+//! Two limits apply to long runs. The DCFR table is never trimmed, so it takes 16 bytes per
+//! iteration: 1.6 GB after 10^8 iterations, and a clone copies it. And [`crate::regret`]'s `f32`
+//! storage stops weighing iterations as documented after about 10^7 of them (see its module
+//! doc), which bounds any schedule here too. A solver meant for longer runs needs wider
+//! storage and a bounded table.
+//!
 //! # Storage and determinism
 //!
 //! [`Mccfr::new`] walks the whole tree once, as [`crate::tabular::Cfr`] does, to find every
