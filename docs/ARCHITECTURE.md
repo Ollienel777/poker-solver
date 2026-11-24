@@ -190,7 +190,7 @@ Each module's doc comment is the exact specification of what it computes. This s
 - **`best_response`.** The exact best response, chosen per information set, and exploitability for two-player zero-sum games: the average of the two best-response values.
 - **`kuhn` and `leduc`.** The two test games. Leduc treats its six cards as distinct, which gives 936 information sets (DECISIONS P21).
 - **`mccfr`.** External-sampling MCCFR over the same `Game` trait, seeded and reproducible. The average strategy accumulates in a separate pass that samples the player's own actions, and discounts are applied lazily when an information set is next touched (DECISIONS P19).
-- **`vector`.** `PublicGame` is the trait a game implements for public-tree CFR: the tree, the deal, the hands a chance outcome rules out, and the values at a terminal given the opponent's reach. `VectorCfr` is the solver over it. Each player node holds per-hand arrays, and a traversal passes the opponent's reach vector down and returns per-hand counterfactual values. `public_leduc` puts Leduc on the trait, and `vector_best_response` gives best response and exploitability in the same form.
+- **`vector`.** `PublicGame` is the trait a game implements for public-tree CFR: the tree, the deal, the hands a chance outcome rules out, and the values at a terminal given the opponent's reach. `VectorCfr` is the solver over it. Each player node holds per-hand arrays, and a traversal passes the opponent's reach vector down and returns per-hand counterfactual values. `public_leduc` puts Leduc on the trait. `vector_best_response` gives best response, each player's expected value under a profile, and the zero-sum exploitability in the same form, each validated against its scalar counterpart on Leduc.
 
 The preflop solver samples private cards, so its regret updates are scalar per information set. The postflop solver needs the vector form so that range-against-range terminal evaluation costs O(n) instead of O(n²). Both forms are validated on Leduc in M2, before either poker solver exists.
 
@@ -201,6 +201,50 @@ The preflop solver samples private cards, so its regret updates are scalar per i
 ## postflop
 
 The input is a `Spot` (see [Spot file](#spot-file)): the `board`, the `oop_range` and `ip_range`, the `pot` and `effective_stack`, the `tree` sizing, and the rake as `rake_percent` and `rake_cap`. From it the solver takes the starting street, the built tree, the `BoardHands` and the `Rake`. Each iteration updates the two players in turn. For each player, a traversal carries the opponent's reach vector, computes counterfactual values, applies the DCFR discount and accumulates the average strategy. Exploitability is computed every k iterations. The solve stops at a target (default 0.3% of pot), an iteration cap or a time cap.
+
+M3 builds this for river spots; flop and turn spots, with their chance nodes, come in M4.
+
+### The river game
+
+`pk_postflop::river::RiverGame` turns a river spot into a `pk_cfr::PublicGame`, so that `pk_cfr::VectorCfr` solves it. `RiverGame::new` refuses a board of other than five cards (`SolveError::NotRiver`), a spot that fails `Spot::validate`, and a tree over the node limit, each as an error.
+
+- **Public tree.** It is the spot's `PostflopTree`, node for node: public node `n` is tree node `n`, a player node's actions are the tree's in the tree's order, and the acting player is the actor's index, 0 for OOP and 1 for IP. A river tree has no chance nodes, so every hand is possible at every node.
+- **Hands.** Each player's hands are its `HandList` from the `BoardHands`: the in-range combos that miss the board. Blocked and out-of-range combos have no hand index, so each player node stores regrets and strategy sums, as `f32`, for the acting player's in-range combos only (DECISIONS P9).
+- **Deal.** Chance deals OOP `h` and IP `o` with probability `w_0(h) · w_1(o) / Z` when the two combos share no card, where `Z` sums that product over the pairs that can be dealt. The deal vectors are `w_p / √Z`, so every value is in chips per hand dealt.
+- **Terminals.** Each terminal's `Payoff` is computed once, with the rake. A fold calls `BoardHands::fold_values` with the traverser's payoff, and a showdown calls `showdown_values`, both O(n) with card removal.
+- **Reading a strategy.** `RiverGame::reach` gives each player's own reach of a node by hand. `hand_weights` gives the probability that the acting player holds each hand once the node is reached, including card removal by the opponent's range there. `action_frequencies` gives the probability of each action at the node over the acting player's whole range, which is what a range view shows.
+
+### The solve loop
+
+`pk_postflop::solve(spot, options, progress)` builds the river game and runs `VectorCfr` with alternating updates. It returns a `Solution`. `SolveOptions` holds:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `schedule` | DCFR(1.5, 0, 2) | the regret and averaging schedule |
+| `target` | 0.3 | stop once the average strategy's exploitability is at or below this percent of the pot; `None` runs to a cap |
+| `max_iterations` | 10,000 | the iteration cap |
+| `max_time` | none | the time cap, counted from the call |
+| `check_every` | 10 | measure exploitability after every this many iterations |
+
+The target is checked after each measurement, and the caps before each iteration. When several rules hold at once, the target wins, then the iteration cap, then the time cap. If the solve stops after an iteration it did not measure, it measures once more. So the `progress` callback receives one `Progress` (iterations, elapsed time, exploitability) per measurement, in order, and its last call matches the solution. The library never prints. Measuring only reads the average strategy, so the strategy after `t` iterations is bit-identical whatever the measurement interval and caps.
+
+The `Solution` lives in memory; the solution file comes in M5. It holds the stopping rule that ended the solve, the iterations, the elapsed time, the `Exploitability` (each player's value, best-response value, and the exploitability in chips and as a percent of the pot) and the average strategy. Read access covers each hand's action probabilities at each node, and the reach, hand weights and action frequencies above.
+
+### Exploitability
+
+`pk_postflop::exploitability(game, profile)` measures the average gain from deviating (DECISIONS P17):
+
+```text
+exploitability(σ) = ((BR_0(σ) − v_0(σ)) + (BR_1(σ) − v_1(σ))) / 2
+```
+
+Here `v_i` is player `i`'s expected value when both players follow `σ`, and `BR_i` is its value when it best-responds to the other's `σ`. Both are in chips per hand dealt, and the result is reported as a percent of the root pot. Payoffs count from the start of the tree, so `v_0 + v_1` is the pot minus the expected rake, not zero, and the zero-sum `(BR_0 + BR_1) / 2` of `pk_cfr::best_response` would be about half the pot at an equilibrium. The computation is four walks of the public tree: `pk_cfr::vector_best_response` and `pk_cfr::vector_expected_value` for each player.
+
+### Validation
+
+- **The toy game.** `toy_polarized` reaches its analytical equilibrium: OOP bets every nut combo, bluffs are 1/4 of its bets, IP calls 2/3 of the time, and the values are 40/11 and 70/11 bb.
+- **An independent scalar check.** For two small raked spots, the test builds the same game as a scalar `pk_cfr::Game` from first principles. Its ranges share combos and cards, and it plays ties and a capped rake. Chance deals compatible pairs by the product of the range weights, the betting follows the tree, and the payoffs come from the chips and the hand evaluator. It agrees with the river game on every deal probability and every terminal payoff. It also agrees on both players' values and best responses under fixed and random profiles, and on every stored value after one CFR iteration from the same state, under four schedules. The scalar game also re-measures the exploitability of two solved reference spots.
+- **Every river spot** solves to 0.3% of the pot in the fast suite. A slow test (`river_spot_table`) prints the iterations to 0.3%, 0.1% and 0.03%, the time per iteration and per measurement, and the share of the time spent in terminal evaluation.
 
 Tree shape: every flop line that closes the street leads to a chance node over up to 49 turn cards, and every turn line to one over the remaining river cards. Per-player hand vectors hold up to 1,176 combos on the flop, 1,128 on the turn and 1,081 on the river. A node stores only the combos that are in range.
 

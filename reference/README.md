@@ -89,7 +89,7 @@ At equilibrium:
 
 - OOP bets all 6 nut combos, and bluffs with 2 of its 16 air combos in total, so that bluffs are b / (1 + 2b) = 1/4 of its bets. It checks the other 14 air combos. With more air than that, some air must check, and the bluffs' indifference fixes IP's calling frequency.
 - IP calls a bet 1 / (1 + b) = 2/3 of the time, which leaves the bluffs indifferent: they win the 10bb pot a third of the time and lose the 5bb bet two thirds of the time. A bet's 25% of bluffs leaves IP indifferent in turn: calling 5bb wins 15bb a quarter of the time.
-- After OOP checks, IP wins the 10bb pot whether it checks or bets, so its play there is not pinned down.
+- After OOP checks, IP wins the 10bb pot whether it checks or bets, so its play there is only bounded: it bets at most 2/3 of the time, or OOP's nuts would rather check.
 - In the payoffs of `pk_postflop::payoff`, which count from the start of the river, each nut combo wins 10 + 5 × 2/3 = 40/3bb and each air combo 0. Over the 22 × 12 deals, which are all possible, OOP's value is 40/11 ≈ 3.64bb and IP's is 70/11 ≈ 6.36bb, adding up to the 10bb pot.
 
 The frequencies are over each range as a whole: any split of the 2 bluffs among the air combos, or of the calls among IP's combos, is an equilibrium.

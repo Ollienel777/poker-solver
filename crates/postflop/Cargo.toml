@@ -6,6 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+pk-cfr = { path = "../cfr" }
 pk-core = { path = "../core" }
 pk-game = { path = "../game" }
 thiserror.workspace = true

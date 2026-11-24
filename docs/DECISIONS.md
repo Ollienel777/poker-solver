@@ -38,8 +38,6 @@ Notes on the 2026-11-23 answers:
 
 ## Proposed
 
-P15 to P17 are taken by milestone M3.
-
 | ID | Proposal | Why |
 | --- | --- | --- |
 | P1 | Integer chips, with 1bb = 100 | Exact pot arithmetic and ties, with rounding done in one place |
@@ -58,6 +56,7 @@ P15 to P17 are taken by milestone M3.
 | P14 | Each milestone has one gate issue holding its acceptance tests | Makes the brief's "tests pass before moving on" rule visible in the tracker |
 | P15 | `[postflop]` has two table-level fields that apply to every street. `max_raises` caps the raises per street after the opening bet (0 means none). `allin_threshold`, more than 0 and at most 1, turns into all-in a bet or raise that would commit more than that fraction of the effective stack. Configs A to D set 3 and 0.67 | Issue [#25](https://github.com/Ollienel777/poker-solver/issues/25) names both rules, the schema had no field for either, and reference solvers expose both knobs |
 | P16 | The range-file format lives in `pk-game`, in `pk_game::range_file`, not in `pk-core` as first planned | A range file needs both `Range` and `Position`. `Position` is in `pk-game`, which depends on `pk-core`, so only `pk-game` can see both |
+| P17 | Postflop exploitability is the average gain from deviating, `((BR_0 − v_0) + (BR_1 − v_1)) / 2`, where `v_i` is player `i`'s expected value when both play the strategy and `BR_i` its value when it best-responds. Values are in chips per hand dealt, with the deal normalised so that the weights of all the pairs of hands that can be held together sum to 1, and the result is reported as a percent of the pot at the root | Payoffs count from the start of the tree, so the two values sum to the pot minus the expected rake. The game is constant-sum only without rake, since a rake grows with the pot up to its cap. `(BR_0 + BR_1) / 2` would be about half the pot at an equilibrium. In a zero-sum game the two definitions agree |
 | P18 | One CFR iteration is specified exactly in the `pk_cfr::regret` and `pk_cfr::tabular` module docs. Iterations count from 1. Players update in turn within an iteration, player 0 first. The discount of iteration `t` is applied after that iteration's regret and strategy are added. Values are computed in `f64` and rounded to `f32` only when stored | CFR+ and DCFR are defined with alternating updates, and one written specification is what lets the vector form and the postflop solver reproduce the scalar solver |
 | P19 | MCCFR accumulates the average strategy in a separate pass that samples the player's own actions, and applies discounts lazily from a last-update stamp per information set | Adding the strategy at sampled opponent nodes also weights by the other opponents' reach once there are three or more players. Lazy discounting is exact and never walks every information set |
 | P20 | The vector form is held to the scalar solver one iteration at a time from the same stored state, under every schedule. Side-by-side runs are required to match only under vanilla CFR and DCFR on Leduc | CFR+, linear CFR and DCFR can all grow a one-ulp `f32` difference past 1e-6 within tens of iterations, so two correct solvers that sum in different orders can part ways. On Leduc that happens under CFR+ and linear CFR after about 10 and 130 iterations. Measured in [#21](https://github.com/Ollienel777/poker-solver/issues/21) |

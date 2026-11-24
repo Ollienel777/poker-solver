@@ -496,6 +496,7 @@ name = "pk-postflop"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "pk-cfr",
  "pk-core",
  "pk-game",
  "proptest",
