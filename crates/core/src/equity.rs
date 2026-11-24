@@ -200,36 +200,115 @@ fn unit(rng: &mut ChaCha8Rng) -> f64 {
     (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64
 }
 
+/// Picks an index in proportion to the steps of a running total. A step of zero is never picked.
+fn pick(cumulative: &[f64], rng: &mut ChaCha8Rng) -> usize {
+    let target = unit(rng) * cumulative[cumulative.len() - 1];
+    let index = cumulative.partition_point(|&sum| sum <= target);
+    index.min(cumulative.len() - 1)
+}
+
 /// Draws combos from a range in proportion to their weights.
 struct Sampler {
     combos: Vec<Combo>,
+    weights: Vec<f64>,
     cumulative: Vec<f64>,
 }
 
 impl Sampler {
     fn new(range: &Range, board: CardSet) -> Sampler {
+        let (combos, weights): (Vec<Combo>, Vec<f64>) =
+            live_combos(range, board).into_iter().unzip();
         let mut total = 0.0;
-        let (combos, cumulative) = live_combos(range, board)
-            .into_iter()
-            .map(|(combo, weight)| {
+        let cumulative = weights
+            .iter()
+            .map(|weight| {
                 total += weight;
-                (combo, total)
+                total
             })
-            .unzip();
-        Sampler { combos, cumulative }
+            .collect();
+        Sampler {
+            combos,
+            weights,
+            cumulative,
+        }
     }
 
     fn draw(&self, rng: &mut ChaCha8Rng) -> Combo {
-        let target = unit(rng) * self.cumulative[self.cumulative.len() - 1];
-        let index = self.cumulative.partition_point(|&sum| sum <= target);
-        self.combos[index.min(self.combos.len() - 1)]
+        self.combos[pick(&self.cumulative, rng)]
+    }
+
+    /// The combos that do not share a card with `other`, with their weights.
+    fn fitting(&self, other: Combo) -> impl Iterator<Item = (Combo, f64)> + '_ {
+        let pairs = self
+            .combos
+            .iter()
+            .copied()
+            .zip(self.weights.iter().copied());
+        pairs.filter(move |(combo, _)| !combo.intersects(other.cards()))
     }
 }
+
+/// Draws a pair of hands that can be held together, without redrawing.
+///
+/// A pair is drawn in proportion to the product of its two weights, which is also how the pairs
+/// that survive redrawing are distributed. Building the table costs the product of the range
+/// sizes and each draw walks the villain range, so this is only the fallback for ranges that
+/// almost always clash.
+struct FittingPairs {
+    /// The hero combos that fit at least one villain combo.
+    heroes: Vec<Combo>,
+    /// The running total of each such combo's weight times the villain weight that fits it.
+    cumulative: Vec<f64>,
+}
+
+impl FittingPairs {
+    fn new(heroes: &Sampler, villains: &Sampler) -> FittingPairs {
+        let mut pairs = FittingPairs {
+            heroes: Vec::new(),
+            cumulative: Vec::new(),
+        };
+        let mut total = 0.0;
+        for (&hero, &weight) in heroes.combos.iter().zip(&heroes.weights) {
+            let fitting: f64 = villains.fitting(hero).map(|(_, weight)| weight).sum();
+            if fitting > 0.0 {
+                total += weight * fitting;
+                pairs.heroes.push(hero);
+                pairs.cumulative.push(total);
+            }
+        }
+        pairs
+    }
+
+    fn draw(&self, villains: &Sampler, rng: &mut ChaCha8Rng) -> (Combo, Combo) {
+        let hero = self.heroes[pick(&self.cumulative, rng)];
+        let total: f64 = villains.fitting(hero).map(|(_, weight)| weight).sum();
+        let mut target = unit(rng) * total;
+        let mut drawn = None;
+        for (villain, weight) in villains.fitting(hero) {
+            drawn = Some(villain);
+            if target < weight {
+                break;
+            }
+            target -= weight;
+        }
+        (
+            hero,
+            drawn.expect("the hero fits at least one villain combo"),
+        )
+    }
+}
+
+/// How many times in a row a sample redraws before it draws from the fitting pairs directly.
+/// Ranges met in practice clash far less often than this allows.
+const MAX_REDRAWS: usize = 64;
 
 /// Estimates the equity of one weighted range against another by sampling.
 ///
 /// Each sample draws a hand from each range by weight, redraws both if they share a card, then
 /// deals the rest of the board at random. The same seed always gives the same estimate.
+///
+/// If a sample redraws 64 times in a row, it draws a pair that fits directly instead, from the
+/// same distribution. Ranges that almost always clash therefore still finish.
 pub fn monte_carlo(
     hero: &Range,
     villain: &Range,
@@ -252,15 +331,21 @@ pub fn monte_carlo(
     }
 
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut fitting_pairs: Option<FittingPairs> = None;
     let (mut sum, mut sum_of_squares) = (0.0, 0.0);
     for _ in 0..samples {
+        let mut redraws = 0;
         let (hero, villain) = loop {
-            let (hero, villain) = (
-                heroes.draw(&mut rng).cards(),
-                villains.draw(&mut rng).cards(),
-            );
-            if !hero.intersects(villain) {
-                break (hero, villain);
+            let (hero, villain) = (heroes.draw(&mut rng), villains.draw(&mut rng));
+            if !hero.intersects(villain.cards()) {
+                break (hero.cards(), villain.cards());
+            }
+            redraws += 1;
+            if redraws == MAX_REDRAWS {
+                let pairs =
+                    fitting_pairs.get_or_insert_with(|| FittingPairs::new(&heroes, &villains));
+                let (hero, villain) = pairs.draw(&villains, &mut rng);
+                break (hero.cards(), villain.cards());
             }
         };
         let mut full = board;
@@ -551,6 +636,69 @@ mod tests {
             estimate.share, estimate.std_err
         );
         assert!((estimate.share - exact).abs() <= 3.0 * estimate.std_err);
+    }
+
+    #[test]
+    fn monte_carlo_finishes_when_almost_every_draw_clashes() {
+        // Villain almost always holds the ace of spades, which hero holds too. In `f64` the
+        // weight of the queens vanishes next to 1, so redrawing alone would never end.
+        let hero = range("AsKs");
+        let villain = range("AsKh,QdQc:1e-17");
+        let exact = hand_vs_hand(combo("AsKs"), combo("QdQc"), CardSet::EMPTY).unwrap();
+        let estimate = monte_carlo(&hero, &villain, CardSet::EMPTY, 40_000, 5).unwrap();
+        let error = (estimate.share - exact.share()).abs();
+        assert!(
+            error <= 4.0 * estimate.std_err,
+            "estimate {} against exact {}",
+            estimate.share,
+            exact.share()
+        );
+    }
+
+    #[test]
+    fn monte_carlo_keeps_the_weights_when_it_stops_redrawing() {
+        // Aces block both hero hands, so nearly every draw clashes and nearly every sample
+        // comes from the fitting pairs. KsQs fits only one hero hand, and the jacks are twice
+        // as likely as the queens.
+        let hero = range("AsKs,AhKh");
+        let villain = range("AsAh,QdQc:1e-9,JdJc:2e-9,KsQs:1e-9");
+        let board = cards("2c7d9h");
+        let exact = range_vs_range(&hero, &villain, board).unwrap();
+        let estimate = monte_carlo(&hero, &villain, board, 40_000, 6).unwrap();
+        let error = (estimate.share - exact.share()).abs();
+        assert!(
+            error <= 4.0 * estimate.std_err,
+            "estimate {} against exact {}",
+            estimate.share,
+            exact.share()
+        );
+
+        // The fitting pairs hold the five matchups above, weighted 1, 2, 1, 2 and 1.
+        let (heroes, villains) = (Sampler::new(&hero, board), Sampler::new(&villain, board));
+        let pairs = FittingPairs::new(&heroes, &villains);
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let mut counts = std::collections::BTreeMap::new();
+        let draws = 70_000;
+        for _ in 0..draws {
+            let (hero, villain) = pairs.draw(&villains, &mut rng);
+            assert!(!hero.intersects(villain.cards()));
+            *counts.entry(format!("{hero} {villain}")).or_insert(0u32) += 1;
+        }
+        let expected = [
+            ("AsKs QdQc", 1.0),
+            ("AsKs JdJc", 2.0),
+            ("AhKh QdQc", 1.0),
+            ("AhKh JdJc", 2.0),
+            ("AhKh KsQs", 1.0),
+        ];
+        assert_eq!(counts.len(), expected.len(), "{counts:?}");
+        for (pair, weight) in expected {
+            let share = f64::from(counts[pair]) / f64::from(draws);
+            assert!(
+                (share - weight / 7.0).abs() < 0.01,
+                "{pair} was drawn {share} of the time"
+            );
+        }
     }
 
     #[test]
