@@ -16,10 +16,12 @@
 //! below the measured peak, and is held to 5% above it plus 16 KiB a thread and 64 KiB.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
 use pk_cfr::{Dcfr, Schedule, VectorCfr};
+use pk_postflop::memory::POOL_THREAD_BYTES;
 use pk_postflop::{MemoryEstimate, PostflopGame, SolveOptions, Spot, estimate_memory, solve};
 use rayon::ThreadPoolBuilder;
 
@@ -28,10 +30,25 @@ struct Counting;
 
 static HELD: AtomicU64 = AtomicU64::new(0);
 static MOST: AtomicU64 = AtomicU64::new(0);
+/// The blocks asked for so far, by every thread.
+static TAKEN: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// The blocks this thread has asked for so far.
+    static MINE: Cell<u64> = const { Cell::new(0) };
+}
 
 fn take(bytes: usize) {
+    TAKEN.fetch_add(1, SeqCst);
+    // A thread that is ending may have no thread-local left to count in.
+    let _ = MINE.try_with(|mine| mine.set(mine.get() + 1));
     let held = HELD.fetch_add(bytes as u64, SeqCst) + bytes as u64;
     MOST.fetch_max(held, SeqCst);
+}
+
+/// The blocks the calling thread has asked for so far.
+fn mine() -> u64 {
+    MINE.with(Cell::get)
 }
 
 fn give(bytes: usize) {
@@ -217,8 +234,10 @@ fn on_several_threads_the_estimate_covers_what_a_solve_allocates() {
 fn after_the_first_iteration_an_iteration_asks_for_no_memory() {
     // The estimate counts the CFR walk's working memory as kept by the solver from its first
     // iteration on. So, once the first iteration has sized it, an iteration takes nothing
-    // beyond what the solver already holds: an allocation anywhere in the walk, made while it
-    // holds what it held before, would raise the most held above that.
+    // beyond what the solver already holds: the thread that walks asks for no block at all,
+    // not even one it gives straight back. The count is this thread's own, because other
+    // threads of the test's process may allocate meanwhile, which the lock cannot stop: the
+    // harness when another test ends, and the threads of an earlier test's pool as they end.
     let _one = ONE_AT_A_TIME
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -226,41 +245,71 @@ fn after_the_first_iteration_an_iteration_asks_for_no_memory() {
         let game = PostflopGame::from_spot(&load(path)).unwrap();
         let mut solver = VectorCfr::new(game, Schedule::Discounted(Dcfr::default()));
         solver.iterate();
+        let before = mine();
         for _ in 0..3 {
-            let before = HELD.load(SeqCst);
-            MOST.store(before, SeqCst);
             solver.iterate();
-            assert_eq!(MOST.load(SeqCst), before, "{path}");
-            assert_eq!(HELD.load(SeqCst), before, "{path}");
         }
+        assert_eq!(mine(), before, "{path}");
     }
 }
 
 #[test]
-fn after_the_first_iteration_an_iteration_on_several_threads_asks_for_no_memory() {
+fn after_the_first_iteration_the_walks_on_several_threads_ask_for_no_memory() {
     // On several threads the solver keeps a workspace for each outcome of the chance nodes it
     // splits, which the first iteration sizes, and rayon holds each task of a split on the
     // stack of the thread that forks it. So once the first iteration in a pool has sized the
-    // workspaces and the pool's threads have each run a task, an iteration takes nothing. Here
-    // the iterations run in one call into the pool; the solve calls into its pool once per
+    // workspaces, the walks take nothing.
+    //
+    // Here the walks run on the pool's threads, so the count has to be the whole process's,
+    // and the process is not held to nothing: a thread of the pool registers an epoch record
+    // with rayon's queues the first time it steals a task, in whichever iteration the machine
+    // lets it, which the estimate counts under the pool (`POOL_THREAD_BYTES`); and, as on one
+    // thread, the harness and the threads of an earlier test's pool may allocate meanwhile. On
+    // a machine with fewer cores than the pool has threads, an iteration held to nothing at
+    // all failed for 1,564 bytes. What holds on any machine is that, over many iterations,
+    // the blocks asked for are at most a few per thread of the pool, however many the
+    // iterations, and what is held grows by no more than the pool's allowance for its threads:
+    // a walk that asked for one block an iteration would ask for more. On the flop spot, whose
+    // iterations are slower and so fewer here, a block per child of a split would.
+    //
+    // The iterations run in one call into the pool. The solve calls into its pool once per
     // iteration, and that call queues a job, which takes a block of rayon's queue every few
     // dozen calls.
+    const THREADS: u64 = 8;
+    /// More than the process asks for per thread of the pool, apart from the walks.
+    const BLOCKS_PER_THREAD: u64 = 4;
     let _one = ONE_AT_A_TIME
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let pool = ThreadPoolBuilder::new().num_threads(8).build().unwrap();
-    for path in ["tests/data/turn_small", "tests/data/flop_small"] {
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(THREADS as usize)
+        .build()
+        .unwrap();
+    for (path, iterations) in [("tests/data/turn_small", 200), ("tests/data/flop_small", 5)] {
         let game = PostflopGame::from_spot(&load(path)).unwrap();
         let mut solver = VectorCfr::new(game, Schedule::Discounted(Dcfr::default()));
         pool.install(|| {
             solver.iterate();
-            for _ in 0..3 {
-                let before = HELD.load(SeqCst);
-                MOST.store(before, SeqCst);
+            let before = HELD.load(SeqCst);
+            MOST.store(before, SeqCst);
+            let taken = TAKEN.load(SeqCst);
+            for _ in 0..iterations {
                 solver.iterate();
-                assert_eq!(MOST.load(SeqCst), before, "{path}");
-                assert_eq!(HELD.load(SeqCst), before, "{path}");
             }
+            let blocks = TAKEN.load(SeqCst) - taken;
+            let grown = MOST.load(SeqCst) - before;
+            println!(
+                "{path}, {THREADS} threads: {blocks} blocks asked for and {grown} bytes more \
+                 held in {iterations} iterations after the first"
+            );
+            assert!(
+                blocks <= THREADS * BLOCKS_PER_THREAD,
+                "{path}: {blocks} blocks asked for in {iterations} iterations"
+            );
+            assert!(
+                grown <= THREADS * POOL_THREAD_BYTES,
+                "{path}: the most held grew by {grown} bytes in {iterations} iterations"
+            );
         });
     }
 }

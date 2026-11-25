@@ -139,9 +139,11 @@
 //! whether the chance nodes are split, and the split is the same for every count above one.
 //!
 //! The solver keeps a workspace for each outcome of the largest chance node it splits, each of
-//! which ends as large as the most its children need at each depth, so that an iteration on
-//! several threads, after the first, allocates nothing either. The chance node's frame holds
-//! `q` for every outcome, `outcomes × hands` values, instead of one child's.
+//! which ends as large as the most its children need at each depth, so that the walks of an
+//! iteration on several threads, after the first, allocate nothing either. The chance node's
+//! frame holds `q` for every outcome, `outcomes × hands` values, instead of one child's. What
+//! the pool's own threads allocate is rayon's: a thread registers with its queues the first
+//! time it steals a task, in whichever iteration that is.
 //!
 //! # References
 //!
