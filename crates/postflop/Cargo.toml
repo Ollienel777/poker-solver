@@ -9,10 +9,18 @@ publish.workspace = true
 pk-cfr = { path = "../cfr" }
 pk-core = { path = "../core" }
 pk-game = { path = "../game" }
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 criterion.workspace = true
@@ -21,4 +29,8 @@ rand_chacha.workspace = true
 
 [[bench]]
 name = "terminal"
+harness = false
+
+[[bench]]
+name = "solve"
 harness = false

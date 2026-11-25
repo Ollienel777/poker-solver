@@ -146,7 +146,11 @@ fn every_spot_round_trips_through_json_and_compares_identical_to_itself() {
 
         let mapped = MappedSolution::from_dump(&back, &spot).unwrap();
         assert_eq!(mapped.strategy(), solution.strategy(), "{name}");
-        assert_eq!(mapped.exploitability(), solution.exploitability(), "{name}");
+        assert_eq!(
+            mapped.exploitability(),
+            Some(solution.exploitability()),
+            "{name}"
+        );
         assert_eq!(mapped.reported_evs(), Some(mapped.measured_evs()), "{name}");
         let ours = MappedSolution::from_solution(&solution);
         let comparison = compare_mapped(&ours, &mapped, &Tolerances::default());
@@ -457,7 +461,7 @@ fn the_toy_games_hand_written_equilibrium_passes_against_our_solve() {
     let mapped = MappedSolution::from_dump(&theirs, &spot).unwrap();
     // It is an equilibrium: nobody gains by deviating, to rounding.
     assert!(
-        mapped.exploitability().chips.abs() < 1e-9,
+        mapped.exploitability().unwrap().chips.abs() < 1e-9,
         "{:?}",
         mapped.exploitability()
     );
@@ -698,7 +702,7 @@ fn measure(a: &Solution, b: &Solution) -> Measured {
         }
         None => (0.0, String::new()),
     };
-    let values = comparison.values();
+    let values = comparison.values().map(Option::unwrap);
     let value = (0..2)
         .map(|p| comparison.percent((values[0][p] - values[1][p]).abs()))
         .fold(0.0, f64::max);

@@ -6,7 +6,8 @@ Reference data that tests and comparisons read. Nothing here is produced by this
 | --- | --- | --- |
 | `ranges/<config>/<formation>.toml` | Heads-up ranges at the flop, in the [range-file format](../docs/ARCHITECTURE.md#range-file) | M3, M5, M7, M8 |
 | `spots/river/*.toml` | River test spots, each with its tree sizing and rake, in the [spot-file format](../docs/ARCHITECTURE.md#spot-file) | M3 |
-| `spots/flop/*.toml` | Flop test spots on a reduced tree | M4 |
+| `spots/turn/*.toml` | Turn test spots, compared with the reference by the M4 gate's test | M4 |
+| `spots/flop/*.toml` | Flop test spots on a reduced tree, compared with the reference by the M4 gate's test | M4 |
 
 Rules:
 
@@ -77,10 +78,19 @@ The amounts in each tree, as the street total each bet or raise goes to:
 
 A reference solver's solution of a spot is read as a [solution dump](../docs/ARCHITECTURE.md#solution-dump), a JSON file that a wrapper program around the reference writes. The reference is postflop-solver, and its wrapper is `postflop-ref`, which is kept in a repository of its own because it links AGPL code (DECISIONS D18); build it there with `cargo build --release`. The format says what every number means; what a wrapper also needs to know:
 
-- It is run as a command template with `{spot}`, the path of one of these spot files, and `{out}`, where to write the dump. `PK_REFERENCE_SOLVER` holds the template as a JSON array of strings, such as `["C:/tools/ref-wrapper.exe", "{spot}", "{out}"]`, and `cargo test -p pk-postflop --release -- --ignored the_configured_reference_solver_matches_ours` then compares it with this solver on every spot. A failing run should exit with a non-zero code and say why on standard error.
+- It is run as a command template with `{spot}`, the path of one of these spot files, and `{out}`, where to write the dump. `PK_REFERENCE_SOLVER` holds the template as a JSON array of strings, such as `["C:/tools/ref-wrapper.exe", "{spot}", "{out}"]`, and `cargo test -p pk-postflop --release -- --ignored the_configured_reference_solver_matches_ours` then compares it with this solver on every river spot. A failing run should exit with a non-zero code and say why on standard error.
 - Its amounts are the street totals in the table above, in chips, with an all-in written as a bet or raise of the whole stack. The tree is checked before anything else, node by node, so a tree that differs anywhere is reported with the actions each side offers there.
 - It lists every decision node, with a probability row for every hand of the acting player at each, and EVs counted from the start of the river, converted if the reference counts them otherwise. It writes no frequencies over a range: this solver sums every range itself, the same way for both sides.
 - Both solvers are run to 0.03% of the pot (DECISIONS D20). Measured between two sound solves of these spots (`honest_solvers_table` in `crates/postflop/tests/compare.rs`), frequencies agreed within the gate's 2 points on every spot with both at 0.03% of the pot, and differed by up to 6.2 points with both at 0.1%.
+
+A turn or flop spot's answer is a version 2 dump ([Solution dump](../docs/ARCHITECTURE.md#version-2-flop-and-turn-spots)), and differs only in this:
+
+- Paths hold the cards dealt, each as `{"kind": "deal", "card": "7s"}` right after the action that closes a street, and every amount is the acting player's total for its street, from zero on each street: the all-in on the turn of a flop spot is what the player had left when the turn began. A node has a row for each hand of the acting player that holds no card dealt on its path, and none for a hand that holds one. There are no nodes after a card that cannot fall, because every pair of hands that can be held holds it.
+- A dump may hold only the first street, or on a flop spot the first two, after every card, and says so with `"complete": false`. `postflop-ref` writes a flop spot's flop and turn by default, and every street of a turn spot; a complete flop dump with real ranges runs to a gigabyte. The comparison compares what both solutions hold. A partial dump's exploitability cannot be measured here, so its solver's own figure is shown as reported and held to the limit, and the text says it could not be checked; its EVs are checked against its strategy only where the strategy below the node is in the dump.
+- `null` is the EV of a hand the reference has none for, such as one that never plays to the node itself, and is never read as zero.
+- Below a deal, a node is checked when play reaches it more than 1% of the time given the cards dealt on its path, and its frequencies are held to `Tolerances::frequency_below_deals` rather than the first street's 2 points (DECISIONS P35, P36).
+- `cargo test -p pk-postflop --release --test compare_streets -- --ignored the_configured_reference_solver_matches_ours_on_turn_and_flop_spots` compares the reference with this solver on every spot in `spots/turn/` and `spots/flop/`, each solved by both to 0.03% of the pot, and does nothing while those folders are missing or empty. `the_configured_reference_solver_on_the_test_spots` does the same on four small spots of `crates/postflop/tests/data`, which are not gate fixtures. Three of them have narrow made-up ranges, of 8 to 100 combos a side, on which a single hand moves a frequency below a deal by many points between two sound solvers, so it asserts every check but the frequencies below a deal, and prints those.
+- To measure the reference's whole strategy on a flop spot, so that its exploitability is measured here rather than reported, give the wrapper `"--streets", "3"` in the template. The dump is complete, and large: 34 MB for `flop_small`, with 8 hands a side, and 230 MB with about a hundred.
 
 ### The toy game
 
@@ -102,3 +112,58 @@ At equilibrium:
 - In the payoffs of `pk_postflop::payoff`, which count from the start of the river, each nut combo wins 10 + 5 × 2/3 = 40/3bb and each air combo 0. Over the 22 × 12 deals, which are all possible, OOP's value is 40/11 ≈ 3.64bb and IP's is 70/11 ≈ 6.36bb, adding up to the 10bb pot.
 
 The frequencies are over each range as a whole: any split of the 2 bluffs among the air combos, or of the calls among IP's combos, is an equilibrium.
+
+## Turn and flop spots
+
+The files in `spots/turn/` and `spots/flop/` are the test spots of milestone M4. The gate's comparison (`the_configured_reference_solver_matches_ours_on_turn_and_flop_spots`, [above](#reading-a-references-answer)) runs the reference on each file and solves it with this solver, both to 0.03% of the pot; the reference's solutions are not stored. A test in `pk-postflop` (`tests/street_spots.rs`) loads every file, builds its betting tree and its game, checks that it writes back unchanged, walks every tree to check the rules [below](#reproducing-the-turn-and-flop-trees), checks that the set has what the table says it stresses, and checks both tables below against the files.
+
+Every range here is illustrative, as on the river: written for these fixtures on 2026-11-24, to tell a plausible story about what reaches each spot, and not taken from any solver, chart, site or book; each spot's `description` says so and tells the story. Three flop spots hold the whole ranges of `ranges/a/BTN_vs_BB_SRP`, which are illustrative too, and `checked_flop_two_bets` gives OOP that file's BB range. Every spot is on a BTN vs BB line at 100bb, with BB out of position: the single-raised pot of `ranges/a/BTN_vs_BB_SRP`, 5.5bb with 97.5bb behind on the flop, or for `three_bet_low_spr` the 3-bet pot of `ranges/a/BB_vs_BTN_3BP`, 20.5bb with 90bb behind; a turn spot's pot and stack are those left by the flop its description gives. The ranges are written in hand classes (`AKs`, `77`, `KTo+`) and never name a single combo, so every symmetry of a board's suits keeps them.
+
+| Spot | Stresses | Board | Pot | Stack | Tree | Rake | Suits alike | Betting nodes | Public nodes | OOP hands | IP hands |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `dry_rainbow` | The gate's plain 100bb single-raised-pot flop solve: the full ranges on a dry rainbow flop, with no flush draw or straight draw, and one bet a street | `Kd7c2h` | 5.5bb | 97.5bb | one bet, 0.5, on each street; no raises | none | none | 117 | 191,844 | 452 | 422 |
+| `two_tone_raked` | A wet two-tone flop, with a flush draw and many straight draws, the full ranges, and a capped rake that binds in the larger pots only | `JhTh4c` | 5.5bb | 97.5bb | one bet, 0.5, on each street; no raises | 5%, cap 1bb | d, s | 117 | 191,844 | 438 | 422 |
+| `monotone_pot` | A monotone flop, the full ranges, and pot-sized bets, which put 71.5bb of the 97.5bb in on the longest line | `Qs8s3s` | 5.5bb | 97.5bb | one bet, 1, on each street; no raises | none | c, d, h | 117 | 191,844 | 450 | 431 |
+| `paired_raise` | A paired flop, narrower ranges, and a raise on the flop: the largest public tree, two thirds larger than one bet a street | `9s9h5d` | 5.5bb | 97.5bb | flop: one bet, 0.5; raises to 3×; turn and river: one bet, 0.5; no raises; one raise | 5%, cap 1bb | h, s | 195 | 319,740 | 127 | 126 |
+| `checked_flop_two_bets` | A wide turn after the flop was checked through, with two bet sizes on both streets | `Th7h4c2c` | 5.5bb | 97.5bb | bets 0.5 and 1 on each street; no raises | none | d, s | 90 | 3,615 | 438 | 422 |
+| `called_flop_raise_allin` | A turn after a called flop bet, with a raise and all-in, so that an all-in called on the turn deals the river with no decision, and a river bet of three quarters of the pot | `Qd9c8h5s` | 11bb | 94.75bb | turn: one bet, 0.5, or all-in; raises to 3×, or all-in; river: one bet, 0.75; no raises; one raise | 5%, cap 2bb | none | 76 | 2,379 | 358 | 412 |
+| `three_bet_low_spr` | A 3-bet pot with a stack-to-pot ratio near 2, where all-in is the natural bet on both streets, on a paired turn | `Kc9c4h4d` | 41bb | 79.75bb | one bet, 0.5, or all-in on each street; facing a bet, all-in only; one raise | 5%, cap 6bb | d, h | 88 | 3,237 | 99 | 150 |
+
+Pot and stack are at the start of the spot, and sizes are as on the river: bets are fractions of the pot, and raises go to a multiple of the bet faced. Suits alike are the suits that a symmetry of the board exchanges, the ones a later merging of isomorphic turn and river cards can merge: on `dry_rainbow` no two suits are alike, on `two_tone_raked` the two suits not on the board are, on `paired_raise` the suits of the pair, and on `monotone_pot` the three suits not on the board. Betting nodes counts the betting tree, in which a chance node has one child. Public nodes counts the tree the solver plays, with a child at each chance node for every card off the board; `PostflopGame::from_spot` refuses one of more than 1,000,000 nodes. A player's hands are as on the river: the combos of its range with a positive weight that miss the board.
+
+Three spots are rake-free and four take 5%. The configs' cap of 6bb (DECISIONS D16) binds in `three_bet_low_spr` once the pot passes 120bb, but in no pot of the single-raised flop spots, the largest of which, 88bb on `paired_raise`, pays 4.4bb, and in `called_flop_raise_allin` only once an all-in is called. So the single-raised spots cap lower, where the cap binds in their larger pots and not in their smaller ones: 1bb on the flop, which binds from a 22bb pot, and 2bb on `called_flop_raise_allin`, which binds above 40bb. No pot is raked exactly at its cap.
+
+### Reproducing the turn and flop trees
+
+What the river section says [about the trees](#reproducing-the-trees) holds on every street. What a reference also needs to know:
+
+- Each street has its own sizing under `[tree]`, the same for both players. OOP acts first on every street, and its first bet on a street is sized as any other: there are no separate sizes for a bet into the player who called the street before.
+- A bet is a fraction of the whole pot when it is made, the chips put in on earlier streets included. A raise goes to a multiple of the opponent's total for the street. `max_raises` counts again from zero on each street.
+- All-in is everything the player had left when the street began. After an all-in is called before the river, the remaining cards are dealt with no decisions.
+- The rake is taken once, when the hand ends, from the pot both players matched over every street.
+- Every card that can fall is dealt, each with a subtree of its own. A reference that merges the cards a symmetry of the suits makes alike writes each card as itself in its dump, as `postflop-ref` does.
+- The amounts are whole because the pots are. Every pot of a single-raised spot is 550 chips times a whole number: a half-pot bet called doubles the pot, a pot-sized bet called triples it, and a raise to 3× of a half-pot bet, called, quadruples it. The three-quarter-pot river bet of `called_flop_raise_allin` is made only into pots of 1,100, 2,200 and 4,400 chips, and `three_bet_low_spr`'s pots are 4,100 and 8,200 chips.
+- No size reaches the stack on any street, so no size is turned into all-in and no two sizes land on one amount: every size in `[tree]` is an action of its own at every node where it can be taken, and fold and call stand alone only facing an all-in or after the last raise allowed. The test checks this node by node.
+
+The amounts in each tree, as the street total each bet or raise goes to, street by street:
+
+| Spot | Street | Bets | Raises to | All-in |
+| --- | --- | --- | --- | --- |
+| `dry_rainbow` | flop | 2.75bb | none | none |
+| | turn | 2.75, 5.5bb | none | none |
+| | river | 2.75, 5.5, 11bb | none | none |
+| `two_tone_raked` | flop | 2.75bb | none | none |
+| | turn | 2.75, 5.5bb | none | none |
+| | river | 2.75, 5.5, 11bb | none | none |
+| `monotone_pot` | flop | 5.5bb | none | none |
+| | turn | 5.5, 16.5bb | none | none |
+| | river | 5.5, 16.5, 49.5bb | none | none |
+| `paired_raise` | flop | 2.75bb | 8.25bb | none |
+| | turn | 2.75, 5.5, 11bb | none | none |
+| | river | 2.75, 5.5, 11, 22bb | none | none |
+| `checked_flop_two_bets` | turn | 2.75, 5.5bb | none | none |
+| | river | 2.75, 5.5, 8.25, 11, 16.5bb | none | none |
+| `called_flop_raise_allin` | turn | 5.5bb | 16.5bb | 94.75bb |
+| | river | 8.25, 16.5, 33bb | none | none |
+| `three_bet_low_spr` | turn | 20.5bb | none | 79.75bb |
+| | river | 20.5, 41bb | none | 59.25, 79.75bb |

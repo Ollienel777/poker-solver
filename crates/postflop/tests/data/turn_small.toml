@@ -1,0 +1,18 @@
+format = 1
+name = "turn_small"
+description = "Illustrative ranges, not from a reference: a small raked turn spot for the tests of chance nodes. The ranges share combos and cards, and all-in is offered on both streets."
+board = "Kh9c7d2s"
+pot_bb = 10.0
+effective_stack_bb = 15.0
+oop_range = "KsQs,KdJd,9s9h,7c7h,AhTh,QsJs,QhJh:0.5,Ts8s,AcQc:0.5,5h4h"
+ip_range = "KcQc,KsJs:0.5,9h8h,8d8h,AsKs,QhJh,6h5h,Td8d,AdAh"
+
+[rake]
+percent = 5.0
+cap_bb = 1.0
+
+[tree]
+max_raises = 1
+allin_threshold = 1.0
+turn = { bets = [0.5], raises = [3.0], allin = true }
+river = { bets = [0.75], raises = [], allin = true }

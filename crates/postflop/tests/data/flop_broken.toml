@@ -1,0 +1,19 @@
+format = 1
+name = "flop_broken"
+description = "Illustrative ranges, not from a reference: made up for the tests of merging suit-isomorphic cards. The monotone flop of flop_monotone, on which the board alone makes the three suits off it alike, with an OOP range that names AcQc and AdQd but not AhQh, so that only clubs and diamonds stay alike and the hearts must be kept apart. The only bet on each street is all-in."
+board = "Ks9s4s"
+pot_bb = 10.0
+effective_stack_bb = 5.0
+oop_range = "AA,QJs,76s:0.35,AcQc:0.6,AdQd:0.6"
+ip_range = "KK:0.8,99,JTs,65s:0.7"
+
+[rake]
+percent = 5.0
+cap_bb = 3.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+flop = { bets = [1.0], raises = [], allin = false }
+turn = { bets = [1.0], raises = [], allin = false }
+river = { bets = [1.0], raises = [], allin = false }

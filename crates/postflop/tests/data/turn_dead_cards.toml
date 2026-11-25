@@ -1,0 +1,18 @@
+format = 1
+name = "turn_dead_cards"
+description = "Illustrative ranges, not from a reference: a turn spot whose ranges are so narrow that four river cards cannot fall, since OOP's one hand meets only one of IP's, and every pair of hands that can be held holds them. Our public tree has a subtree after each; a dump has none."
+board = "Qh9c7d2s"
+pot_bb = 10.0
+effective_stack_bb = 10.0
+oop_range = "AsAh"
+ip_range = "KsKh,AsKd"
+
+[rake]
+percent = 0.0
+cap_bb = 0.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+turn = { bets = [0.5], raises = [], allin = false }
+river = { bets = [0.5], raises = [], allin = false }

@@ -1,0 +1,18 @@
+format = 1
+name = "turn_four_flush"
+description = "Illustrative ranges, not from a reference: made up for the tests of merging suit-isomorphic cards. A turn of four clubs, on which the other three suits are alike, with ranges written in hand classes and few enough hands for the fast tests. A raise and all-in are offered on the turn, and all-in on the river."
+board = "Jc8c5c2c"
+pot_bb = 10.0
+effective_stack_bb = 15.0
+oop_range = "AA,KQs:0.55,T9s,76s:0.4"
+ip_range = "KK:0.7,QQ,AKs:0.5,JTs,43s:0.85"
+
+[rake]
+percent = 5.0
+cap_bb = 1.0
+
+[tree]
+max_raises = 1
+allin_threshold = 1.0
+turn = { bets = [0.5], raises = [3.0], allin = true }
+river = { bets = [0.75], raises = [], allin = true }

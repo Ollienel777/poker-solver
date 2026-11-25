@@ -1,0 +1,18 @@
+format = 1
+name = "checked_flop_two_bets"
+description = "Illustrative ranges, written for this fixture on 2026-11-24 and not taken from any solver, chart, site or book: a wide single-raised pot. BTN (IP) opened to 2.5bb, the SB folded and BB (OOP) called; BB checked its whole range on the flop Th 7h 4c and BTN checked back, so 97.5bb is left behind a 5.5bb pot on the turn 2c, which brings a second flush draw. OOP holds BB's whole range, copied from reference/ranges/a/BTN_vs_BB_SRP.toml; IP holds BTN's checks, mostly middle and low pairs, weak top pairs and high cards, with a little of its strongest hands and of its draws. Half-pot and pot-sized bets on the turn and the river, and no raises. Rake-free."
+board = "Th7h4c2c"
+pot_bb = 5.5
+effective_stack_bb = 97.5
+oop_range = "22-JJ,A2s-AJs,K2s+,Q4s+,J6s+,T6s+,96s+,85s+,75s+,64s+,54s,43s,A8o-AJo,KTo+,QTo+,JTo,T9o,98o,QQ:0.5,AQs:0.5,A2o-A7o:0.5,AKo:0.25"
+ip_range = "88-99,55-66,22-33,Q7s-Q9s,J7s-J9s,97s,76s,A7o-A9o,AJs+:0.75,A2s-A9s:0.75,KJs+:0.75,K5s-K9s:0.75,QJs:0.75,87s:0.75,54s:0.75,AJo+:0.75,KJo+:0.75,QJo:0.75,JJ:0.5,ATs:0.5,KTs:0.5,QTs:0.5,JTs:0.5,T8s+:0.5,98s:0.5,86s:0.5,65s:0.5,ATo:0.5,A2o-A6o:0.5,K9o-KTo:0.5,QTo:0.5,JTo:0.5,QQ+:0.25,TT:0.25,77:0.25,44:0.25,K2s-K4s:0.25,T7s:0.25"
+
+[rake]
+percent = 0.0
+cap_bb = 0.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+turn = { bets = [0.5, 1.0], raises = [], allin = false }
+river = { bets = [0.5, 1.0], raises = [], allin = false }

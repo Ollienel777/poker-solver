@@ -1,0 +1,19 @@
+format = 1
+name = "monotone_pot"
+description = "Illustrative ranges, copied on 2026-11-24 from reference/ranges/a/BTN_vs_BB_SRP.toml, the repository's own made-up ranges, which were not taken from any solver, chart, site or book. BTN (IP) opened to 2.5bb, the SB folded and BB (OOP) called, so 97.5bb is left behind a 5.5bb pot on the monotone flop Qs 8s 3s, where two spades make a flush and one draws to one, and the three other suits are alike. Pot-sized bets on each street and no raises; a bet called on every street puts 71.5bb in, so no bet reaches the stack. Rake-free."
+board = "Qs8s3s"
+pot_bb = 5.5
+effective_stack_bb = 97.5
+oop_range = "22-JJ,A2s-AJs,K2s+,Q4s+,J6s+,T6s+,96s+,85s+,75s+,64s+,54s,43s,A8o-AJo,KTo+,QTo+,JTo,T9o,98o,QQ:0.5,AQs:0.5,A2o-A7o:0.5,AKo:0.25"
+ip_range = "22+,A2s+,K5s+,Q7s+,J7s+,T7s+,97s+,86s+,76s,65s,54s,A7o+,KTo+,QTo+,JTo,K2s-K4s:0.5,A2o-A6o:0.5,K9o:0.5"
+
+[rake]
+percent = 0.0
+cap_bb = 0.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+flop = { bets = [1.0], raises = [], allin = false }
+turn = { bets = [1.0], raises = [], allin = false }
+river = { bets = [1.0], raises = [], allin = false }

@@ -1,0 +1,19 @@
+format = 1
+name = "flop_monotone"
+description = "Illustrative ranges, not from a reference: made up for the tests of merging suit-isomorphic cards. A monotone flop, on which the three suits off the board are alike, with ranges written in hand classes so that every relabelling of those suits keeps the deal, and few enough hands for the fast tests. The only bet on each street is all-in."
+board = "Ks9s4s"
+pot_bb = 10.0
+effective_stack_bb = 5.0
+oop_range = "AA,KQs:0.6,QJs,76s:0.35"
+ip_range = "KK:0.8,99,AQs:0.45,JTs,65s:0.7"
+
+[rake]
+percent = 5.0
+cap_bb = 3.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+flop = { bets = [1.0], raises = [], allin = false }
+turn = { bets = [1.0], raises = [], allin = false }
+river = { bets = [1.0], raises = [], allin = false }

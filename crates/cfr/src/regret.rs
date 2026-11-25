@@ -235,8 +235,14 @@ pub fn average_strategy(strategy_sum: &[f32], num_hands: usize, average: &mut [f
 }
 
 /// For each hand, writes each value's positive part divided by the hand's total of positive
-/// parts, or `1 / actions` for every action when that total is zero.
-fn normalize_positive(values: &[f32], num_hands: usize, out: &mut [f32]) {
+/// parts, or `1 / actions` for every action when that total is zero, in `f32`. The values are
+/// stored regrets or strategy sums, or the 16-bit codes of [`crate::compressed`], each widened
+/// to `f32` exactly; for `f32` values the widening is the value itself.
+pub(crate) fn normalize_positive<T: Copy + Into<f32>>(
+    values: &[T],
+    num_hands: usize,
+    out: &mut [f32],
+) {
     let num_actions = num_actions(values.len(), num_hands);
     assert_eq!(out.len(), values.len(), "output and input lengths differ");
     let uniform = 1.0 / num_actions as f32;
@@ -244,14 +250,14 @@ fn normalize_positive(values: &[f32], num_hands: usize, out: &mut [f32]) {
     // The first output row holds each hand's total until the last step.
     let (totals, later_out) = out.split_at_mut(num_hands);
     for (total, &value) in totals.iter_mut().zip(first_values) {
-        *total = value.max(0.0);
+        *total = value.into().max(0.0);
     }
     for (row, values) in later_out
         .chunks_exact_mut(num_hands)
         .zip(later_values.chunks_exact(num_hands))
     {
         for ((out, &value), total) in row.iter_mut().zip(values).zip(totals.iter_mut()) {
-            *out = value.max(0.0);
+            *out = value.into().max(0.0);
             *total += *out;
         }
     }
@@ -262,7 +268,7 @@ fn normalize_positive(values: &[f32], num_hands: usize, out: &mut [f32]) {
     }
     for (total, &value) in totals.iter_mut().zip(first_values) {
         *total = if *total > 0.0 {
-            value.max(0.0) / *total
+            value.into().max(0.0) / *total
         } else {
             uniform
         };
@@ -341,7 +347,7 @@ pub fn accumulate_strategy(
 }
 
 /// The number of actions in `len` values laid out as `[actions × num_hands]`.
-fn num_actions(len: usize, num_hands: usize) -> usize {
+pub(crate) fn num_actions(len: usize, num_hands: usize) -> usize {
     assert!(
         num_hands > 0 && len >= num_hands && len.is_multiple_of(num_hands),
         "{len} values are not one or more whole rows of {num_hands} hands"

@@ -1,0 +1,19 @@
+format = 1
+name = "flop_wide"
+description = "Illustrative ranges, not from a reference: a rake-free flop spot on the tree of flop_small with ranges of about a hundred combos a side, for measuring two honest solves below a deal."
+board = "Qs8h4d"
+pot_bb = 10.0
+effective_stack_bb = 10.0
+oop_range = "TT+,AQs,KQs,QJs,JTs,T9s,98s,87s,AQo,KQo,A5s,A4s"
+ip_range = "22-99,A2s-A9s,KJs,QTs,J9s,T8s,97s,86s,75s,65s,54s,KJo,QJo,JTo"
+
+[rake]
+percent = 0.0
+cap_bb = 0.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+flop = { bets = [0.5], raises = [], allin = true }
+turn = { bets = [0.5], raises = [], allin = false }
+river = { bets = [0.5], raises = [], allin = false }

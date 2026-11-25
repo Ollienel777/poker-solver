@@ -1,0 +1,18 @@
+format = 1
+name = "called_flop_raise_allin"
+description = "Illustrative ranges, written for this fixture on 2026-11-24 and not taken from any solver, chart, site or book: a single-raised pot after a called flop bet. BTN (IP) opened to 2.5bb, the SB folded and BB (OOP) called; on the flop Qd 9c 5s BB checked, BTN bet 2.75bb, half the pot, and BB called, so 94.75bb is left behind an 11bb pot on the turn 8h, which makes JT a straight and gives many hands a straight draw. OOP holds BB's check-calls, pairs, straight draws and some high cards, with few sets and two pairs, which it would mostly have raised; IP holds BTN's bets, its strong hands, most pairs and draws and some air. On the turn a half-pot bet, a raise to 3x and all-in, with one raise; on the river a bet of three quarters of the pot and no raises. An all-in called on the turn deals the river with no decision. 5% rake capped at 2bb, which binds once the pot passes 40bb and not in the smaller pots."
+board = "Qd9c8h5s"
+pot_bb = 11.0
+effective_stack_bb = 94.75
+oop_range = "TT-JJ,66-88,A9s,A5s,K9s+,QTs+,J8s+,T8s+,96s+,87s,85s,75s+,65s,54s,A9o,KQo,QTo+,JTo,T9o,98o,ATs-AJs:0.75,Q6s-Q8s:0.75,Q4s:0.75,86s:0.75,KTo-KJo:0.75,22-44:0.5,A6s-A8s:0.5,A2s-A4s:0.5,K5s:0.5,T7s:0.5,ATo-AJo:0.5,A5o:0.5,QQ:0.25,99:0.25,55:0.25,AQs:0.25,K6s-K8s:0.25,K2s-K4s:0.25,Q9s:0.25,Q5s:0.25,J7s:0.25,T6s:0.25,64s:0.25,AKo:0.25,A8o:0.25"
+ip_range = "QQ+,99,55,AQs,A5s,KTs+,Q9s+,JTs,T8s,87s,76s,AQo,KTo+,QTo+,JTo,TT-JJ:0.75,AKs:0.75,A9s-AJs:0.75,K9s:0.75,K5s:0.75,Q7s-Q8s:0.75,J8s-J9s:0.75,T9s:0.75,97s+:0.75,65s:0.75,54s:0.75,AKo:0.75,AJo:0.75,A9o:0.75,66-88:0.5,22-44:0.5,A6s-A8s:0.5,A2s-A4s:0.5,K6s-K8s:0.5,J7s:0.5,T7s:0.5,86s:0.5,ATo:0.5,A7o-A8o:0.5,A5o:0.5,K2s-K4s:0.25,A6o:0.25,A2o-A4o:0.25,K9o:0.25"
+
+[rake]
+percent = 5.0
+cap_bb = 2.0
+
+[tree]
+max_raises = 1
+allin_threshold = 1.0
+turn = { bets = [0.5], raises = [3.0], allin = true }
+river = { bets = [0.75], raises = [], allin = false }

@@ -1,14 +1,18 @@
-//! The river solve: vector-form discounted CFR on a [`RiverGame`], run until its average
-//! strategy is close enough to an equilibrium or a cap is reached.
+//! The solve: vector-form discounted CFR on a [`PostflopGame`], run until its average strategy
+//! is close enough to an equilibrium or a cap is reached.
 //!
 //! # The loop
 //!
-//! [`solve`] builds the spot's [`RiverGame`] and runs [`VectorCfr`] on it under
-//! [`SolveOptions::schedule`], DCFR(1.5, 0, 2) by default. Each iteration updates OOP, then IP
-//! against OOP's updated strategy (alternating updates), as [`pk_cfr::vector`] specifies.
-//! Regrets and strategy sums are stored as `f32`, one entry per action and in-range combo of
-//! the acting player at each player node, and the strategy the solve reports is the average
-//! strategy.
+//! [`solve`] builds the spot's [`PostflopGame`], on the flop, the turn or the river, and runs
+//! [`VectorCfr`] on it under [`SolveOptions::schedule`], DCFR(1.5, 0, 2) by default. Each
+//! iteration updates OOP, then IP against OOP's updated strategy (alternating updates), as
+//! [`pk_cfr::vector`] specifies. Regrets and strategy sums are stored as `f32` by default, one
+//! entry per action and in-range combo of the acting player at each player node of the public
+//! tree, or in 16 bits with a scale per node with [`SolveOptions::compressed_storage`] (see
+//! [Storage](#storage)), and the strategy the solve reports is the average strategy. The public
+//! tree is refused before anything is allocated for it if it has more than
+//! [`SolveOptions::max_nodes`] nodes, and so is a solve whose [memory estimate](crate::memory)
+//! is over [`SolveOptions::max_memory`].
 //!
 //! After every [`check_every`](SolveOptions::check_every) iterations, the solve measures the
 //! [exploitability](mod@crate::exploitability) of the average strategy and calls the progress
@@ -31,6 +35,55 @@
 //! In a build with debug assertions, which the tests are, the solve then checks the solution
 //! against its [invariants](crate::invariants) and panics with the report if it breaks any.
 //!
+//! # What is held
+//!
+//! A measurement builds the average strategy on the full public tree, a profile as large as the
+//! regrets, and the solve keeps it, since the [`Solution`] needs the strategy of its last
+//! measurement when the solve stops there. It drops it before the next measurement builds the
+//! next, so that it never holds two. The best responses of a measurement give their values
+//! only and keep no strategy ([`pk_cfr::vector_best_response_value`]). Once the solve stops,
+//! the solver is dropped and the game moved into the [`Solution`], not copied. None of this
+//! changes a number.
+//!
+//! # Threads
+//!
+//! A solve on more than one thread ([`SolveOptions::threads`]) of a spot that has a chance node
+//! makes a rayon pool of its own of that many threads, and runs each iteration and each
+//! measurement on it, so that the walks run the children of chance nodes in parallel, as
+//! [`pk_cfr::vector`'s parallel walk](pk_cfr::vector#the-parallel-walk) describes. It does not
+//! touch rayon's global pool, so solves in one process, or a caller's own threads, do not share
+//! threads with it. Everything else, the progress callback included, runs on the calling
+//! thread. A river spot has no chance node, so it makes no pool and runs on the calling thread,
+//! as does a solve on one thread.
+//!
+//! # Merging
+//!
+//! With [`SolveOptions::merge_isomorphic`], on by default, a spot whose deal a relabelling of
+//! the suits keeps, and which has a chance node, is iterated on its
+//! [merged game](crate::merged): each class of turn or river cards that such a relabelling makes
+//! alike is dealt once, and the solver stores the regrets and strategy sums of the merged tree
+//! only. Everything else is on the full game, which the solve builds and keeps as before: each
+//! measurement expands the merged average strategy onto the full public tree and measures that
+//! profile there, and the [`Solution`] holds the full game and the expanded strategy, so that
+//! nothing that reads a solution knows the solve was merged. A merged iteration is the full
+//! game's in exact arithmetic, and agrees with it within rounding in floating point. With the
+//! option off, or on a spot that no relabelling keeps (an unpaired rainbow flop, a turn of four
+//! suits, ranges that name single combos) or that has no chance node, the solve iterates on the
+//! full game, exactly as without the option.
+//!
+//! # Storage
+//!
+//! With [`SolveOptions::compressed_storage`], off by default, the solver stores each player
+//! node's regrets as `i16` codes and its strategy sums as `u16` codes, each slice with one `f32`
+//! scale, as [`pk_cfr::compressed`] specifies ([`pk_cfr::CompressedStorage`]), merged or not.
+//! That holds the regrets and strategy sums in half the memory, and changes the numbers: every
+//! update rounds what it stores to a step of the node's scale, with offsets that make the
+//! rounding errors cancel over the iterations, so the iterations part from those of `f32`
+//! storage by more than rounding, and a solve stops improving at a few thousandths of a percent
+//! of the pot where an `f32` solve goes on. The measurements, the profile and the [`Solution`]
+//! are as with `f32` storage, all `f32` on the full tree, and a solve with the option is the
+//! same on any number of threads.
+//!
 //! # Progress
 //!
 //! The callback is called once per measurement, in iteration order, with a [`Progress`]: every
@@ -43,8 +96,12 @@
 //! An iteration depends only on the spot, the schedule and the iterations before it, and
 //! measuring exploitability reads the average strategy without changing anything. So the
 //! strategy after `t` iterations is the same bit for bit in every run, whatever `check_every`,
-//! the target and the caps. A time cap makes the number of iterations depend on the machine,
-//! but not the strategy reached at any given number.
+//! the target and the caps. The walks give the same results bit for bit on any number of
+//! threads (DECISIONS P5), so the strategy and every measurement are the same whatever
+//! `threads` is too, merged or not. A time cap makes the number of iterations depend on the
+//! machine, but not the strategy reached at any given number. A merged solve and the solve with
+//! merging off part within rounding, so they are the same solve only at a tolerance, and a
+//! solve with compressed storage parts from one with `f32` storage by more.
 //!
 //! # References
 //!
@@ -54,36 +111,61 @@
 //!   through Monte Carlo Counterfactual Regret Minimization*, AAMAS (2012): CFR over the public
 //!   tree, with one regret per (public node, private hand).
 
+use std::num::NonZero;
+use std::thread;
 use std::time::{Duration, Instant};
 
-use pk_cfr::{Dcfr, PublicProfile, Schedule, VectorCfr};
+use pk_cfr::{CompressedStorage, Dcfr, F32Storage, PublicProfile, Schedule, Storage, VectorCfr};
 use pk_game::{Player, PostflopTree, TreeError};
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use thiserror::Error;
 
 use crate::exploitability::{Exploitability, exploitability};
+use crate::game::{ClassView, PostflopGame};
 use crate::hands::HandList;
 use crate::invariants::debug_assert_valid;
-use crate::river::{ClassView, RiverGame};
+use crate::memory::{estimate_memory, format_bytes};
+use crate::merged::MergedGame;
 use crate::spot::{Spot, SpotError};
 
-/// Why a solve could not start.
+// The tests below build the river game by the name they were written with.
+#[cfg(test)]
+use crate::river::RiverGame;
+
+/// Why a game could not be built, or a solve could not start.
 #[derive(Debug, Error)]
 pub enum SolveError {
-    /// The spot does not start on the river. Flop and turn spots come in milestone M4.
-    #[error(
-        "the board has {cards} cards; the river solver needs a river board of 5, and flop and \
-         turn spots are not supported yet"
-    )]
+    /// The spot does not start on the river, and a river game was asked for: see
+    /// [`PostflopGame::new`]. [`solve`] takes spots on every street.
+    #[error("the board has {cards} cards; a river game needs a river board of 5")]
     NotRiver { cards: usize },
     /// The spot fails [`Spot::validate`].
     #[error("invalid spot: {0}")]
     Spot(#[from] SpotError),
-    /// The spot's tree has more nodes than the builder's limit.
+    /// The spot's betting tree has more nodes than the builder's limit.
     #[error("{0}")]
     Tree(#[from] TreeError),
+    /// The public tree, with a child for every card a chance node can deal, would have more
+    /// nodes than the limit: see [`PostflopGame::with_node_limit`].
+    #[error(
+        "the public tree, with a child for every card that can fall, would have {nodes} nodes, \
+         more than the limit of {limit}"
+    )]
+    PublicTreeTooLarge { nodes: u64, limit: u64 },
+    /// The solve would need more memory than [`SolveOptions::max_memory`], by the
+    /// [memory estimate](crate::memory): both are in bytes.
+    #[error(
+        "the solve would need about {} of memory by its estimate, more than the limit of {}",
+        format_bytes(*.estimate),
+        format_bytes(*.limit)
+    )]
+    MemoryTooLarge { estimate: u64, limit: u64 },
     /// An option is out of range.
     #[error("`{field}` {reason}")]
     Options { field: &'static str, reason: String },
+    /// The solve's pool of [`SolveOptions::threads`] threads could not be started.
+    #[error("could not start a pool of {threads} threads: {reason}")]
+    Threads { threads: usize, reason: String },
 }
 
 /// How a solve runs and when it stops. [`SolveOptions::default`] gives the defaults listed on
@@ -102,6 +184,26 @@ pub struct SolveOptions {
     /// Measure exploitability after every this many iterations. Defaults to 10. Must be at
     /// least 1.
     pub check_every: u64,
+    /// The most nodes the public tree may have: see [`PostflopGame::with_node_limit`]. Defaults
+    /// to [`PostflopGame::DEFAULT_MAX_NODES`], one million. Must be at least 1.
+    pub max_nodes: u64,
+    /// The most memory the solve may need, in bytes: a spot whose
+    /// [estimate](crate::memory::estimate_memory) is larger is refused before anything is
+    /// allocated for it. Defaults to [`SolveOptions::DEFAULT_MAX_MEMORY`], 10 GB.
+    pub max_memory: u64,
+    /// The threads the solve runs its walks on, in a pool of its own when there is more than one
+    /// (see [the module documentation](self#threads)). The results are the same for every
+    /// count. Defaults to [`SolveOptions::default_threads`], all the machine offers. Must be at
+    /// least 1.
+    pub threads: usize,
+    /// Iterate on the [merged game](crate::merged), which deals once each class of turn or
+    /// river cards that a symmetry of the suits makes alike, when the spot has such a symmetry
+    /// (see [the module documentation](self#merging)). Defaults to true. Off, or on a spot with
+    /// no symmetry to use, the solve iterates on the full game.
+    pub merge_isomorphic: bool,
+    /// Store the regrets as `i16` and the strategy sums as `u16`, with a scale per node, in
+    /// place of `f32` (see [the module documentation](self#storage)). Defaults to false.
+    pub compressed_storage: bool,
 }
 
 impl Default for SolveOptions {
@@ -112,11 +214,26 @@ impl Default for SolveOptions {
             max_iterations: 10_000,
             max_time: None,
             check_every: 10,
+            max_nodes: PostflopGame::DEFAULT_MAX_NODES,
+            max_memory: SolveOptions::DEFAULT_MAX_MEMORY,
+            threads: SolveOptions::default_threads(),
+            merge_isomorphic: true,
+            compressed_storage: false,
         }
     }
 }
 
 impl SolveOptions {
+    /// The default memory limit: 10 GB, 10^10 bytes, the most a local solve may use
+    /// (DECISIONS D17).
+    pub const DEFAULT_MAX_MEMORY: u64 = 10_000_000_000;
+
+    /// The default number of threads: all the machine offers, as
+    /// [`std::thread::available_parallelism`] gives it, or 1 if it cannot say.
+    pub fn default_threads() -> usize {
+        thread::available_parallelism().map_or(1, NonZero::get)
+    }
+
     fn check(&self) -> Result<(), SolveError> {
         if let Some(target) = self.target
             && !(target.is_finite() && target >= 0.0)
@@ -130,6 +247,18 @@ impl SolveOptions {
             return Err(SolveError::Options {
                 field: "check_every",
                 reason: "is 0; exploitability is measured every 1 or more iterations".into(),
+            });
+        }
+        if self.max_nodes == 0 {
+            return Err(SolveError::Options {
+                field: "max_nodes",
+                reason: "is 0; a public tree has at least its root".into(),
+            });
+        }
+        if self.threads == 0 {
+            return Err(SolveError::Options {
+                field: "threads",
+                reason: "is 0; a solve runs on 1 or more threads".into(),
             });
         }
         if let Schedule::Discounted(Dcfr { alpha, beta, gamma }) = self.schedule
@@ -169,11 +298,12 @@ pub struct Progress {
 /// The result of a solve: how it ended, and the average strategy with read access for later
 /// code. It is held in memory; the solution file comes in a later milestone.
 ///
-/// Node indices are those of the [`PostflopTree`] ([`Solution::tree`]), and hand indices those
-/// of each player's [`HandList`] ([`Solution::hands`]).
+/// Node indices are those of the game's public tree ([`Solution::game`]), which on a river spot
+/// are those of the [`PostflopTree`] ([`Solution::tree`]); [`PostflopGame::find`] gives the
+/// node of a path. Hand indices are those of each player's [`HandList`] ([`Solution::hands`]).
 #[derive(Debug, Clone)]
 pub struct Solution {
-    game: RiverGame,
+    game: PostflopGame,
     strategy: PublicProfile,
     stop: StopReason,
     iterations: u64,
@@ -183,11 +313,12 @@ pub struct Solution {
 
 impl Solution {
     /// The game that was solved.
-    pub fn game(&self) -> &RiverGame {
+    pub fn game(&self) -> &PostflopGame {
         &self.game
     }
 
-    /// The betting tree.
+    /// The betting tree. Its node indices are the public tree's on a river spot only: see
+    /// [`PostflopGame::tree_node`].
     pub fn tree(&self) -> &PostflopTree {
         self.game.tree()
     }
@@ -219,7 +350,7 @@ impl Solution {
     }
 
     /// Each player's expected value under the average strategy, in chips per hand dealt and
-    /// counted from the start of the river, indexed by [`Player::index`].
+    /// counted from the start of the spot, indexed by [`Player::index`].
     pub fn values(&self) -> [f64; 2] {
         self.exploitability.values
     }
@@ -238,19 +369,19 @@ impl Solution {
     }
 
     /// Each player's own reach of `node` with each of its hands under the average strategy:
-    /// see [`RiverGame::reach`]. Panics if `node` is out of range.
+    /// see [`PostflopGame::reach`]. Panics if `node` is out of range.
     pub fn reach(&self, node: u32) -> [Vec<f64>; 2] {
         self.game.reach(&self.strategy, node)
     }
 
     /// The probability that the acting player holds each of its hands once `node` is reached
-    /// under the average strategy: see [`RiverGame::hand_weights`].
+    /// under the average strategy: see [`PostflopGame::hand_weights`].
     pub fn hand_weights(&self, node: u32) -> Option<Vec<f64>> {
         self.game.hand_weights(&self.strategy, node)
     }
 
     /// The probability of each action once `node` is reached under the average strategy, card
-    /// removal by the opponent's range included: see [`RiverGame::action_frequencies`]. This
+    /// removal by the opponent's range included: see [`PostflopGame::action_frequencies`]. This
     /// is how often each action is actually taken there, not what a range view shows.
     pub fn action_frequencies(&self, node: u32) -> Option<Vec<f64>> {
         self.game.action_frequencies(&self.strategy, node)
@@ -258,14 +389,14 @@ impl Solution {
 
     /// Each hand's share of the acting player's range at `node` by its own combos alone, range
     /// weight times own reach, under the average strategy: see
-    /// [`RiverGame::range_view_weights`].
+    /// [`PostflopGame::range_view_weights`].
     pub fn range_view_weights(&self, node: u32) -> Option<Vec<f64>> {
         self.game.range_view_weights(&self.strategy, node)
     }
 
     /// Each action's frequency at `node` as a solver's range view shows it, over the acting
     /// player's own combos with no card removal by the opponent's range, under the average
-    /// strategy: see [`RiverGame::range_view_frequencies`]. Use it to compare with another
+    /// strategy: see [`PostflopGame::range_view_frequencies`]. Use it to compare with another
     /// solver; use [`Solution::action_frequencies`] for how often an action is taken.
     pub fn range_view_frequencies(&self, node: u32) -> Option<Vec<f64>> {
         self.game.range_view_frequencies(&self.strategy, node)
@@ -273,36 +404,200 @@ impl Solution {
 
     /// Each hand class in the acting player's range at `node`, with its share of the range and
     /// its frequency for each action, as a range view shows them, under the average strategy:
-    /// see [`RiverGame::range_view_classes`].
+    /// see [`PostflopGame::range_view_classes`].
     pub fn range_view_classes(&self, node: u32) -> Option<Vec<ClassView>> {
         self.game.range_view_classes(&self.strategy, node)
     }
 
     /// The probability that a hand dealt plays to `node` under the average strategy: see
-    /// [`RiverGame::reach_probability`]. Panics if `node` is out of range.
+    /// [`PostflopGame::reach_probability`]. Panics if `node` is out of range.
     pub fn reach_probability(&self, node: u32) -> f64 {
         self.game.reach_probability(&self.strategy, node)
     }
 }
 
-/// Solves a river spot, as the [module documentation](self) describes, calling `progress`
-/// after each exploitability measurement.
+/// Solves a spot on the flop, the turn or the river, as the [module documentation](self)
+/// describes, calling `progress` after each exploitability measurement.
 ///
-/// Fails if the spot is not a valid river spot (see [`RiverGame::new`]) or an option is out of
-/// range: a target that is negative or not finite, a `check_every` of 0, or DCFR parameters
-/// that are not finite.
+/// Fails if the game cannot be built (see [`PostflopGame::with_node_limit`]): a spot that does
+/// not pass [`Spot::validate`], or a betting or public tree over `options.max_nodes`. Fails as
+/// well if an option is out of range: a target that is negative or not finite, a `check_every`,
+/// `max_nodes` or `threads` of 0, or DCFR parameters that are not finite. And fails with
+/// [`SolveError::MemoryTooLarge`], before the game is built, if the
+/// [memory estimate](crate::memory::estimate_memory) is over `options.max_memory`, and with
+/// [`SolveError::Threads`] if its threads cannot be started.
 pub fn solve(
     spot: &Spot,
     options: &SolveOptions,
-    mut progress: impl FnMut(&Progress),
+    progress: impl FnMut(&Progress),
 ) -> Result<Solution, SolveError> {
     let start = Instant::now();
     options.check()?;
-    let game = RiverGame::new(spot)?;
-    let mut solver = VectorCfr::new(game, options.schedule);
-    let mut measure = |solver: &VectorCfr<RiverGame>| -> (Progress, PublicProfile) {
-        let strategy = solver.average_strategy();
-        let exploitability = exploitability(solver.game(), &strategy);
+    let estimate = estimate_memory(spot, options)?;
+    if estimate.total > options.max_memory {
+        return Err(SolveError::MemoryTooLarge {
+            estimate: estimate.total,
+            limit: options.max_memory,
+        });
+    }
+    let game = PostflopGame::with_node_limit(spot, options.max_nodes)?;
+    let merged = if options.merge_isomorphic {
+        MergedGame::new(&game)
+    } else {
+        None
+    };
+    let threads = estimate.threads;
+    let (game, finished) = match (merged, options.compressed_storage) {
+        (Some(merged), false) => {
+            let solver = VectorCfr::<_, F32Storage>::with_storage(merged, options.schedule);
+            let finished = iterate(solver, options, threads, start, progress)?.1;
+            (game, finished)
+        }
+        (Some(merged), true) => {
+            let solver = VectorCfr::<_, CompressedStorage>::with_storage(merged, options.schedule);
+            let finished = iterate(solver, options, threads, start, progress)?.1;
+            (game, finished)
+        }
+        (None, false) => {
+            let solver = VectorCfr::<_, F32Storage>::with_storage(game, options.schedule);
+            iterate(solver, options, threads, start, progress)?
+        }
+        (None, true) => {
+            let solver = VectorCfr::<_, CompressedStorage>::with_storage(game, options.schedule);
+            iterate(solver, options, threads, start, progress)?
+        }
+    };
+    let solution = Solution {
+        game,
+        strategy: finished.strategy,
+        stop: finished.stop,
+        iterations: finished.measured.iterations,
+        elapsed: start.elapsed(),
+        exploitability: finished.measured.exploitability,
+    };
+    // A debug assertion, which the elapsed time does not count.
+    debug_assert_valid(&solution);
+    Ok(solution)
+}
+
+/// Runs the solve loop on `solver`, just built, in the solve's pool if it has `threads` to
+/// share out, then drops the solver and the pool, and gives back what the solver owned of the
+/// game and what the loop found.
+fn iterate<I: Iterated>(
+    mut solver: I,
+    options: &SolveOptions,
+    threads: u64,
+    start: Instant,
+    progress: impl FnMut(&Progress),
+) -> Result<(I::Owned, Finished), SolveError> {
+    let pool = solve_pool(options, threads)?;
+    let finished = run(&mut solver, options, pool.as_ref(), start, progress);
+    Ok((solver.into_owned(), finished))
+}
+
+/// The solve's own pool, when it has threads to share out and chance nodes to split: when the
+/// estimate's thread count is more than one.
+fn solve_pool(options: &SolveOptions, threads: u64) -> Result<Option<ThreadPool>, SolveError> {
+    if threads <= 1 {
+        return Ok(None);
+    }
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(options.threads)
+        .build()
+        .map_err(|error| SolveError::Threads {
+            threads: options.threads,
+            reason: error.to_string(),
+        })?;
+    Ok(Some(pool))
+}
+
+/// What the solve loop iterates: a solver, of the full game or of the merged one, under either
+/// storage, with its average strategy on the full game's public tree.
+trait Iterated: Sync + Send {
+    /// What the solver owns of the game, given back when it is dropped: the full game, or
+    /// nothing for a merged solver, which borrows it.
+    type Owned;
+    fn iterate(&mut self);
+    fn iterations(&self) -> u64;
+    /// The game the solve measures and returns, the full game.
+    fn full_game(&self) -> &PostflopGame;
+    /// The average strategy on the full game's public tree.
+    fn full_average_strategy(&self) -> PublicProfile;
+    /// Drops the solver and gives back what it owned of the game.
+    fn into_owned(self) -> Self::Owned;
+}
+
+impl<S: Storage> Iterated for VectorCfr<PostflopGame, S> {
+    type Owned = PostflopGame;
+
+    fn iterate(&mut self) {
+        VectorCfr::iterate(self);
+    }
+
+    fn iterations(&self) -> u64 {
+        VectorCfr::iterations(self)
+    }
+
+    fn full_game(&self) -> &PostflopGame {
+        self.game()
+    }
+
+    fn full_average_strategy(&self) -> PublicProfile {
+        self.average_strategy()
+    }
+
+    fn into_owned(self) -> PostflopGame {
+        self.into_game()
+    }
+}
+
+impl<S: Storage> Iterated for VectorCfr<MergedGame<'_>, S> {
+    type Owned = ();
+
+    fn iterate(&mut self) {
+        VectorCfr::iterate(self);
+    }
+
+    fn iterations(&self) -> u64 {
+        VectorCfr::iterations(self)
+    }
+
+    fn full_game(&self) -> &PostflopGame {
+        self.game().full()
+    }
+
+    /// The merged average strategy, expanded onto the full tree.
+    fn full_average_strategy(&self) -> PublicProfile {
+        MergedGame::average_strategy(self)
+    }
+
+    fn into_owned(self) {}
+}
+
+/// How the solve loop ended: the rule that stopped it, its last measurement and the strategy
+/// measured.
+struct Finished {
+    stop: StopReason,
+    measured: Progress,
+    strategy: PublicProfile,
+}
+
+/// The solve loop of the [module documentation](self#the-loop) on `solver`, just built:
+/// iterating, measuring and stopping, holding one profile at a time (see
+/// [what is held](self#what-is-held)).
+fn run<I: Iterated>(
+    solver: &mut I,
+    options: &SolveOptions,
+    pool: Option<&ThreadPool>,
+    start: Instant,
+    mut progress: impl FnMut(&Progress),
+) -> Finished {
+    let mut measure = |solver: &I| -> (Progress, PublicProfile) {
+        let (strategy, exploitability) = on_pool(pool, || {
+            let strategy = solver.full_average_strategy();
+            let exploitability = exploitability(solver.full_game(), &strategy);
+            (strategy, exploitability)
+        });
         let measured = Progress {
             iterations: solver.iterations(),
             elapsed: start.elapsed(),
@@ -311,6 +606,7 @@ pub fn solve(
         progress(&measured);
         (measured, strategy)
     };
+    // The last measurement and its strategy, which the solution takes if the solve stops there.
     let mut last: Option<(Progress, PublicProfile)> = None;
     let stop = loop {
         if solver.iterations() >= options.max_iterations {
@@ -319,9 +615,12 @@ pub fn solve(
         if options.max_time.is_some_and(|cap| start.elapsed() >= cap) {
             break StopReason::TimeCap;
         }
-        solver.iterate();
+        on_pool(pool, || solver.iterate());
         if solver.iterations().is_multiple_of(options.check_every) {
-            let measured = measure(&solver);
+            // The solve does not stop at the last measurement, so its profile goes before the
+            // next is built.
+            drop(last.take());
+            let measured = measure(&*solver);
             let reached = options
                 .target
                 .is_some_and(|target| measured.0.exploitability.percent_of_pot <= target);
@@ -331,23 +630,25 @@ pub fn solve(
             }
         }
     };
+    // A last measurement of an earlier iteration is dropped before the final one is made.
+    let last = last.filter(|(measured, _)| measured.iterations == solver.iterations());
     let (measured, strategy) = match last {
-        Some((measured, strategy)) if measured.iterations == solver.iterations() => {
-            (measured, strategy)
-        }
-        _ => measure(&solver),
+        Some(last) => last,
+        None => measure(&*solver),
     };
-    let solution = Solution {
-        game: solver.game().clone(),
-        strategy,
+    Finished {
         stop,
-        iterations: measured.iterations,
-        elapsed: start.elapsed(),
-        exploitability: measured.exploitability,
-    };
-    // A debug assertion, which the elapsed time does not count.
-    debug_assert_valid(&solution);
-    Ok(solution)
+        measured,
+        strategy,
+    }
+}
+
+/// Runs `walk` on the solve's pool, if it has one, and otherwise on the calling thread.
+fn on_pool<R: Send>(pool: Option<&ThreadPool>, walk: impl FnOnce() -> R + Send) -> R {
+    match pool {
+        Some(pool) => pool.install(walk),
+        None => walk(),
+    }
 }
 
 #[cfg(test)]
@@ -579,12 +880,19 @@ mod tests {
     }
 
     #[test]
-    fn a_flop_spot_is_refused_with_an_error() {
+    fn a_flop_spot_is_solved_and_only_the_river_game_refuses_it() {
+        // Until M4 the solve refused this spot. It now builds the flop game and measures it,
+        // while the river game, which the dump and the comparison build, still refuses it.
         let mut spot = load("toy_polarized");
         spot.board = "Ks9h6d".parse().unwrap();
         spot.tree.flop = spot.tree.river.clone();
         spot.tree.turn = spot.tree.river.clone();
-        let error = solve(&spot, &SolveOptions::default(), |_| {}).unwrap_err();
+        let (solution, calls) = run(&spot, capped(0, 10));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(solution.tree().spec().street, pk_game::Street::Flop);
+        assert!(solution.game().board(0) == spot.board);
+        assert!(solution.exploitability().percent_of_pot > 1.0);
+        let error = RiverGame::new(&spot).unwrap_err();
         assert!(
             matches!(error, SolveError::NotRiver { cards: 3 }),
             "{error}"

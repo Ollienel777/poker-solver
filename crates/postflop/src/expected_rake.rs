@@ -1,5 +1,5 @@
-//! The expected rake of a river strategy, worked out apart from the payoffs, and the value the
-//! two players' expected values must sum to.
+//! The expected rake of a strategy, worked out apart from the payoffs, and the value the two
+//! players' expected values must sum to.
 //!
 //! # What is computed
 //!
@@ -12,11 +12,14 @@
 //! where `w_p` is player `p`'s range weight for each of its hands, `π_p(t, h)` its own reach of
 //! `t` with `h`, the product of its action probabilities on the way from the root, and `Z` the
 //! same sum with every reach 1: the total weight of the pairs that can be dealt, as the
-//! [deal](crate::river#the-deal) defines it. The rake at `t` depends only on the chips. The pot
-//! that is raked is the root pot plus twice the smaller of the two contributions, because the
-//! part of a bet that was not called goes back to the bettor unraked, and the house takes
-//! `percent` of it, at most `cap`, and nothing when the percent is zero. No flop no drop does
-//! not apply, since every pot here has seen the flop. Then
+//! [deal](crate::game#the-deal) defines it. Below a chance node, a terminal of the public tree
+//! is reached only when the cards dealt on the way fall: the pairs that hold one of them drop
+//! out of the sum, and each card dealt multiplies it by `1 / (48 − |board|)`, the chance that
+//! it is that card of the ones neither player holds. The rake at `t` depends only on the chips.
+//! The pot that is raked is the root pot plus twice the smaller of the two contributions,
+//! because the part of a bet that was not called goes back to the bettor unraked, and the house
+//! takes `percent` of it, at most `cap`, and nothing when the percent is zero. No flop no drop
+//! does not apply, since every pot here has seen the flop. Then
 //!
 //! ```text
 //! M       = Σ_t P(t)              the probability of ending somewhere
@@ -40,14 +43,20 @@
 //! # Independence
 //!
 //! This is a check on the payoffs and the walks that sum them, so it shares none of their code.
-//! It reads the tree's shape and each terminal's contributions, each player's combos and range
-//! weights, the root pot and the rake settings ([`RiverGame::tree`],
-//! [`RiverGame::hands`], [`RiverGame::pot`] and [`RiverGame::rake`]), and the profile. It never
-//! reads a terminal's [`Payoff`](crate::Payoff), [`rake_on`](crate::rake_on), the deal vectors,
-//! [`RiverGame::reach`] or the evaluations of [`BoardHands`](crate::BoardHands):
+//! It reads the shape of the public tree, the betting node of each of its nodes, each
+//! terminal's contributions, the card each chance outcome deals and the board there, each
+//! player's combos and range weights, the root pot and the rake settings
+//! ([`PostflopGame::tree`], [`PostflopGame::tree_node`], [`PostflopGame::children`],
+//! [`PostflopGame::outcomes`], [`PostflopGame::board`], [`PostflopGame::hands`],
+//! [`PostflopGame::pot`] and [`PostflopGame::rake`]), and the profile. It never reads a
+//! terminal's [`Payoff`](crate::Payoff), [`rake_on`](crate::rake_on), the deal vectors, the
+//! game's chance probabilities, [`PostflopGame::reach`] or the evaluations of
+//! [`BoardHands`](crate::BoardHands):
 //!
 //! - The rake at a terminal is worked out here from its contributions, by the rule above.
-//! - The reaches are multiplied down the tree from the root by one walk here.
+//! - The reaches are multiplied down the tree from the root by one walk here, which also sets
+//!   to zero the weight of every hand that holds a card a chance node deals, and works out the
+//!   chance of each card from the board.
 //! - The pairs that share a card are removed by counting cards, not hands. With
 //!   `a(h) = w_0(h) · π_0(t, h)` and `b(o) = w_1(o) · π_1(t, o)`, their totals `A` and `B`, and
 //!   `A_c` and `B_c` their sums over the hands that hold the card `c`,
@@ -65,16 +74,20 @@
 //! The walk visits every node once, at O(n) per action and per terminal.
 
 use pk_cfr::PublicProfile;
-use pk_core::NUM_CARDS;
+use pk_core::{CardSet, NUM_CARDS};
 use pk_game::{Chips, Node, Player, PostflopTree, Rake};
 
+use crate::game::PostflopGame;
 use crate::hands::HandList;
+
+// The tests below build the river game by the name they were written with.
+#[cfg(test)]
 use crate::river::RiverGame;
 
-/// One terminal of the tree, as a profile reaches it.
+/// One terminal of the public tree, as a profile reaches it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TerminalOutcome {
-    /// The terminal's node index.
+    /// The terminal's node index in the public tree.
     pub node: u32,
     /// `P(t)`, the probability that play ends here.
     pub probability: f64,
@@ -90,7 +103,7 @@ pub struct TerminalOutcome {
 pub struct ExpectedRake {
     /// The pot at the root, in chips.
     pub pot: Chips,
-    /// Every terminal of the tree, in node order.
+    /// Every terminal of the public tree, in node order.
     pub terminals: Vec<TerminalOutcome>,
     /// `M = Σ_t P(t)`, the probability of ending at some terminal: 1 when every strategy sums
     /// to 1.
@@ -110,7 +123,7 @@ impl ExpectedRake {
 /// expected rake, as the [module documentation](self) defines them.
 ///
 /// Panics if `profile` has no strategy, or one of the wrong size, at a player node.
-pub fn expected_rake(game: &RiverGame, profile: &PublicProfile) -> ExpectedRake {
+pub fn expected_rake(game: &PostflopGame, profile: &PublicProfile) -> ExpectedRake {
     let hands = [game.hands(Player::Oop), game.hands(Player::Ip)];
     let pairs = Pairs::new(hands);
     // Each player's weight times its own reach, by hand: the range weights at the root.
@@ -118,18 +131,19 @@ pub fn expected_rake(game: &RiverGame, profile: &PublicProfile) -> ExpectedRake 
     let total = pairs.weight(&weights);
     assert!(
         total > 0.0,
-        "a river game has a pair of hands that can be dealt together"
+        "a game has a pair of hands that can be dealt together"
     );
     let mut walk = Walk {
-        tree: game.tree(),
+        game,
         profile,
         pot: game.pot(),
         rake: game.rake(),
+        hands,
         pairs: &pairs,
         total,
         terminals: Vec::new(),
     };
-    walk.visit(PostflopTree::ROOT, &weights);
+    walk.visit(PostflopTree::ROOT, &weights, 1.0);
     let mut terminals = walk.terminals;
     terminals.sort_by_key(|terminal| terminal.node);
     let probability = terminals.iter().map(|t| t.probability).sum();
@@ -204,12 +218,13 @@ impl Pairs {
     }
 }
 
-/// One walk of the tree, collecting the terminals.
+/// One walk of the public tree, collecting the terminals.
 struct Walk<'a> {
-    tree: &'a PostflopTree,
+    game: &'a PostflopGame,
     profile: &'a PublicProfile,
     pot: Chips,
     rake: &'a Rake,
+    hands: [&'a HandList; 2],
     pairs: &'a Pairs,
     /// `Z`.
     total: f64,
@@ -217,16 +232,14 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    /// Visits `node`, where `weights` is each player's range weight times its own reach of the
-    /// node, by hand.
-    fn visit(&mut self, node: u32, weights: &[Vec<f64>; 2]) {
-        match self.tree.node(node) {
-            Node::Player {
-                actor,
-                actions,
-                children,
-                ..
-            } => {
+    /// Visits the public node `node`, where `weights` is each player's range weight times its
+    /// own reach of the node, by hand, and `dealt` the chance that the cards dealt on the way
+    /// fall, for a pair of hands that holds none of them.
+    fn visit(&mut self, node: u32, weights: &[Vec<f64>; 2], dealt: f64) {
+        let game = self.game;
+        let children = game.children(node);
+        match game.tree().node(game.tree_node(node)) {
+            Node::Player { actor, actions, .. } => {
                 let me = actor.index();
                 let num_hands = weights[me].len();
                 let strategy = self
@@ -243,19 +256,36 @@ impl Walk<'_> {
                     for (weight, &p) in next[me].iter_mut().zip(probabilities) {
                         *weight *= f64::from(p);
                     }
-                    self.visit(child, &next);
+                    self.visit(child, &next, dealt);
+                }
+            }
+            Node::Chance { .. } => {
+                // Each card off the board is as likely as any other of those that neither
+                // player holds, two cards each.
+                let unseen = NUM_CARDS - game.board(node).len() - 4;
+                let chance = dealt / unseen as f64;
+                for (&card, &child) in game.outcomes(node).iter().zip(children) {
+                    let card = CardSet::single(card);
+                    let mut next = weights.clone();
+                    for (player, list) in self.hands.iter().enumerate() {
+                        for (weight, combo) in next[player].iter_mut().zip(list.combos()) {
+                            if combo.intersects(card) {
+                                *weight = 0.0;
+                            }
+                        }
+                    }
+                    self.visit(child, &next, chance);
                 }
             }
             Node::Terminal { contributions, .. } => {
                 let (raked_pot, rake) = terminal_rake(self.pot, *contributions, self.rake);
                 self.terminals.push(TerminalOutcome {
                     node,
-                    probability: self.pairs.weight(weights) / self.total,
+                    probability: self.pairs.weight(weights) / self.total * dealt,
                     raked_pot,
                     rake,
                 });
             }
-            Node::Chance { .. } => panic!("a river tree has no chance node"),
         }
     }
 }

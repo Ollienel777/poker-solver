@@ -1,5 +1,5 @@
-//! Each acting player's expected value with each of its hands at every player node of a river
-//! game, under a profile: the EVs of a range view, and of a [solution dump](crate::dump).
+//! Each acting player's expected value with each of its hands at every player node of a game,
+//! under a profile: the EVs of a range view, and of a [solution dump](crate::dump).
 //!
 //! # Definition
 //!
@@ -12,15 +12,17 @@
 //! ```
 //!
 //! over the opponent's hands `o` that share no card with `h`, where `π_j(n, o)` is the
-//! opponent's own reach of `n` with `o` ([`RiverGame::reach`]) and `u(n, h, o)` is `i`'s
-//! expected payoff from `n` on when the two hold `h` and `o`. So the opponent's hand is weighted
-//! by its range weight and by how often it plays to `n`, with card removal by `h`. `i`'s own
-//! reach does not enter: the EV of a hand that never plays to `n` is still what it would get
-//! there. Payoffs are those of [`crate::payoff`]: chips, net from the start of the river, with
-//! the root pot counted for neither player and the rake taken from the winner.
+//! opponent's own reach of `n` with `o` ([`PostflopGame::reach`]) and `u(n, h, o)` is `i`'s
+//! expected payoff from `n` on when the two hold `h` and `o`, over the cards still to fall. So
+//! the opponent's hand is weighted by its range weight and by how often it plays to `n`, with
+//! card removal by `h`. `i`'s own reach does not enter: the EV of a hand that never plays to `n`
+//! is still what it would get there. Payoffs are those of [`crate::payoff`]: chips, net from the
+//! start of the spot, with the root pot counted for neither player and the rake taken from the
+//! winner.
 //!
 //! The EV is `None` when the opponent's reach compatible with `h` is zero, where it would be
-//! 0 / 0. The denominator comes from [`BoardHands::fold_values`](crate::BoardHands::fold_values),
+//! 0 / 0, and for a hand that holds a card dealt on the way to `n`, which cannot be held there.
+//! The denominator comes from [`BoardHands::fold_values`](crate::BoardHands::fold_values),
 //! which subtracts the blocked reach from the total, so a reach that is zero in exact arithmetic
 //! can come out a few ulps from it; anything at or below [`ZERO_REACH`] of the opponent's whole
 //! reach of the node counts as zero.
@@ -32,14 +34,22 @@
 //! # Computation
 //!
 //! One walk of the public tree per player, as in [`pk_cfr::vector_expected_value`]: it carries
-//! the opponent's reach, `deal(j)` times its probabilities so far, and returns for each of `i`'s
-//! hands the counterfactual value `q(n, h) = Σ_o ρ(o) · u(n, h, o)`. At `i`'s nodes the EV is
-//! `q(n, h)` over the compatible reach `Σ_o ρ(o)`. Every quantity is `f64`.
+//! the opponent's reach, `deal(j)` times its probabilities so far and the probability of each
+//! card dealt, with the hands a card rules out at zero, and returns for each of `i`'s hands the
+//! counterfactual value `q(n, h) = Σ_o ρ(o) · u(n, h, o)`. At `i`'s nodes the EV is `q(n, h)`
+//! over the compatible reach `Σ_o ρ(o)`, in which the probabilities of the cards dealt cancel.
+//! Every quantity is `f64`.
 
-use pk_cfr::{PublicGame, PublicProfile};
-use pk_game::{Node, PostflopTree};
+use pk_cfr::{PublicGame, PublicNode, PublicProfile};
+use pk_game::PostflopTree;
 
-use crate::river::{RiverGame, player_of};
+use crate::game::{PostflopGame, player_of};
+
+// The tests below build the river game by the name they were written with.
+#[cfg(test)]
+use crate::river::RiverGame;
+#[cfg(test)]
+use pk_game::Node;
 
 /// The share of the opponent's whole reach of a node at or below which its reach compatible
 /// with a hand counts as zero, and the hand's EV as undefined: see the
@@ -50,13 +60,14 @@ pub const ZERO_REACH: f64 = 1e-12;
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeValues {
     /// By node: at a player node, the acting player's EV by hand index, and `None` at a
-    /// terminal.
+    /// terminal or a chance node.
     nodes: Vec<Option<Vec<Option<f64>>>>,
 }
 
 impl NodeValues {
     /// At the player node `node`, the acting player's EV with each of its hands, by hand index:
-    /// `None` for a hand whose EV is undefined. `None` at a terminal or out of range.
+    /// `None` for a hand whose EV is undefined. `None` at a terminal, at a chance node or out
+    /// of range.
     pub fn get(&self, node: u32) -> Option<&[Option<f64>]> {
         self.nodes.get(node as usize)?.as_deref()
     }
@@ -71,7 +82,7 @@ impl NodeValues {
 /// `game`.
 ///
 /// Panics if `profile` has no strategy, or one of the wrong size, at a player node.
-pub fn node_values(game: &RiverGame, profile: &PublicProfile) -> NodeValues {
+pub fn node_values(game: &PostflopGame, profile: &PublicProfile) -> NodeValues {
     let mut nodes = vec![None; game.num_nodes()];
     for player in 0..2 {
         let walk = Walk {
@@ -79,51 +90,99 @@ pub fn node_values(game: &RiverGame, profile: &PublicProfile) -> NodeValues {
             profile,
             player,
         };
-        walk.visit(PostflopTree::ROOT, game.deal(1 - player), &mut nodes);
+        let possible = vec![true; game.num_hands(player)];
+        walk.visit(
+            PostflopTree::ROOT,
+            game.deal(1 - player),
+            &possible,
+            &mut nodes,
+        );
     }
     NodeValues { nodes }
 }
 
 /// One player's walk.
 struct Walk<'a> {
-    game: &'a RiverGame,
+    game: &'a PostflopGame,
     profile: &'a PublicProfile,
     player: usize,
 }
 
 impl Walk<'_> {
     /// Returns `q(node, h)` for each of the player's hands, given the opponent's reach `ρ`,
-    /// and records the EVs at the player's own nodes below.
+    /// and records the EVs at the player's own nodes below. `possible` says which of the
+    /// player's hands can be held at `node`.
     fn visit(
         &self,
         node: u32,
         opponent_reach: &[f64],
+        possible: &[bool],
         out: &mut [Option<Vec<Option<f64>>>],
     ) -> Vec<f64> {
         let game = self.game;
         let num_hands = game.num_hands(self.player);
-        let Node::Player {
-            actor, children, ..
-        } = game.tree().node(node)
-        else {
-            let mut values = vec![0.0; num_hands];
-            game.terminal_values(node as usize, self.player, opponent_reach, &mut values);
-            return values;
+        let (actor, num_actions) = match game.node(node as usize) {
+            PublicNode::Terminal => {
+                let mut values = vec![0.0; num_hands];
+                game.terminal_values(node as usize, self.player, opponent_reach, &mut values);
+                for (value, &possible) in values.iter_mut().zip(possible) {
+                    if !possible {
+                        *value = 0.0;
+                    }
+                }
+                return values;
+            }
+            PublicNode::Chance { num_outcomes } => {
+                let opponent = 1 - self.player;
+                let mut values = vec![0.0; num_hands];
+                for outcome in 0..num_outcomes {
+                    let probability = game.outcome_probability(node as usize, outcome);
+                    let after: Vec<bool> = possible
+                        .iter()
+                        .enumerate()
+                        .map(|(hand, &p)| {
+                            p && !game.rules_out(node as usize, outcome, self.player, hand)
+                        })
+                        .collect();
+                    let reach: Vec<f64> = opponent_reach
+                        .iter()
+                        .enumerate()
+                        .map(|(hand, &r)| {
+                            if game.rules_out(node as usize, outcome, opponent, hand) {
+                                0.0
+                            } else {
+                                r * probability
+                            }
+                        })
+                        .collect();
+                    let child = game.child(node as usize, outcome) as u32;
+                    let below = self.visit(child, &reach, &after, out);
+                    for (value, q) in values.iter_mut().zip(&below) {
+                        *value += q;
+                    }
+                }
+                return values;
+            }
+            PublicNode::Player {
+                player,
+                num_actions,
+            } => (player, num_actions),
         };
+        let children = game.children(node);
         let strategy = self
             .profile
             .get(node as usize)
             .unwrap_or_else(|| panic!("the profile has no strategy at node {node}"));
-        let acting = game.num_hands(actor.index());
+        let acting = game.num_hands(actor);
         assert_eq!(
             strategy.len(),
-            children.len() * acting,
+            num_actions * acting,
             "the profile's strategy at node {node} has the wrong size"
         );
         let mut values = vec![0.0; num_hands];
-        if actor.index() == self.player {
+        if actor == self.player {
             for (&child, probabilities) in children.iter().zip(strategy.chunks_exact(acting)) {
-                let below = self.visit(child, opponent_reach, out);
+                let below = self.visit(child, opponent_reach, possible, out);
                 for ((value, &p), q) in values.iter_mut().zip(probabilities).zip(&below) {
                     *value += f64::from(p) * q;
                 }
@@ -135,7 +194,10 @@ impl Walk<'_> {
             let evs = values
                 .iter()
                 .zip(&met)
-                .map(|(&q, &m)| (total > 0.0 && m > ZERO_REACH * total).then(|| q / m))
+                .zip(possible)
+                .map(|((&q, &m), &possible)| {
+                    (possible && total > 0.0 && m > ZERO_REACH * total).then(|| q / m)
+                })
                 .collect();
             out[node as usize] = Some(evs);
         } else {
@@ -145,7 +207,7 @@ impl Walk<'_> {
                     .zip(probabilities)
                     .map(|(r, &p)| r * f64::from(p))
                     .collect();
-                let below = self.visit(child, &reach, out);
+                let below = self.visit(child, &reach, possible, out);
                 for (value, q) in values.iter_mut().zip(&below) {
                     *value += q;
                 }

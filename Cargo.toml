@@ -9,12 +9,16 @@ publish = false
 
 [workspace.dependencies]
 rand_chacha = "0.10"
+# Threads for the postflop walks, which run a chance node's children in parallel.
+rayon = "1"
 serde = { version = "1", features = ["derive"] }
 # `float_roundtrip` reads every decimal as the nearest f64, so that a number written with
 # enough digits reads back exactly.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
 toml = "1"
+# Peak resident memory on Windows, for the postflop resource log; Linux reads /proc instead.
+windows-sys = "0.61"
 
 criterion = "0.8"
 proptest = "1"

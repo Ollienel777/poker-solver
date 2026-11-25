@@ -1,11 +1,16 @@
-//! Benchmarks for terminal evaluation at full range width: 1,081 hands a side on the river.
+//! Benchmarks for terminal evaluation: at full range width, 1,081 hands a side on the river; at
+//! the width of the benchmark spots of `benches/solve.rs`, about 300 hands a side on a river of
+//! `turn_srp`; and through the game, where a terminal on a board after the spot's gathers the
+//! opponent's reach into the board's hand order and writes the values back, in room the walks
+//! keep from one terminal to the next.
 
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use pk_cfr::PublicGame;
 use pk_core::{CardSet, Range};
 use pk_game::Player;
-use pk_postflop::{BoardHands, ShowdownPayoff};
+use pk_postflop::{BoardHands, PostflopGame, ShowdownPayoff, Spot};
 
 /// A fixed spread of reach probabilities in `[0, 1)`, a quarter of them zero.
 fn sample_reach(len: usize) -> Vec<f64> {
@@ -58,5 +63,54 @@ fn bench_terminal(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_terminal);
+fn bench_spot_width(c: &mut Criterion) {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/benches/data/turn_srp.toml");
+    let spot = Spot::load(path).unwrap();
+    let river: CardSet = spot.board | "7h".parse::<CardSet>().unwrap();
+    let hands = BoardHands::new(river, &spot.oop_range, &spot.ip_range);
+    let widths = [Player::Oop, Player::Ip].map(|player| hands.hands(player).len());
+    assert_eq!(widths, [301, 284], "the benchmark spot changed");
+    let reach = sample_reach(widths[1]);
+    let mut values = vec![0.0; widths[0]];
+    let payoff = ShowdownPayoff {
+        win: 1400.0,
+        tie: 450.0,
+        lose: -500.0,
+    };
+    c.bench_function("fold, turn_srp river", |b| {
+        b.iter(|| {
+            hands.fold_values(Player::Oop, black_box(&reach), 1000.0, &mut values);
+            values[0]
+        })
+    });
+    c.bench_function("showdown, turn_srp river", |b| {
+        b.iter(|| {
+            hands.showdown_values(Player::Oop, black_box(&reach), payoff, &mut values);
+            values[0]
+        })
+    });
+
+    // Through the game, with the reach and values indexed by the spot's hand lists, and the
+    // room for the gather and the scatter kept from call to call, as the walks keep it.
+    let game = PostflopGame::from_spot(&spot).unwrap();
+    let reach = sample_reach(game.num_hands(1));
+    let mut values = vec![0.0; game.num_hands(0)];
+    let mut scratch = Vec::new();
+    for (name, path) in [
+        ("game fold, turn_srp spot's board", "b50 f"),
+        ("game fold, turn_srp river", "x x 7h b50 f"),
+        ("game showdown, turn_srp river", "x x 7h x x"),
+    ] {
+        let node = game.find(path).unwrap() as usize;
+        c.bench_function(name, |b| {
+            b.iter(|| {
+                let reach = black_box(&reach);
+                game.terminal_values_with(node, 0, reach, &mut values, &mut scratch);
+                values[0]
+            })
+        });
+    }
+}
+
+criterion_group!(benches, bench_terminal, bench_spot_width);
 criterion_main!(benches);

@@ -1,10 +1,28 @@
-//! Solves a river spot file and prints what the solver found: the spot, the solve's progress,
-//! the result, and the strategy at one node, as a range view and as a 13x13 grid of hand
-//! classes for each action.
+//! Solves a spot file and prints what the solver found: the spot, the solve's progress, the
+//! result, and the strategy at one node, as a range view and as a 13x13 grid of hand classes
+//! for each action.
 //!
 //! ```text
 //! cargo run --release -p pk-postflop --example solve_spot -- reference/spots/river/toy_polarized.toml
 //! cargo run --release -p pk-postflop --example solve_spot -- <spot> --node "x b50" --target 0.1
+//! ```
+//!
+//! On a flop or turn spot, a node after a street ends names the card that falls, as in
+//! `--node "x x 7s b50"`.
+//!
+//! Before it solves, it prints the memory estimate, and `--estimate` prints the estimate item by
+//! item and stops there, without building the game: this is `solver estimate` until the command
+//! line exists. After each solve it appends a record of the solve's resources, the estimate, the
+//! peak resident memory, the wall time, the iterations and the exploitability, as one line of
+//! JSON to `runs/log.jsonl`, or to the file `--log` names; `--no-log` writes nothing.
+//! `--max-memory` sets the memory limit in GB, 10 by default, and `--threads` the threads the
+//! solve runs on, all the machine offers by default. `--compressed` stores the regrets and
+//! strategy sums in 16 bits with a scale per node (`SolveOptions::compressed_storage`), for the
+//! estimate and the solve alike, and the record says which storage the solve used.
+//!
+//! ```text
+//! cargo run --release -p pk-postflop --example solve_spot -- <spot> --estimate
+//! cargo run --release -p pk-postflop --example solve_spot -- <spot> --compressed
 //! ```
 //!
 //! This is a way to try the library, not the `solver` command line, which comes in M5. Every
@@ -13,11 +31,19 @@
 use std::process::ExitCode;
 
 use pk_core::NUM_CLASSES;
-use pk_game::{Action, CHIPS_PER_BB, Chips, Node, Outcome, Player};
-use pk_postflop::{ClassView, Progress, Solution, SolveOptions, Spot, StopReason, solve};
+use pk_game::{Action, CHIPS_PER_BB, Chips, Node, Outcome};
+use pk_postflop::memory::format_bytes;
+use pk_postflop::{
+    ClassView, MemoryEstimate, PostflopGame, Progress, Solution, SolveOptions, SolveRecord, Spot,
+    StopReason, append_record, estimate_memory, peak_resident_bytes, solve,
+};
 
-const USAGE: &str =
-    "usage: solve_spot <spot file> [--node \"x b50\"] [--target <percent>] [--iterations <cap>]";
+const USAGE: &str = "usage: solve_spot <spot file> [--node \"x b50\"] [--target <percent>] \
+     [--iterations <cap>] [--estimate] [--log <file> | --no-log] [--max-memory <GB>] \
+     [--threads <n>] [--compressed]";
+
+/// Where the resource log goes unless `--log` or `--no-log` says otherwise.
+const LOG: &str = "runs/log.jsonl";
 
 /// The ranks of the grid's rows and columns, in grid order.
 const RANKS: &str = "AKQJT98765432";
@@ -37,54 +63,78 @@ struct Args {
     /// The node path, its tokens separated by one space: empty for the root.
     path: String,
     options: SolveOptions,
+    /// Print the memory estimate and stop.
+    estimate: bool,
+    /// The resource log to append to, if any.
+    log: Option<String>,
 }
 
 fn run() -> Result<(), String> {
     let args = parse_args(std::env::args().skip(1))?;
     let spot = Spot::load(&args.spot).map_err(|e| e.to_string())?;
-    // The solve builds the same tree. Finding the node first means a mistyped path costs no
-    // solve.
-    let tree = spot.build_tree().map_err(|e| e.to_string())?;
-    let path = args.path;
-    let node = tree.find(&path).map_err(|e| format!("--node: {e}"))?;
-    if let Node::Terminal { outcome, .. } = tree.node(node) {
-        return Err(format!(
-            "--node: `{path}` {}; give a node where a player acts",
-            ending(*outcome)
-        ));
-    }
-
-    let hands = spot.board_hands();
-    let rake = if spot.rake_percent == 0.0 {
-        "no rake".to_string()
-    } else {
-        format!(
-            "{}% rake, capped at {}",
-            spot.rake_percent,
-            bb(spot.rake_cap)
-        )
-    };
-    println!(
-        "Spot {}: board {}, pot {}, stack {}, {rake}",
-        spot.name,
-        spot.board,
-        bb(spot.pot),
-        bb(spot.effective_stack)
-    );
-    println!(
-        "OOP has {} hands and IP {}; the tree has {} nodes",
-        hands.hands(Player::Oop).len(),
-        hands.hands(Player::Ip).len(),
-        tree.nodes().len()
-    );
-
     let options = args.options;
+    // The estimate builds only the betting tree, so it comes before anything large.
+    let estimate = estimate_memory(&spot, &options).map_err(|e| e.to_string())?;
+    if args.estimate {
+        print_spot(&spot, &estimate);
+        println!("\nMemory, estimated before anything is allocated:\n{estimate}");
+        if estimate.total > options.max_memory {
+            println!(
+                "\nA solve would be refused: the limit is {}",
+                format_bytes(options.max_memory)
+            );
+        }
+        return Ok(());
+    }
+    // The solve builds the same game. Finding the node first means a mistyped path costs no
+    // solve. The game is dropped before the solve builds its own.
+    let path = args.path;
+    let node = {
+        let game = PostflopGame::from_spot(&spot).map_err(|e| e.to_string())?;
+        let node = game.find(&path).map_err(|e| format!("--node: {e}"))?;
+        match game.tree().node(game.tree_node(node)) {
+            Node::Terminal { outcome, .. } => {
+                return Err(format!(
+                    "--node: `{path}` {}; give a node where a player acts",
+                    ending(*outcome)
+                ));
+            }
+            Node::Chance { street, .. } => {
+                return Err(format!(
+                    "--node: `{path}` deals the {street}; add the card that falls, such as `{}`",
+                    game.outcomes(node)[0]
+                ));
+            }
+            Node::Player { .. } => {}
+        }
+        node
+    };
+
+    print_spot(&spot, &estimate);
+    println!(
+        "Memory: about {} by the estimate, the most {}",
+        format_bytes(estimate.total),
+        estimate.peak_phase
+    );
+    let threads = match estimate.threads {
+        1 => "one thread".to_string(),
+        threads => format!("{threads} threads"),
+    };
+    let storage = if options.compressed_storage {
+        "16-bit storage"
+    } else {
+        "f32 storage"
+    };
     match options.target {
         Some(target) => println!(
-            "\nSolving to {target}% of the pot, for at most {} iterations",
+            "\nSolving to {target}% of the pot, for at most {} iterations, on {threads}, with \
+             {storage}",
             options.max_iterations
         ),
-        None => println!("\nSolving for {} iterations", options.max_iterations),
+        None => println!(
+            "\nSolving for {} iterations, on {threads}, with {storage}",
+            options.max_iterations
+        ),
     }
     let solution = solve(&spot, &options, print_progress).map_err(|e| e.to_string())?;
 
@@ -105,9 +155,48 @@ fn run() -> Result<(), String> {
         oop / f64::from(CHIPS_PER_BB),
         ip / f64::from(CHIPS_PER_BB)
     );
+    let peak = peak_resident_bytes();
+    match peak {
+        Some(peak) => println!(
+            "Peak resident memory of the process: {}, against an estimate of {}",
+            format_bytes(peak),
+            format_bytes(estimate.total)
+        ),
+        None => println!("The operating system does not report the peak resident memory"),
+    }
+    if let Some(log) = &args.log {
+        let record = SolveRecord::new(&spot, &options, &solution, &estimate, peak);
+        append_record(log, &record).map_err(|e| format!("--log `{log}`: {e}"))?;
+        println!("Appended the solve's resources to {log}");
+    }
 
     print_node(&solution, node, &path);
     Ok(())
+}
+
+/// The spot, its trees and its hands.
+fn print_spot(spot: &Spot, estimate: &MemoryEstimate) {
+    let rake = if spot.rake_percent == 0.0 {
+        "no rake".to_string()
+    } else {
+        format!(
+            "{}% rake, capped at {}",
+            spot.rake_percent,
+            bb(spot.rake_cap)
+        )
+    };
+    println!(
+        "Spot {}: board {}, pot {}, stack {}, {rake}",
+        spot.name,
+        spot.board,
+        bb(spot.pot),
+        bb(spot.effective_stack)
+    );
+    println!(
+        "OOP has {} hands and IP {}; the betting tree has {} nodes, and with a child for every \
+         card that can fall, {}",
+        estimate.hands[0], estimate.hands[1], estimate.betting_nodes, estimate.public_nodes
+    );
 }
 
 fn print_progress(progress: &Progress) {
@@ -121,16 +210,11 @@ fn print_progress(progress: &Progress) {
 
 /// The strategy at a player node, then its children.
 fn print_node(solution: &Solution, node: u32, path: &str) {
-    let tree = solution.tree();
-    let Node::Player {
-        actor,
-        actions,
-        children,
-        ..
-    } = tree.node(node)
-    else {
-        unreachable!("the node was checked to be a player node");
-    };
+    let game = solution.game();
+    let actor = game
+        .actor(node)
+        .expect("the node was checked to be a player node");
+    let (actions, children) = (game.actions(node), game.children(node));
     let name = if path.is_empty() { "the root" } else { path };
     println!(
         "\nAt {name}, {actor} acts; play reaches it {:.2}% of the time",
@@ -168,10 +252,13 @@ fn print_node(solution: &Solution, node: u32, path: &str) {
         } else {
             format!("{path} {action}")
         };
-        let what = match tree.node(child) {
+        let what = match game.tree().node(game.tree_node(child)) {
             Node::Player { actor, .. } => format!("{actor} acts"),
             Node::Terminal { outcome, .. } => ending(*outcome),
-            Node::Chance { street, .. } => format!("deals the {street}"),
+            Node::Chance { street, .. } => format!(
+                "deals the {street}: add the card that falls, such as `{}`",
+                game.outcomes(child)[0]
+            ),
         };
         println!("  {:<24} {what}", format!("\"{child_path}\""));
     }
@@ -191,16 +278,11 @@ fn label(solution: &Solution, node: u32, action: Action) -> String {
     format!("{:<6}{words}", action.to_string())
 }
 
-/// The street total a call at `node` matches: on the river, the bet or raise that led there.
+/// The street total a call at `node` matches: the bet or raise that led there.
 fn called(solution: &Solution, node: u32) -> Chips {
-    let (parent, index) = solution
-        .game()
-        .path(node)
-        .pop()
-        .expect("a call faces a bet");
-    let Node::Player { actions, .. } = solution.tree().node(parent) else {
-        unreachable!("a path passes through player nodes only");
-    };
+    let game = solution.game();
+    let (parent, index) = game.path(node).pop().expect("a call faces a bet");
+    let actions = game.actions(parent);
     actions[index].to().expect("a call faces a bet or raise")
 }
 
@@ -245,6 +327,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut spot = None;
     let mut path = String::new();
     let mut options = SolveOptions::default();
+    let mut estimate = false;
+    let mut log = Some(LOG.to_string());
     while let Some(arg) = args.next() {
         let mut value = |wanted: &str| {
             args.next()
@@ -270,10 +354,32 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                     format!("--iterations `{text}` is not a whole number; give a cap such as 10000")
                 })?;
             }
+            "--estimate" => estimate = true,
+            "--log" => log = Some(value("the file to append the record of the solve to")?),
+            "--no-log" => log = None,
+            "--max-memory" => {
+                let text = value("the memory limit in GB, such as 10")?;
+                let gb = text
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|gb| gb.is_finite() && *gb >= 0.0)
+                    .ok_or_else(|| {
+                        format!("--max-memory `{text}` is not a size in GB, such as 10 or 2.5")
+                    })?;
+                options.max_memory = (gb * 1e9) as u64;
+            }
+            "--threads" => {
+                let text = value("the number of threads to solve on, such as 8")?;
+                options.threads = text.parse().ok().filter(|&n| n >= 1).ok_or_else(|| {
+                    format!("--threads `{text}` is not a number of threads, such as 1 or 8")
+                })?;
+            }
+            "--compressed" => options.compressed_storage = true,
             "-h" | "--help" => return Err(USAGE.to_string()),
             flag if flag.starts_with("--") => {
                 return Err(format!(
-                    "`{flag}` is not an option; the options are --node, --target and --iterations"
+                    "`{flag}` is not an option; the options are --node, --target, --iterations, \
+                     --estimate, --log, --no-log, --max-memory, --threads and --compressed"
                 ));
             }
             _ if spot.is_none() => spot = Some(arg.clone()),
@@ -285,5 +391,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         spot,
         path,
         options,
+        estimate,
+        log,
     })
 }

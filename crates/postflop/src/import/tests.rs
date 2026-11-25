@@ -43,7 +43,7 @@ fn a_solutions_own_dump_maps_back_to_its_strategy() {
     let (spot, solution, dump) = toy();
     let mapped = MappedSolution::from_dump(&dump, &spot).unwrap();
     assert_eq!(mapped.strategy(), solution.strategy());
-    assert_eq!(mapped.exploitability(), solution.exploitability());
+    assert_eq!(mapped.exploitability(), Some(solution.exploitability()));
     assert_eq!(mapped.reported_values(), Some(solution.values()));
     assert_eq!(mapped.solver().name, SOLVER_NAME);
     assert_eq!(mapped.reported_evs(), Some(mapped.measured_evs()));
@@ -253,19 +253,123 @@ fn another_player_to_act_is_reported_without_the_nodes_below() {
 }
 
 #[test]
-fn an_invalid_dump_or_a_spot_off_the_river_is_its_own_error() {
+fn an_invalid_dump_or_a_spot_whose_game_cannot_be_built_is_its_own_error() {
     let (spot, _, mut dump) = toy();
     dump.nodes[0].strategy[0].1 = vec![0.5, 0.25];
     assert!(matches!(
         MappedSolution::from_dump(&dump, &spot),
         Err(ImportError::Dump(DumpError::Invalid { .. }))
     ));
+    // A spot that fails its own checks: a pot of 0.
+    let (mut broken, _, dump) = toy();
+    broken.pot = 0;
+    assert!(matches!(
+        MappedSolution::from_dump(&dump, &broken),
+        Err(ImportError::Spot(SolveError::Spot(_)))
+    ));
+    // A river dump mapped onto a flop spot builds the flop game, and stops at the board.
     let (mut flop, _, dump) = toy();
     flop.board = "Ks9h6d".parse().unwrap();
     flop.tree.flop = flop.tree.river.clone();
     flop.tree.turn = flop.tree.river.clone();
-    assert!(matches!(
-        MappedSolution::from_dump(&dump, &flop),
-        Err(ImportError::Spot(SolveError::NotRiver { cards: 3 }))
-    ));
+    let found = mismatches(&dump, &flop);
+    assert!(
+        matches!(
+            &found[..],
+            [Mismatch::Spot {
+                field: "spot.board",
+                ..
+            }]
+        ),
+        "{found:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Version 2
+
+fn turn_spot() -> Spot {
+    let path = format!("{}/tests/data/turn_small.toml", env!("CARGO_MANIFEST_DIR"));
+    Spot::load(path).unwrap()
+}
+
+#[test]
+fn a_partial_dump_holds_its_first_street_and_is_not_measured() {
+    // Of the turn spot, the turn alone: every turn node is held, no river node is, nothing is
+    // measured but where the whole subtree is held, and below the turn the strategy is uniform.
+    let spot = turn_spot();
+    let solution = solved(&spot);
+    let dump = SolutionDump::from_solution_streets(&solution, 1);
+    let mapped = MappedSolution::from_dump(&dump, &spot).unwrap();
+    assert!(!mapped.is_complete());
+    assert_eq!(mapped.streets(), 1);
+    assert_eq!(mapped.exploitability(), None);
+    assert_eq!(mapped.reported_values(), Some(solution.values()));
+    let game = mapped.game();
+    let mut facing_allin = 0;
+    for decision in decisions(game) {
+        assert_eq!(mapped.holds(decision.node), decision.street() == 0);
+        let measured = mapped.measured_evs().get(decision.node);
+        if decision.street() > 0 {
+            let width = decision.actions.len() as f32;
+            let row = mapped.strategy().hand(decision.node as usize, 0).unwrap();
+            assert!(row.iter().all(|&p| p == 1.0 / width));
+            assert!(measured.is_none());
+            continue;
+        }
+        // On the turn, a node is measured when no river decision lies below it: facing an
+        // all-in, whose call runs the river out.
+        let all_in = decision
+            .path
+            .last()
+            .and_then(|a| a.amount())
+            .is_some_and(|amount| amount == spot.effective_stack);
+        assert_eq!(measured.is_some(), all_in, "{}", PathText(&decision.path));
+        facing_allin += usize::from(all_in);
+    }
+    assert!(facing_allin > 0);
+    assert!(!mapped.holds(game.num_nodes() as u32));
+}
+
+#[test]
+fn a_missing_card_is_named_with_the_cards_that_can_fall() {
+    let spot = turn_spot();
+    let mut dump = SolutionDump::from_solution(&solved(&spot));
+    let line = [DumpAction::Check, DumpAction::Check];
+    let dropped: Vec<Card> = ["3c", "4c", "5c"]
+        .iter()
+        .map(|c| c.parse().unwrap())
+        .collect();
+    dump.nodes.retain(|node| {
+        !(node.path.starts_with(&line)
+            && node.path.len() > 2
+            && dropped.contains(&node.path[2].card().unwrap()))
+    });
+    let found = mismatches(&dump, &spot);
+    assert_eq!(
+        found,
+        [Mismatch::MissingCards {
+            path: line.to_vec(),
+            street: Street::River,
+            cards: dropped,
+            of: 48,
+        }]
+    );
+    assert_eq!(
+        found[0].to_string(),
+        "after [check, check], our tree deals the river and has a decision after each of the 48 \
+         cards that can fall there; the dump has no node after 3 of them: 3c, 4c, 5c; a dump \
+         covers each street it holds in full, after every card that can fall"
+    );
+    // Without any river after the line, it says so.
+    dump.nodes
+        .retain(|node| !(node.path.starts_with(&line) && node.path.len() > 2));
+    let found = mismatches(&dump, &spot);
+    assert!(
+        found[0]
+            .to_string()
+            .contains("the dump has no node after any of them"),
+        "{}",
+        found[0]
+    );
 }

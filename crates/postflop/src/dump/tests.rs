@@ -110,10 +110,10 @@ fn our_actions_are_named_by_kind_and_street_total() {
     // raise facing one, a call's amount is the bet it calls, and the amounts are the street
     // totals `reference/README.md` lists for the spot.
     let spot = load("deep_high_spr");
-    let tree = spot.build_tree().unwrap();
-    let decisions = decision_nodes(&tree);
-    let players: Vec<u32> = (0..tree.nodes().len() as u32)
-        .filter(|&n| matches!(tree.node(n), Node::Player { .. }))
+    let game = PostflopGame::new(&spot).unwrap();
+    let decisions = decisions(&game);
+    let players: Vec<u32> = (0..game.tree().nodes().len() as u32)
+        .filter(|&n| matches!(game.tree().node(n), pk_game::Node::Player { .. }))
         .collect();
     let nodes: Vec<u32> = decisions.iter().map(|d| d.node).collect();
     assert_eq!(nodes, players, "every player node, in the tree's order");
@@ -137,6 +137,7 @@ fn our_actions_are_named_by_kind_and_street_total() {
                 DumpAction::Call(amount) => assert_eq!(Some(amount), facing, "{decision:?}"),
                 DumpAction::Fold => assert!(facing.is_some(), "{decision:?}"),
                 DumpAction::Check => assert_eq!(facing, None, "{decision:?}"),
+                DumpAction::Deal(_) => panic!("a river node offers no deal: {decision:?}"),
             }
         }
     }
@@ -159,11 +160,11 @@ fn the_format_and_version_are_checked_first() {
     );
     assert_invalid(
         error_after(|v| {
-            v["version"] = json!(2);
+            v["version"] = json!(3);
             v["surprise"] = json!(1);
         }),
         "version",
-        "reads version 1 only",
+        "reads versions 1 and 2 only",
     );
     assert_invalid(
         error_after(|v| {
@@ -410,4 +411,441 @@ fn a_dump_built_in_code_is_validated_as_text_is() {
     dump.nodes[0].strategy[0].1 = vec![f64::NAN, 1.0];
     let field = format!("nodes[0].strategy.{}[0]", dump.nodes[0].strategy[0].0);
     assert_invalid(dump.validate().unwrap_err(), &field, "is NaN");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Version 2
+
+fn load_data(name: &str) -> Spot {
+    Spot::load(format!(
+        "{}/tests/data/{name}.toml",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+/// A short solve of a spot of `tests/data`.
+fn short(name: &str, iterations: u64) -> Solution {
+    let options = SolveOptions {
+        target: None,
+        max_iterations: iterations,
+        check_every: iterations.max(1),
+        ..SolveOptions::default()
+    };
+    solve(&load_data(name), &options, |_| {}).unwrap()
+}
+
+/// The complete dump of the turn spot after a few iterations, as JSON. Its board is
+/// `Kh9c7d2s`, its pot 1,000 and its stacks 1,500; the turn offers a bet of 500, a raise to
+/// 1,500 and all-in.
+fn turn_text() -> String {
+    SolutionDump::from_solution(&short("turn_small", 3)).to_json()
+}
+
+/// The turn dump's JSON with `change` made to it, read back: the error, which there must be.
+fn turn_error(change: impl FnOnce(&mut Value)) -> DumpError {
+    let mut value: Value = serde_json::from_str(&turn_text()).unwrap();
+    change(&mut value);
+    SolutionDump::from_json(&value.to_string()).unwrap_err()
+}
+
+/// Asserts that `error` names a field that ends with `field`, for a reason that holds `reason`.
+fn assert_invalid_at(error: DumpError, field: &str, reason: &str) {
+    match error {
+        DumpError::Invalid {
+            field: found,
+            reason: why,
+        } => {
+            assert!(found.ends_with(field), "`{found}` for `{field}`: {why}");
+            assert!(why.contains(reason), "`{field}`: {why}");
+        }
+        other => panic!("`{field}`: {other}"),
+    }
+}
+
+fn check_step() -> Value {
+    json!({"kind": "check"})
+}
+
+fn bet(amount: u32) -> Value {
+    json!({"kind": "bet", "amount": amount})
+}
+
+fn call(amount: u32) -> Value {
+    json!({"kind": "call", "amount": amount})
+}
+
+fn deal(card: &str) -> Value {
+    json!({"kind": "deal", "card": card})
+}
+
+/// The index of the river node after both check the turn and the 3c falls.
+fn river_node(value: &Value) -> usize {
+    index_of(value, json!([check_step(), check_step(), deal("3c")]))
+}
+
+#[test]
+fn a_flop_or_turn_dump_is_version_2_with_complete_after_the_spot() {
+    let text = turn_text();
+    assert!(text.starts_with("{\n  \"format\": \"pk-solution-dump\",\n  \"version\": 2,\n"));
+    let order = [
+        "\"solver\"",
+        "\"spot\"",
+        "\"complete\": true",
+        "\"values\"",
+        "\"nodes\"",
+    ];
+    let at: Vec<usize> = order.iter().map(|key| text.find(key).unwrap()).collect();
+    assert!(at.windows(2).all(|w| w[0] < w[1]), "{at:?}");
+    assert!(text.contains("{\"kind\": \"deal\", \"card\": \"3c\"}"));
+    let dump = SolutionDump::from_json(&text).unwrap();
+    assert_eq!(
+        (dump.version(), dump.streets(), dump.complete),
+        (2, 2, true)
+    );
+    assert_eq!(dump.to_json(), text);
+    // A river dump has no `complete`, and is version 1.
+    assert!(!toy_text().contains("complete"));
+}
+
+#[test]
+fn the_version_2_example_in_the_module_documentation_is_a_valid_dump() {
+    let source = include_str!("../dump.rs");
+    let open = "//! ```json\n";
+    let first = source.find(open).unwrap() + open.len();
+    let start = first + source[first..].find(open).unwrap() + open.len();
+    let end = start + source[start..].find("//! ```\n").unwrap();
+    let text: Vec<&str> = source[start..end]
+        .lines()
+        .map(|line| line.strip_prefix("//!").unwrap().trim_start_matches(' '))
+        .collect();
+    let dump = SolutionDump::from_json(&text.join("\n")).unwrap();
+    assert_eq!(
+        (dump.version(), dump.streets(), dump.complete),
+        (2, 2, true)
+    );
+    assert_eq!(dump.nodes.len(), 3);
+    let river = &dump.nodes[2];
+    assert_eq!(river.dealt(), CardSet::single("9s".parse().unwrap()));
+    assert_eq!(river.strategy.len(), 2);
+    assert_eq!(river.ev.as_ref().unwrap()[1].1, None);
+}
+
+#[test]
+fn every_fault_of_a_version_2_header_names_its_field() {
+    let cases: Vec<(Change, &str, &str)> = vec![
+        (
+            Box::new(|v| {
+                v.as_object_mut().unwrap().remove("complete");
+            }),
+            "complete",
+            "is missing; a version 2 dump says whether it lists every decision node",
+        ),
+        (
+            Box::new(|v| v["complete"] = json!("yes")),
+            "complete",
+            "is a string; it must be `true` or `false`",
+        ),
+        (
+            Box::new(|v| {
+                v["version"] = json!(1);
+                v.as_object_mut().unwrap().remove("complete");
+            }),
+            "spot.board",
+            "has 4 cards; version 1 holds river spots only",
+        ),
+        (
+            Box::new(|v| v["spot"]["board"] = json!("Kh9c7d2s3c")),
+            "spot.board",
+            "has 5 cards; version 2 holds flop and turn spots",
+        ),
+    ];
+    for (change, field, reason) in cases {
+        assert_invalid(turn_error(change), field, reason);
+    }
+    // A river dump has no `complete` key.
+    assert_invalid(
+        error_after(|v| v["complete"] = json!(true)),
+        "complete",
+        "is not a key of a dump",
+    );
+}
+
+#[test]
+fn every_fault_of_a_deal_names_its_field() {
+    let cases: Vec<(Change, &str, &str)> = vec![
+        (
+            Box::new(|v| {
+                let at = river_node(v);
+                v["nodes"][at]["path"][2]["amount"] = json!(0);
+            }),
+            "path[2].amount",
+            "a deal has no amount",
+        ),
+        (
+            Box::new(|v| {
+                let at = river_node(v);
+                v["nodes"][at]["path"][2]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("card");
+            }),
+            "path[2].card",
+            "is missing; a deal names the card dealt",
+        ),
+        (
+            Box::new(|v| {
+                let at = river_node(v);
+                v["nodes"][at]["path"][2]["card"] = json!("3x");
+            }),
+            "path[2].card",
+            "is `3x`, which is not a card",
+        ),
+        (
+            Box::new(|v| {
+                let at = river_node(v);
+                v["nodes"][at]["path"][0]["card"] = json!("3c");
+            }),
+            "path[0].card",
+            "only a deal has a card",
+        ),
+        (
+            Box::new(|v| {
+                let at = river_node(v);
+                v["nodes"][at]["path"][0] = json!({"kind": "allin", "amount": 1500});
+            }),
+            "path[0].kind",
+            "or in a path `deal`",
+        ),
+        (
+            Box::new(|v| {
+                let at = river_node(v);
+                v["nodes"][at]["actions"][0] = deal("3c");
+            }),
+            "actions[0].kind",
+            "is `deal`, but a deal is not an action a player takes",
+        ),
+    ];
+    for (change, field, reason) in cases {
+        assert_invalid_at(turn_error(change), field, reason);
+    }
+}
+
+#[test]
+fn a_path_that_breaks_the_betting_is_refused_where_it_breaks() {
+    // Each path replaces that of the river node after both check and the 3c falls, so that
+    // only the path is wrong.
+    let x = check_step;
+    let fold = json!({"kind": "fold"});
+    let raise = |amount: u32| json!({"kind": "raise", "amount": amount});
+    let cases: Vec<(Value, &str, &str)> = vec![
+        (
+            json!([deal("3c")]),
+            "path[0]",
+            "a path starts with the first action on the spot's turn",
+        ),
+        (
+            json!([x(), deal("3c"), x()]),
+            "path[1]",
+            "is the deal of the 3c, but the turn is not over",
+        ),
+        (
+            json!([x(), x(), x()]),
+            "path[2]",
+            "the turn closed at `path[1]` with the check behind",
+        ),
+        (
+            json!([x(), x(), deal("Kh")]),
+            "path[2]",
+            "deals the Kh, which is on the board",
+        ),
+        (
+            json!([x(), x()]),
+            "path",
+            "ends with the check behind, which closes the turn",
+        ),
+        (
+            json!([bet(500), fold]),
+            "path",
+            "ends where the hand is over, after a fold",
+        ),
+        (
+            json!([bet(500), fold, deal("3c")]),
+            "path[2]",
+            "after the end of the hand at `path[1]`, a fold",
+        ),
+        (
+            json!([bet(1500), call(1500)]),
+            "path",
+            "ends with the call of an all-in",
+        ),
+        (
+            json!([bet(1500), call(1500), deal("3c")]),
+            "path[2]",
+            "after the call of an all-in at `path[1]`",
+        ),
+        (json!([fold]), "path[0]", "is a fold, but OOP faces no bet"),
+        (
+            json!([bet(500), x()]),
+            "path[1]",
+            "is a check, but IP faces a bet of 500",
+        ),
+        (
+            json!([bet(500), call(400)]),
+            "path[1]",
+            "is a call of 400, but the bet faced is 500",
+        ),
+        (
+            json!([x(), call(500)]),
+            "path[1]",
+            "is a call, but IP faces no bet",
+        ),
+        (
+            json!([bet(500), bet(1000)]),
+            "path[1]",
+            "is a bet, but IP faces a bet of 500",
+        ),
+        (
+            json!([bet(500), raise(500)]),
+            "path[1]",
+            "is a raise to 500, which is not above the bet faced, 500",
+        ),
+        (
+            json!([x(), raise(500)]),
+            "path[1]",
+            "is a raise, but IP faces no bet",
+        ),
+        (
+            json!([bet(1600)]),
+            "path[0]",
+            "is a bet of 1600, more than the 1500 chips OOP had left when the turn began",
+        ),
+        (
+            json!([bet(500), call(500), deal("3c"), bet(1500)]),
+            "path[3]",
+            "is a bet of 1500, more than the 1000 chips OOP had left when the river began \
+             (`spot.effective_stack` less the 500 it put in on earlier streets)",
+        ),
+    ];
+    for (path, field, reason) in cases {
+        let error = turn_error(|v| {
+            let at = river_node(v);
+            v["nodes"][at]["path"] = path.clone();
+        });
+        assert_invalid_at(error, &format!("].{field}"), reason);
+    }
+}
+
+#[test]
+fn a_node_whose_actions_break_the_betting_is_refused() {
+    let cases: Vec<(Value, &str)> = vec![
+        (
+            json!([{"kind": "fold"}, check_step()]),
+            "offers a fold, but OOP faces no bet",
+        ),
+        (
+            json!([check_step(), bet(2000)]),
+            "offers a bet of 2000, more than the 1500 chips OOP had left",
+        ),
+        (
+            json!([check_step(), call(500)]),
+            "offers a call, but OOP faces no bet",
+        ),
+    ];
+    for (actions, reason) in cases {
+        let error = turn_error(|v| {
+            let width = actions.as_array().unwrap().len();
+            v["nodes"][0]["actions"] = actions.clone();
+            let rows = v["nodes"][0]["strategy"].as_object_mut().unwrap();
+            for row in rows.values_mut() {
+                *row = json!(vec![1.0 / width as f64; width]);
+            }
+        });
+        match error {
+            DumpError::Invalid { field, reason: why } => {
+                assert!(field.starts_with("nodes[0].actions["), "{field}: {why}");
+                assert!(why.contains(reason), "{actions}: {why}");
+            }
+            other => panic!("{actions}: {other}"),
+        }
+    }
+}
+
+#[test]
+fn a_dump_not_closed_under_prefixes_or_whose_complete_is_wrong_is_refused() {
+    assert_invalid(
+        turn_error(|v| {
+            v["nodes"].as_array_mut().unwrap().remove(0);
+        }),
+        "nodes",
+        "has no node at the root",
+    );
+    // Without IP's node after a check, every node below it leads through a missing node.
+    let error = turn_error(|v| {
+        let at = index_of(v, json!([check_step()]));
+        v["nodes"].as_array_mut().unwrap().remove(at);
+    });
+    assert_invalid_at(
+        error,
+        "].path",
+        "leads through [check], the decision node where",
+    );
+    // The turn alone, said to be complete; the river kept, said not to be.
+    assert_invalid(
+        turn_error(|v| {
+            v["nodes"].as_array_mut().unwrap().retain(|node| {
+                let path = node["path"].as_array().unwrap();
+                path.iter().all(|step| step["kind"] != "deal")
+            });
+        }),
+        "complete",
+        "is true, but no path deals more than 0 cards, so the dump holds the first 1 of the 2 \
+         streets of a turn spot",
+    );
+    assert_invalid(
+        turn_error(|v| v["complete"] = json!(false)),
+        "complete",
+        "deals 1 card, so the dump holds every street of the turn spot",
+    );
+}
+
+#[test]
+fn a_card_dealt_twice_on_a_path_is_refused() {
+    // On a flop spot, the river may not be the turn card again.
+    let mut dump = SolutionDump::from_solution(&short("flop_tiny", 0));
+    let turn: Card = "Ah".parse().unwrap();
+    let at = dump
+        .nodes
+        .iter()
+        .position(|n| n.street_index() == 2 && n.path[2] == DumpAction::Deal(turn))
+        .unwrap();
+    let river = dump.nodes[at]
+        .path
+        .iter()
+        .rposition(|step| step.is_deal())
+        .unwrap();
+    dump.nodes[at].path[river] = DumpAction::Deal(turn);
+    assert_invalid(
+        dump.validate().unwrap_err(),
+        &format!("nodes[{at}].path[{river}]"),
+        "deals the Ah, which was dealt at `path[2]`",
+    );
+}
+
+#[test]
+fn a_partial_dump_reads_back_as_written() {
+    let dump = SolutionDump::from_solution_streets(&short("turn_small", 3), 1);
+    assert!(!dump.complete);
+    assert_eq!(dump.streets(), 1);
+    assert!(dump.nodes.iter().all(|n| n.dealt().is_empty()));
+    let text = dump.to_json();
+    assert!(text.contains("\n  \"complete\": false,\n"));
+    let back = SolutionDump::from_json(&text).unwrap();
+    assert_eq!(back.to_json(), text);
+}
+
+#[test]
+#[should_panic(expected = "holds 1 to 2 of them, not 3")]
+fn a_dump_of_more_streets_than_the_spot_plays_is_refused() {
+    SolutionDump::from_solution_streets(&short("turn_small", 0), 3);
 }

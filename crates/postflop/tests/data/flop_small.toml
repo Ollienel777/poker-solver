@@ -1,0 +1,19 @@
+format = 1
+name = "flop_small"
+description = "Illustrative ranges, not from a reference: a small raked flop spot for the tests of chance nodes. The ranges share combos and cards, all-in is offered on the flop, and later bets reach the stack."
+board = "Ks7d2c"
+pot_bb = 10.0
+effective_stack_bb = 10.0
+oop_range = "AsKh,KdQd,7s7h,QhJh,9h8h,As5s,JcTc:0.5"
+ip_range = "AhKd:0.5,KcQc,2h2d,8s8h,QhJh,Ah5h,6s5s,JdTd"
+
+[rake]
+percent = 5.0
+cap_bb = 3.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+flop = { bets = [0.5], raises = [], allin = true }
+turn = { bets = [0.5], raises = [], allin = false }
+river = { bets = [0.5], raises = [], allin = false }

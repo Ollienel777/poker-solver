@@ -1,0 +1,19 @@
+format = 1
+name = "flop_rainbow"
+description = "Illustrative ranges, not from a reference: made up for the tests of merging suit-isomorphic cards. An unpaired rainbow flop, on which no two suits are alike, so that nothing merges, with ranges written in hand classes and few enough hands for the fast tests. The only bet on each street is all-in."
+board = "Kd7c2h"
+pot_bb = 10.0
+effective_stack_bb = 5.0
+oop_range = "AA,KQs:0.6,QJs,65s:0.35"
+ip_range = "KK:0.8,77,AQs:0.45,T9s,43s:0.7"
+
+[rake]
+percent = 5.0
+cap_bb = 3.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+flop = { bets = [1.0], raises = [], allin = false }
+turn = { bets = [1.0], raises = [], allin = false }
+river = { bets = [1.0], raises = [], allin = false }
