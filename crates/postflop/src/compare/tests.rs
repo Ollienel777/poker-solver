@@ -33,6 +33,12 @@ fn the_defaults_are_the_tolerance_proposed_for_the_gate() {
         (0.3, 0.2, 0.02, 0.01)
     );
     assert_eq!((t.ev, t.reported_ev), (5.0, 0.1));
+    // Below a deal, which a river spot does not have: the proposal of DECISIONS P36.
+    assert_eq!(t.frequency_below_deals, [0.10, 0.25]);
+    assert_eq!(
+        [0, 1, 2, 3].map(|deals| t.frequency_at(deals)),
+        [0.02, 0.10, 0.25, 0.25]
+    );
 }
 
 #[test]

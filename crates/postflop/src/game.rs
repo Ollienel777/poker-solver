@@ -305,8 +305,8 @@ impl PostflopGame {
 
     /// The game of `spot`, which must start on the river: the constructor of the river game,
     /// which the name [`RiverGame`](crate::RiverGame) keeps (DECISIONS P27). Code that needs a
-    /// river game, such as a [solution dump](crate::dump), gets an error from it rather than a
-    /// flop game. [`PostflopGame::from_spot`] takes a spot on any street.
+    /// river game gets an error from it rather than a flop game. [`PostflopGame::from_spot`]
+    /// takes a spot on any street.
     ///
     /// Fails with [`SolveError::NotRiver`] if the board does not have five cards, and otherwise
     /// as [`PostflopGame::from_spot`] does.

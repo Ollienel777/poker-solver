@@ -1,0 +1,19 @@
+format = 1
+name = "flop_tiny"
+description = "Illustrative ranges, not from a reference: a tiny raked flop spot whose only bet on each street is all-in, so that its whole public tree, every street after every card, is small enough for the fast tests of flop dumps. The ranges share combos and cards."
+board = "Ks7d2c"
+pot_bb = 10.0
+effective_stack_bb = 5.0
+oop_range = "AsKh,KdQd,7s7h,QhJh,As5s"
+ip_range = "AhKd,KcQc,2h2d,QhJh,Ah5h"
+
+[rake]
+percent = 5.0
+cap_bb = 3.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+flop = { bets = [1.0], raises = [], allin = false }
+turn = { bets = [1.0], raises = [], allin = false }
+river = { bets = [1.0], raises = [], allin = false }

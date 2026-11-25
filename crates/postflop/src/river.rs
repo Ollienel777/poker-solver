@@ -1,13 +1,13 @@
 //! The river game: the name the river solver gave the game of a spot, kept for river code.
 //!
 //! [`RiverGame`] is [`PostflopGame`], the game of a spot on any street, which
-//! [`crate::game`] describes. M3 built it for river spots under this name, and the code that
-//! only ever handles a river solution, the [solution dump](crate::dump), its
-//! [import](crate::import) and the [comparison](mod@crate::compare), still calls it that
-//! (DECISIONS P27). Its constructor [`RiverGame::new`] still takes river spots only, and fails
-//! with [`SolveError::NotRiver`](crate::SolveError::NotRiver) on a flop or turn spot, so that
-//! such code cannot be handed a flop game by accident. [`PostflopGame::from_spot`] takes a spot
-//! on any street.
+//! [`crate::game`] describes. M3 built it for river spots under this name, and the river's
+//! tests still call it that (DECISIONS P27). Its constructor [`RiverGame::new`] still takes
+//! river spots only, and fails with [`SolveError::NotRiver`](crate::SolveError::NotRiver) on a
+//! flop or turn spot, so that code that needs a river game cannot be handed a flop game by
+//! accident. [`PostflopGame::from_spot`] takes a spot on any street, as the
+//! [solution dump](crate::dump), its [import](crate::import) and the
+//! [comparison](mod@crate::compare) do (DECISIONS P30).
 //!
 //! On a river spot nothing changed: the public tree is the betting tree node for node, every
 //! hand is possible at every node, and a solve is the same bit for bit as M3's.

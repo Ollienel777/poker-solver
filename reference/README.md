@@ -6,7 +6,8 @@ Reference data that tests and comparisons read. Nothing here is produced by this
 | --- | --- | --- |
 | `ranges/<config>/<formation>.toml` | Heads-up ranges at the flop, in the [range-file format](../docs/ARCHITECTURE.md#range-file) | M3, M5, M7, M8 |
 | `spots/river/*.toml` | River test spots, each with its tree sizing and rake, in the [spot-file format](../docs/ARCHITECTURE.md#spot-file) | M3 |
-| `spots/flop/*.toml` | Flop test spots on a reduced tree | M4 |
+| `spots/turn/*.toml` | Turn test spots, compared with the reference by the M4 gate's test | M4 |
+| `spots/flop/*.toml` | Flop test spots on a reduced tree, compared with the reference by the M4 gate's test | M4 |
 
 Rules:
 
@@ -77,10 +78,19 @@ The amounts in each tree, as the street total each bet or raise goes to:
 
 A reference solver's solution of a spot is read as a [solution dump](../docs/ARCHITECTURE.md#solution-dump), a JSON file that a wrapper program around the reference writes. The reference is postflop-solver, and its wrapper is `postflop-ref`, which is kept in a repository of its own because it links AGPL code (DECISIONS D18); build it there with `cargo build --release`. The format says what every number means; what a wrapper also needs to know:
 
-- It is run as a command template with `{spot}`, the path of one of these spot files, and `{out}`, where to write the dump. `PK_REFERENCE_SOLVER` holds the template as a JSON array of strings, such as `["C:/tools/ref-wrapper.exe", "{spot}", "{out}"]`, and `cargo test -p pk-postflop --release -- --ignored the_configured_reference_solver_matches_ours` then compares it with this solver on every spot. A failing run should exit with a non-zero code and say why on standard error.
+- It is run as a command template with `{spot}`, the path of one of these spot files, and `{out}`, where to write the dump. `PK_REFERENCE_SOLVER` holds the template as a JSON array of strings, such as `["C:/tools/ref-wrapper.exe", "{spot}", "{out}"]`, and `cargo test -p pk-postflop --release -- --ignored the_configured_reference_solver_matches_ours` then compares it with this solver on every river spot. A failing run should exit with a non-zero code and say why on standard error.
 - Its amounts are the street totals in the table above, in chips, with an all-in written as a bet or raise of the whole stack. The tree is checked before anything else, node by node, so a tree that differs anywhere is reported with the actions each side offers there.
 - It lists every decision node, with a probability row for every hand of the acting player at each, and EVs counted from the start of the river, converted if the reference counts them otherwise. It writes no frequencies over a range: this solver sums every range itself, the same way for both sides.
 - Both solvers are run to 0.03% of the pot (DECISIONS D20). Measured between two sound solves of these spots (`honest_solvers_table` in `crates/postflop/tests/compare.rs`), frequencies agreed within the gate's 2 points on every spot with both at 0.03% of the pot, and differed by up to 6.2 points with both at 0.1%.
+
+A turn or flop spot's answer is a version 2 dump ([Solution dump](../docs/ARCHITECTURE.md#version-2-flop-and-turn-spots)), and differs only in this:
+
+- Paths hold the cards dealt, each as `{"kind": "deal", "card": "7s"}` right after the action that closes a street, and every amount is the acting player's total for its street, from zero on each street: the all-in on the turn of a flop spot is what the player had left when the turn began. A node has a row for each hand of the acting player that holds no card dealt on its path, and none for a hand that holds one. There are no nodes after a card that cannot fall, because every pair of hands that can be held holds it.
+- A dump may hold only the first street, or on a flop spot the first two, after every card, and says so with `"complete": false`. `postflop-ref` writes a flop spot's flop and turn by default, and every street of a turn spot; a complete flop dump with real ranges runs to a gigabyte. The comparison compares what both solutions hold. A partial dump's exploitability cannot be measured here, so its solver's own figure is shown as reported and held to the limit, and the text says it could not be checked; its EVs are checked against its strategy only where the strategy below the node is in the dump.
+- `null` is the EV of a hand the reference has none for, such as one that never plays to the node itself, and is never read as zero.
+- Below a deal, a node is checked when play reaches it more than 1% of the time given the cards dealt on its path, and its frequencies are held to `Tolerances::frequency_below_deals` rather than the first street's 2 points (DECISIONS P35, P36).
+- `cargo test -p pk-postflop --release --test compare_streets -- --ignored the_configured_reference_solver_matches_ours_on_turn_and_flop_spots` compares the reference with this solver on every spot in `spots/turn/` and `spots/flop/`, each solved by both to 0.03% of the pot, and does nothing while those folders are missing or empty. `the_configured_reference_solver_on_the_test_spots` does the same on four small spots of `crates/postflop/tests/data`, which are not gate fixtures. Three of them have narrow made-up ranges, of 8 to 100 combos a side, on which a single hand moves a frequency below a deal by many points between two sound solvers, so it asserts every check but the frequencies below a deal, and prints those.
+- To measure the reference's whole strategy on a flop spot, so that its exploitability is measured here rather than reported, give the wrapper `"--streets", "3"` in the template. The dump is complete, and large: 34 MB for `flop_small`, with 8 hands a side, and 230 MB with about a hundred.
 
 ### The toy game
 

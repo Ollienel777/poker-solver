@@ -1,0 +1,18 @@
+format = 1
+name = "turn_wide"
+description = "Illustrative ranges, not from a reference: a rake-free turn spot with one bet size a street, no raises and wide ranges, for the comparison of turn solutions."
+board = "Ts7h4d2c"
+pot_bb = 10.0
+effective_stack_bb = 40.0
+oop_range = "22+,A2s+,K9s+,Q9s+,J9s+,T8s+,97s+,86s+,75s+,64s+,53s+,ATo+,KTo+,QTo+,JTo"
+ip_range = "55+,A2s+,K8s+,Q8s+,J8s+,T7s+,96s+,85s+,74s+,63s+,A9o+,KTo+,QJo,JTo,T9o"
+
+[rake]
+percent = 0.0
+cap_bb = 0.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+turn = { bets = [0.5], raises = [], allin = false }
+river = { bets = [0.75], raises = [], allin = false }

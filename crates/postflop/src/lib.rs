@@ -14,11 +14,11 @@
 //! build with debug assertions every solve checks the solution it returns.
 //!
 //! For checking against another solver, which is only ever run as a separate program:
-//! [`dump`] is a solver-neutral JSON form of a river solution, with the per-hand EVs of
-//! [`node_values`](mod@node_values); [`import`] maps a dump onto our tree for its spot,
+//! [`dump`] is a solver-neutral JSON form of a solution, version 1 for a river spot and
+//! version 2 for a flop or turn spot, complete or of the first streets only, with the per-hand
+//! EVs of [`node_values`](mod@node_values); [`import`] maps a dump onto our tree for its spot,
 //! checking first that it answers that spot; [`compare`](mod@compare) compares two solutions
 //! and gives a verdict against tolerances; and [`external`] runs a program that writes a dump.
-//! These four handle river spots only.
 
 pub mod compare;
 pub mod dump;
@@ -36,7 +36,9 @@ pub mod solve;
 pub mod spot;
 pub mod terminal;
 
-pub use compare::{Check, Comparison, Failure, Tolerances, compare, compare_mapped};
+pub use compare::{
+    Check, Comparison, Failure, StreetSummary, Tolerances, Unchecked, compare, compare_mapped,
+};
 pub use dump::{DumpAction, DumpError, SolutionDump};
 pub use expected_rake::{ExpectedRake, TerminalOutcome, expected_rake};
 pub use exploitability::{Exploitability, exploitability};
