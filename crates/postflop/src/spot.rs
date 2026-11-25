@@ -80,6 +80,26 @@
 //! blinds as decimals, and sizes as the shortest decimals that read back exactly. Reading what
 //! was written gives back an equal spot, and a spot read from a file in this layout writes back
 //! the same text.
+//!
+//! # Tree files
+//!
+//! A tree file holds the keys of a spot file's `[tree]` table at its top level, so that a
+//! betting tree can be given apart from a spot, as `solver solve-postflop --tree` takes it:
+//!
+//! ```toml
+//! max_raises = 0
+//! allin_threshold = 1.0
+//! flop = { bets = [0.5], raises = [], allin = false }
+//! turn = { bets = [0.5], raises = [], allin = false }
+//! river = { bets = [0.5], raises = [], allin = false }
+//! ```
+//!
+//! `max_raises` and `allin_threshold` are required. A tree file sizes the streets from its first
+//! on: the river alone, the turn and the river, or all three, so that it serves every spot that
+//! starts on its first street or later, which plays the streets from its own on. No other key is
+//! allowed. [`TreeSizing::from_toml`] and [`TreeSizing::load`] read one with the parser and the
+//! checks of `[tree]`, and name each field as the file does, such as `allin_threshold` or
+//! `flop.bets`.
 
 use std::fmt;
 use std::fs;
@@ -165,6 +185,37 @@ pub struct TreeSizing {
 }
 
 impl TreeSizing {
+    /// Reads a tree file: see [Tree files](self#tree-files).
+    pub fn load(path: impl AsRef<Path>) -> Result<TreeSizing, SpotError> {
+        let path = path.as_ref();
+        let text = fs::read_to_string(path).map_err(|source| SpotError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        TreeSizing::from_toml(&text)
+    }
+
+    /// Reads a tree file's text, the keys of a `[tree]` table at the top level, with the checks
+    /// that a spot file's `[tree]` gets: see [Tree files](self#tree-files). Errors come in the
+    /// order of the keys, `max_raises`, `allin_threshold`, `flop`, `turn` and `river`, except
+    /// that unknown keys come first.
+    pub fn from_toml(text: &str) -> Result<TreeSizing, SpotError> {
+        let table: Table = toml::from_str(text)?;
+        if let Some(key) = table.keys().find(|key| !TREE_KEYS.contains(&key.as_str())) {
+            let reason = if key == "tree" {
+                "is a table, but a tree file holds the keys of `[tree]` at its top level, without \
+                 the `[tree]` line"
+                    .to_string()
+            } else {
+                format!("is not a tree-file key; the keys are {}", list(&TREE_KEYS))
+            };
+            return Err(invalid(key.as_str(), reason));
+        }
+        let sizing = Fields::new(&table, None, &TREE_KEYS)?.sizing()?;
+        check_tree_file(&sizing)?;
+        Ok(sizing)
+    }
+
     /// The sizing for one street, if the spot has one.
     pub fn street(&self, street: Street) -> Option<&StreetSizing> {
         match street {
@@ -259,14 +310,7 @@ impl Spot {
         let rake_cap = rake.amount("cap_bb")?;
         check_rake(rake_percent, rake_cap)?;
 
-        let tree = top.table("tree", &TREE_KEYS)?;
-        let sizing = TreeSizing {
-            max_raises: tree.count("max_raises")?,
-            allin_threshold: tree.number("allin_threshold")?,
-            flop: tree.street("flop")?,
-            turn: tree.street("turn")?,
-            river: tree.street("river")?,
-        };
+        let sizing = top.table("tree", &TREE_KEYS)?.sizing()?;
         check_tree(&sizing, street)?;
 
         let spot = Spot {
@@ -520,11 +564,7 @@ fn check_rake(percent: f64, cap: Chips) -> Result<(), SpotError> {
 /// Checks the tree's rules and sizes as the tree builder does, and that the spot sizes exactly
 /// the streets it plays from `start` on.
 fn check_tree(tree: &TreeSizing, start: Street) -> Result<(), SpotError> {
-    let threshold = tree.allin_threshold;
-    if !(threshold > 0.0 && threshold <= 1.0) {
-        let reason = format!("is {threshold}; it must be more than 0 and at most 1");
-        return Err(invalid("tree.allin_threshold", reason));
-    }
+    check_threshold("tree.allin_threshold", tree.allin_threshold)?;
     // `max_raises` needs no check: every count from 0 up is a rule the builder can apply.
     for street in Street::ALL {
         let field = format!("tree.{street}");
@@ -546,6 +586,42 @@ fn check_tree(tree: &TreeSizing, start: Street) -> Result<(), SpotError> {
             (Some(sizing), false) => check_street(&field, sizing)?,
             (None, true) => {}
         }
+    }
+    Ok(())
+}
+
+/// Checks a tree file's rules and sizes as the tree builder does, and that it sizes the streets
+/// from its first on: the river, and every street after one it sizes.
+fn check_tree_file(tree: &TreeSizing) -> Result<(), SpotError> {
+    check_threshold("allin_threshold", tree.allin_threshold)?;
+    let mut earlier = None;
+    for street in Street::ALL {
+        let field = street.to_string();
+        match (tree.street(street), earlier) {
+            (Some(sizing), _) => {
+                check_street(&field, sizing)?;
+                earlier = Some(street);
+            }
+            (None, Some(earlier)) => {
+                let reason = format!(
+                    "is missing; a tree file that sizes the {earlier} sizes every street after it"
+                );
+                return Err(invalid(field, reason));
+            }
+            (None, None) if street == Street::River => {
+                let reason = "is missing; every spot plays the river, so a tree file sizes it";
+                return Err(invalid(field, reason));
+            }
+            (None, None) => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_threshold(field: &str, threshold: f64) -> Result<(), SpotError> {
+    if !(threshold > 0.0 && threshold <= 1.0) {
+        let reason = format!("is {threshold}; it must be more than 0 and at most 1");
+        return Err(invalid(field, reason));
     }
     Ok(())
 }
@@ -750,6 +826,18 @@ impl<'a> Fields<'a> {
                 Err(self.wrong_type(key, other, &wanted))
             }
         }
+    }
+
+    /// The two rules and the street sizings of `[tree]`, or of a tree file at the top level,
+    /// read with their types but not yet checked.
+    fn sizing(&self) -> Result<TreeSizing, SpotError> {
+        Ok(TreeSizing {
+            max_raises: self.count("max_raises")?,
+            allin_threshold: self.number("allin_threshold")?,
+            flop: self.street("flop")?,
+            turn: self.street("turn")?,
+            river: self.street("river")?,
+        })
     }
 
     /// A street sizing inside `[tree]`, which may be left out.

@@ -395,7 +395,7 @@ To the heap at the peak the estimate adds a margin of 1/256 and 4 KiB for alloca
 
 **Saving a solution.** `pk_postflop::estimate_save_memory(spot, options, save)` counts, from the same counts and in the same way, what the process holds while `save` writes a solution of the spot to a [solution file](#solution-file), the solution included: the solution's game, strategy and spot; the quantized copy of the strategy the save measures; the zstd encoders, one for each street the file holds while the strategy is quantized, each counted as zstd's own estimate of a stream for its section's size, since zstd allocates through Rust's allocator as `pk-postflop` builds it; each compressed section as the room zstd's bound gives its raw bytes, a bound, since what a section compresses to depends on the numbers in it; the exploitability's walks on the calling thread; the raw EV sections of the streets kept and each node's place in them; a bound on the EVs' walk; and the header. It takes the largest of the save's phases, quantizing, measuring, working out the EVs, compressing them and writing, and adds the solve estimate's margin and allowances, so that its `total` is what the process holds at the save's peak and a caller that solves and then saves, as `solver solve-postflop` does, compares the larger of the two totals with its limit. On the gate's four flops and `flop_srp` a save's peak is 0.9 to 1.6 times its solve's, the most where the solve merges, and the estimate's heap is 5.5% to 9.6% above the measured peak ([BENCHMARKS.md](BENCHMARKS.md#solution-files-45)); `tests/memory_estimate.rs` holds it to never below a counting allocator's peak and at most 25% above (DECISIONS P73).
 
-Each solve's resources are recorded as a `pk_postflop::SolveRecord`: the spot and its board, the tree sizes and the hands, the storage of the regrets and strategy sums (`f32` or `16-bit`), the whole itemized estimate, the peak resident memory of the process (`VmHWM` on Linux, `PeakWorkingSetSize` on Windows; DECISIONS P43), the wall time, the iterations, the stopping rule, the final exploitability, the target and caps, and the build and operating system. `pk_postflop::append_record` appends one as a line of JSON to a file the caller names; the library writes no file on its own. The example `solve_spot` appends one per solve to `runs/log.jsonl`, and `solve_spot --estimate` prints the estimate without solving, which stands in for `solver estimate` until the command line exists (DECISIONS P44). AWS instance sizes are chosen from that log.
+Each solve's resources are recorded as a `pk_postflop::SolveRecord`: the spot and its board, the tree sizes and the hands, the storage of the regrets and strategy sums (`f32` or `16-bit`), the whole itemized estimate, the peak resident memory of the process (`VmHWM` on Linux, `PeakWorkingSetSize` on Windows; DECISIONS P43), the wall time, the iterations, the stopping rule, the final exploitability, the target and caps, and the build and operating system. `pk_postflop::append_record` appends one as a line of JSON to a file the caller names; the library writes no file on its own. `solver solve-postflop` appends one per solve to `runs/log.jsonl`, as the example `solve_spot` does, and `solver estimate` prints the estimate without solving, as `solve_spot --estimate` does (DECISIONS P44, [cli](#cli)). AWS instance sizes are chosen from that log.
 
 ## abstraction
 
@@ -445,10 +445,10 @@ The binary is `solver`.
 
 | Command | Milestone |
 | --- | --- |
-| `solve-postflop --ranges F --board Ks7d2c [--tree T] [--target 0.3] [--threads N] --out S` | M5 |
+| `solve-postflop --ranges F --board Ks7d2c [--tree T] [--target 0.3] [--threads N] --out S`, or `--spot P` in place of `--ranges` and `--board` | M5 |
 | `inspect S [--node "x b33 c 8h"]` | M5 |
 | `compare A B` | M5 |
-| `estimate --ranges F --board B [--tree T]` (memory estimate only; until M5, the example `solve_spot --estimate`) | M4 |
+| `estimate --ranges F --board B [--tree T]`, or `--spot P` (the memory estimate only) | M5 |
 | `build-buckets --street flop\|turn\|river` | M6 |
 | `solve-preflop --config a [--iters N] [--checkpoint-dir D] [--resume]` | M7 |
 | `inspect-preflop --config a --node "UTG r BTN c"` | M7 |
@@ -467,6 +467,48 @@ A node path is a space-separated list of actions:
 | a card, such as `8h` | the next street's card |
 
 `compare` will print a `pk_postflop::Comparison` ([Cross-solver comparison](#cross-solver-comparison)). The tokens above are labels from our own sizes, so a [solution dump](#solution-dump), which another solver writes, names each action by its kind and chip amount instead.
+
+**Layout.** Each command is a module of `commands`, holding its arguments, a struct that derives `clap::Args`, and its `run`. What the commands share has modules of its own: `spot_input` turns the options that name a spot into a `Spot`, `limits` holds the limit options and says what to do when a spot is over a limit, `format` writes amounts, sizes and times and prints the spot, and `save` is the one place a solution is written.
+
+**Output.** Everything a command reports goes to stdout, so that redirecting it keeps a whole run. Errors go to stderr, each as one line, `solver: <message>`, that names the file or option it is about and says what to do, with exit code 1. A command line that does not parse is reported the same way, followed by clap's usage line, with exit code 2. Help and `--version` print to stdout with exit code 0, and `solver` alone prints the help to stderr with exit code 2. Amounts are in big blinds: exact for the pot, the stack and the rake cap, to two decimals for values. Bet sizes are percents of the pot, raise sizes multiples of the bet, and memory is in decimal units, as the estimate writes it. Each line that describes the spot or the result is a label padded to 13 characters and its value, and the progress is a table with a column for each measure.
+
+### Naming a spot
+
+`solve-postflop` and `estimate` take a spot in one of two ways, one or the other (DECISIONS P70):
+
+- **`--ranges F --board B [--tree T] [--config C]`.** The [range file](#range-file) gives the pot, the effective stack, both ranges and their positions. The config it names gives the rake and, unless `--tree` is given, the tree's sizing, its `[postflop]` table. The board is 3, 4 or 5 cards in any order and case. A range file describes the spot at the flop, so a turn or river board starts there with the flop's pot, stack and ranges, as if the streets before it were checked through. The spot is named after the formation and the board, as in `BTN_vs_BB_SRP_Ks7d2c`.
+- **`--spot P`.** A [spot file](#spot-file) as it is, its rake and tree included, so that every test spot in `reference/spots/` runs through the command line.
+
+**The config** is read from `--config`, or else from `configs/<name>.toml` under the current directory, `<name>` being the range file's `config` in lower case (DECISIONS P71). When it is not there, the error gives the path it looked at and names `--config`. The range file is then checked against the config, as under [Checking against the config](#range-file).
+
+**The tree.** A [tree file](#tree-file) given with `--tree` sizes the tree in place of the config's `[postflop]`, and must size the street the board starts on; the streets before it are left out, as for any spot. Config A's own tree is too large to solve on a flop: on `BTN_vs_BB_SRP` its public tree has 9,789,026 nodes, over the limit of a million, and the estimate is 56 GB. `configs/trees/one_bet.toml`, one half-pot bet a street and no raises, has 191,844 nodes and an estimate of 1.1 GB on the same ranges and an unpaired rainbow flop.
+
+Errors name the file and say what to do: a path that cannot be read, a range file that does not fit its config, a board with a repeated card, other than 3 to 5 cards or a card that is not one, a board that leaves a player's range no hand or no pair of hands that can be dealt together, and a tree file that does not size the board's street.
+
+### solve-postflop
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--target PERCENT` | 0.3 | stop once the exploitability is at or below this percent of the pot |
+| `--max-iters N` | 10,000 | stop after this many iterations |
+| `--threads N` | all the machine offers | the threads to solve on; the results are the same for every count |
+| `--max-memory GB` | 10 | refuse a solve whose memory estimate, or the estimate of saving its solution, is over this many gigabytes, 10^9 bytes (DECISIONS D17, P72) |
+| `--max-nodes N` | 1,000,000 | refuse a betting tree or a public tree of more nodes |
+| `--compressed` | off | store the regrets and strategy sums in 16 bits (DECISIONS D23) |
+| `--out FILE` | | the [solution file](#solution-file) to write; a solve takes this or `--no-out` |
+| `--no-out` | off | solve without writing a solution file |
+| `--force` | off | overwrite `--out` if it exists |
+| `--last-street STREET` | `river` | the last street the solution file holds: `turn` leaves out the river, which is nearly all of a flop solution's file |
+| `--log FILE` | `runs/log.jsonl` | the resource log, to which a `SolveRecord` is appended as a line of JSON |
+| `--no-log` | off | append nothing to the log |
+
+A solve says where its solution goes: `--out`, or `--no-out` for a solve whose solution is not kept, and a command line with neither does not parse. Before anything is solved it reads the spot, then checks `--out`, whose folder must exist and whose file must not unless `--force` is given, and `--last-street`, which may not be before the street the board starts on (DECISIONS P72). It prints the spot (its name and source, the board, the positions when it came from a range file, the pot and stack, the rake, and the tree a line per street), each player's hands and the trees' node counts, and the memory estimates with the limit: the solve's, with the phase that holds the most, and, unless `--no-out` is given, that of saving its solution (`estimate_save_memory`, [Memory model](#memory-model)). It refuses, as `pk_postflop::solve` does, a betting or public tree over `--max-nodes` and an estimate over `--max-memory`, and it holds the save's estimate to the same limit: a save can need more memory than its solve did, most where the solve merges runouts, and a solve that fits would be lost with a save that does not (DECISIONS P72). The error says what to change: a tree of fewer sizes in the file the tree came from (for a config's tree, `--tree configs/trees/one_bet.toml`); `--compressed` when the solve's memory is the only limit passed and a second estimate puts 16-bit storage under it; `--last-street turn` when the save's memory is the only one and a second estimate puts a file without its river under it; or a higher limit if the machine has the memory.
+
+While it solves, it prints a line per exploitability measurement: the iterations, the exploitability as a percent of the pot, the time since the solve started, and the most memory the process has held resident so far (`pk_postflop::peak_resident_bytes`). At the end it prints how the solve stopped, at the target or a cap, the exploitability, as a percent of the pot and in big blinds per hand dealt, with a note when a cap stopped it above the target, each player's value in big blinds per hand dealt, and the peak resident memory against the estimate. It then writes the [solution file](#solution-file) through `save::save`, which calls `pk_postflop::save`: a line before it starts says where the file goes and which streets it holds, and a line after it gives the file's size, the time the save took, and the exploitability of the strategy as the file holds it, each probability in 16 bits. When the save took the process past the solve's peak, one more line gives the peak resident memory against the save's estimate. The solve's record is appended to the log even if the solution could not be written.
+
+### estimate
+
+`estimate` takes the same spot options and the same limits, `--threads`, `--max-memory`, `--max-nodes` and `--compressed`, with `--last-street` and `--no-out` for what the solution file would hold, and builds the betting tree only. It prints the spot, the hands and node counts, the solve's estimate item by item (`MemoryEstimate`'s `Display`, [Memory model](#memory-model)), then, unless `--no-out` is given, the estimate of saving its solution item by item (`SaveMemoryEstimate`'s), and whether `solve-postflop` with the same options would run or refuse the spot, with every limit passed and what to change. A spot over the node limit is estimated as if the limit were lifted, so that the estimate still says what its tree would need. A refusal is the answer it was asked for, not an error, and it exits with 0.
 
 ## File formats
 
@@ -527,7 +569,7 @@ Keys may come in any order, positions in any case, and amounts as integers or de
 
 ### Spot file
 
-TOML, holding the whole input of a postflop solve: the board, both ranges, the pot and stack, the tree sizing and the rake. The test spots in `reference/spots/` are spot files, and `solve-postflop` (M5) will read one. The reader and writer are `pk_postflop::spot`, because a spot builds the postflop solver's `BoardHands`.
+TOML, holding the whole input of a postflop solve: the board, both ranges, the pot and stack, the tree sizing and the rake. The test spots in `reference/spots/` are spot files, and `solve-postflop --spot` reads one. The reader and writer are `pk_postflop::spot`, because a spot builds the postflop solver's `BoardHands`.
 
 ```toml
 format = 1
@@ -580,6 +622,31 @@ Keys may come in any order, cards in any order and case, and amounts and sizes a
 **Writing** produces the layout above: the keys in that order, the board from its highest card to its lowest, canonical range strings, amounts in big blinds as decimals, and sizes as the shortest decimal that reads back exactly. Reading what was written gives back an equal spot, and a spot read from a file in this layout rewrites to the same text.
 
 **What the solver takes.** `Spot::street` is the starting street, from the board's length. `Spot::tree_spec` and `Spot::build_tree` give the betting tree; a `PostflopSizing` has a field for every street, so the streets before the root hold a copy of the root street's sizing, which the builder never reads. `Spot::board_hands` gives the `BoardHands` and `Spot::rake` the `Rake`.
+
+### Tree file
+
+TOML, holding a betting tree's sizing apart from any spot: the keys of a spot file's `[tree]` table, at the top level. `solve-postflop --tree` and `estimate --tree` take one in place of the config's `[postflop]` table. The reader is `TreeSizing::load` in `pk_postflop::spot`, which shares the parser and the checks of `[tree]`, so that the two read alike.
+
+```toml
+max_raises = 0
+allin_threshold = 1.0
+flop = { bets = [0.5], raises = [], allin = false }
+turn = { bets = [0.5], raises = [], allin = false }
+river = { bets = [0.5], raises = [], allin = false }
+```
+
+| Key | Holds |
+| --- | --- |
+| `max_raises`, `allin_threshold` | the two rules of [`[postflop]`](#gameconfig-schema) |
+| `flop`, `turn`, `river` | a sizing `{ bets, raises, allin }` for each street from the first the file sizes on: the river alone, the turn and the river, or all three |
+
+A tree file serves every board that starts on its first street or later: the spot takes the sizings of the streets its board plays and leaves out the earlier ones. A board that starts before the file's first street is refused, with the sizings to add. `max_raises` and `allin_threshold` are required, and no other key is allowed. Each error names the field as the file does, such as `flop.bets`, and a file is rejected for:
+
+- an unknown key, or the `[tree]` line kept at the top
+- a missing rule, a value of the wrong type, or a size or rule that `[tree]` rejects
+- no `river`, or a street missing after one the file sizes
+
+`configs/trees/one_bet.toml` is the file above, with a comment.
 
 ### Solution dump
 

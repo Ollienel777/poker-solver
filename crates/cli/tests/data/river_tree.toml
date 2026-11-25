@@ -1,0 +1,5 @@
+# A tree file for the command line's tests: a half-pot and a pot-sized bet on the river, and no
+# raises, so that a river spot of the full ranges solves in a moment.
+max_raises = 0
+allin_threshold = 1.0
+river = { bets = [0.5, 1.0], raises = [], allin = false }
