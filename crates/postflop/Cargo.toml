@@ -22,3 +22,7 @@ rand_chacha.workspace = true
 [[bench]]
 name = "terminal"
 harness = false
+
+[[bench]]
+name = "solve"
+harness = false

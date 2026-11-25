@@ -1,0 +1,19 @@
+format = 1
+name = "flop_srp"
+description = "Illustrative ranges, not from a reference: the benchmark's fixed flop spot. A 100bb single-raised pot (BTN against BB) on a two-tone flop, about 300 hands a side, with one half-pot bet per street and no raises. Do not edit it: the timings in docs/BENCHMARKS.md are of this spot."
+board = "Qs8s3d"
+pot_bb = 5.5
+effective_stack_bb = 97.5
+oop_range = "22-JJ,A2s-AJs,K2s+,Q4s+,J6s+,T6s+,96s+,85s+,75s+,64s+,54s,ATo-AJo,KTo+,QTo+,JTo"
+ip_range = "22+,A2s+,K8s+,Q8s+,J8s+,T8s+,97s+,86s+,76s,65s,54s,ATo+,KTo+,QTo+,JTo"
+
+[rake]
+percent = 5.0
+cap_bb = 6.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+flop = { bets = [0.5], raises = [], allin = false }
+turn = { bets = [0.5], raises = [], allin = false }
+river = { bets = [0.5], raises = [], allin = false }
