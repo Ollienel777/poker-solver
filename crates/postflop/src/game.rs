@@ -1069,11 +1069,50 @@ impl PublicGame for PostflopGame {
         scratch: &mut Vec<f64>,
     ) {
         let public = &self.nodes[node];
-        let payoff = self.payoffs[public.tree as usize]
-            .unwrap_or_else(|| panic!("node {node} is not a terminal"));
+        assert!(
+            self.payoffs[public.tree as usize].is_some(),
+            "node {node} is not a terminal"
+        );
+        let (tree, board) = (public.tree, public.board);
+        self.terminal_values_on(tree, board, player, opponent_reach, values, scratch);
+    }
+}
+
+impl PostflopGame {
+    /// The index into the game's boards of the board at the public node `node`, for the
+    /// [merged game](crate::merged), which evaluates its terminals on the same boards.
+    pub(crate) fn board_index(&self, node: u32) -> u32 {
+        self.public(node).board
+    }
+
+    /// The cards of the board of index `index` among the game's boards.
+    pub(crate) fn board_cards(&self, index: u32) -> CardSet {
+        self.boards[index as usize].hands.board()
+    }
+
+    /// `player`'s hands that hold `card`, in hand order: those a chance node dealing it rules
+    /// out.
+    pub(crate) fn holders_of(&self, player: usize, card: Card) -> &[u32] {
+        self.holders[player].of(card)
+    }
+
+    /// [`PublicGame::terminal_values_with`] at a terminal of the betting node `tree` reached on
+    /// the board of index `board_index`, as at any public terminal of that betting node and
+    /// board.
+    pub(crate) fn terminal_values_on(
+        &self,
+        tree: u32,
+        board_index: u32,
+        player: usize,
+        opponent_reach: &[f64],
+        values: &mut [f64],
+        scratch: &mut Vec<f64>,
+    ) {
+        let payoff = self.payoffs[tree as usize]
+            .unwrap_or_else(|| panic!("betting node {tree} is not a terminal"));
         let traverser = player_of(player);
-        let board = &self.boards[public.board as usize];
-        if public.board == 0 {
+        let board = &self.boards[board_index as usize];
+        if board_index == 0 {
             evaluate(&board.hands, traverser, payoff, opponent_reach, values);
             return;
         }

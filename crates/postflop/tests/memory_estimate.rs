@@ -343,3 +343,47 @@ fn on_16_threads_the_estimate_covers_what_the_flop_benchmark_spot_allocates() {
         many.heap_bytes - one.heap_bytes
     );
 }
+
+#[test]
+fn the_estimate_covers_what_a_merged_solve_allocates_and_is_within_five_percent() {
+    // Spots that a relabelling of the suits keeps, which the solve iterates on their merged
+    // games, with the bounds of one thread; and the benchmark's turn spot with merging off,
+    // which the default now merges.
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (name, iterations) in [
+        ("flop_monotone", 12),
+        ("flop_two_tone", 12),
+        ("turn_four_flush", 25),
+    ] {
+        let spot = load(&format!("tests/data/{name}"));
+        let estimate = estimate_memory(&spot, &capped(iterations)).unwrap();
+        assert!(estimate.merged, "{name}");
+        check(name, &spot, &capped(iterations));
+    }
+    let off = SolveOptions {
+        merge_isomorphic: false,
+        ..capped(12)
+    };
+    let spot = load("benches/data/turn_srp");
+    assert!(!estimate_memory(&spot, &off).unwrap().merged);
+    check("turn_srp, merging off", &spot, &off);
+}
+
+#[test]
+fn on_several_threads_the_estimate_covers_what_a_merged_solve_allocates() {
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for threads in [2, 16] {
+        for (name, iterations) in [("flop_monotone", 12), ("turn_four_flush", 25)] {
+            let options = SolveOptions {
+                threads,
+                ..capped(iterations)
+            };
+            let spot = load(&format!("tests/data/{name}"));
+            check_threads(&format!("{name}, {threads} threads"), &spot, &options);
+        }
+    }
+}

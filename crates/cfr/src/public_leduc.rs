@@ -394,6 +394,143 @@ impl PublicGame for PublicLeduc {
     }
 }
 
+/// Leduc with its suits merged, for the tests of [images](crate::vector#images).
+///
+/// Swapping the two suits, in the private cards and the public card alike, is a symmetry of
+/// Leduc: the deal is uniform, and a showdown looks at ranks only. It keeps the first round, and
+/// maps the subtree after a public card of suit 1 onto the subtree after the card of the same
+/// rank of suit 0, with every hand `h` relabelled `h ^ 1`. So this game's chance nodes have three
+/// outcomes, the cards of suit 0, each with the card of suit 1 of its rank as its one image,
+/// through [`SWAP`]. Its nodes are [`PublicLeduc`]'s, with those after a card of suit 1 left
+/// unreached. In the first round the swap keeps every node, so there each card is
+/// [alike](crate::vector#alike-hands) to the card of its rank in the other suit ([`ALIKE`]).
+#[cfg(test)]
+pub(crate) mod merged {
+    use std::iter;
+
+    use super::*;
+
+    /// The swap of the suits as a permutation of either player's hands: card `k` and card
+    /// `k ^ 1`.
+    pub(crate) const SWAP: [u32; NUM_HANDS] = [1, 0, 3, 2, 5, 4];
+
+    /// The classes the swap of the suits makes of either player's hands: each card with the
+    /// card of its rank in the other suit, named by the card of suit 0.
+    pub(crate) const ALIKE: [u32; NUM_HANDS] = [0, 0, 2, 2, 4, 4];
+
+    /// Leduc with each public card of suit 1 an image of the card of suit 0 of its rank.
+    pub(crate) struct MergedLeduc {
+        full: PublicLeduc,
+        /// For each node of the full game, the node of this one that plays its part, and
+        /// whether the hands are swapped there.
+        counterparts: Vec<(usize, bool)>,
+    }
+
+    impl MergedLeduc {
+        pub(crate) fn new() -> MergedLeduc {
+            let full = PublicLeduc::new();
+            let mut counterparts: Vec<(usize, bool)> =
+                (0..full.num_nodes()).map(|node| (node, false)).collect();
+            // The subtrees after the two cards of a rank are alike and in pre-order, so the
+            // node at some place after the card of suit 1 is the node at that place after the
+            // card of suit 0, one subtree's size before it.
+            for chance in 0..full.num_nodes() {
+                if full.node(chance) != (PublicNode::Chance { num_outcomes: 6 }) {
+                    continue;
+                }
+                for card in (1..NUM_HANDS).step_by(2) {
+                    let (first, second) = (full.child(chance, card - 1), full.child(chance, card));
+                    let size = second - first;
+                    for (node, counterpart) in
+                        counterparts.iter_mut().enumerate().skip(second).take(size)
+                    {
+                        *counterpart = (node - size, true);
+                    }
+                }
+            }
+            MergedLeduc { full, counterparts }
+        }
+
+        /// The full game.
+        pub(crate) fn full(&self) -> &PublicLeduc {
+            &self.full
+        }
+
+        /// The node of this game that plays the part of the full game's `node`, and whether
+        /// the hands are swapped there.
+        pub(crate) fn counterpart(&self, node: usize) -> (usize, bool) {
+            self.counterparts[node]
+        }
+    }
+
+    impl PublicGame for MergedLeduc {
+        fn num_hands(&self, player: usize) -> usize {
+            self.full.num_hands(player)
+        }
+
+        fn deal(&self, player: usize) -> &[f64] {
+            self.full.deal(player)
+        }
+
+        fn num_nodes(&self) -> usize {
+            self.full.num_nodes()
+        }
+
+        fn root(&self) -> usize {
+            self.full.root()
+        }
+
+        fn node(&self, node: usize) -> PublicNode {
+            match self.full.node(node) {
+                PublicNode::Chance { .. } => PublicNode::Chance { num_outcomes: 3 },
+                other => other,
+            }
+        }
+
+        /// Outcome `o` of a chance node deals card `2o`, of suit 0.
+        fn child(&self, node: usize, index: usize) -> usize {
+            match self.full.node(node) {
+                PublicNode::Chance { .. } => self.full.child(node, 2 * index),
+                _ => self.full.child(node, index),
+            }
+        }
+
+        fn outcome_probability(&self, node: usize, outcome: usize) -> f64 {
+            self.full.outcome_probability(node, 2 * outcome)
+        }
+
+        fn rules_out(&self, node: usize, outcome: usize, player: usize, hand: usize) -> bool {
+            self.full.rules_out(node, 2 * outcome, player, hand)
+        }
+
+        /// In the first round, each card and the card of its rank in the other suit.
+        fn alike(&self, node: usize, _player: usize) -> Option<&[u32]> {
+            self.full.public_card(node).is_none().then_some(&ALIKE[..])
+        }
+
+        /// The card of suit 1 of the outcome's rank, through the swap of the suits.
+        fn images(
+            &self,
+            _node: usize,
+            _outcome: usize,
+            _player: usize,
+        ) -> impl Iterator<Item = &[u32]> {
+            iter::once(&SWAP[..])
+        }
+
+        fn terminal_values(
+            &self,
+            node: usize,
+            player: usize,
+            opponent_reach: &[f64],
+            values: &mut [f64],
+        ) {
+            self.full
+                .terminal_values(node, player, opponent_reach, values);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;

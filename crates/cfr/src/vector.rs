@@ -29,6 +29,54 @@
 //! possible at the node: the player knows its hand and everything public. Every history of it
 //! comes after the same public actions, so the game has perfect recall.
 //!
+//! # Images
+//!
+//! An outcome may stand for other outcomes of its chance node, its *images*, which the game has
+//! merged into it. An image is given by a permutation of each player's hands
+//! ([`PublicGame::images`]): `perm[h]` is the hand that plays, in the subtree after the outcome,
+//! the part that hand `h` plays in the subtree after the image. An image has the outcome's
+//! probability and no node of its own, so its subtree plays the outcome's strategies with the
+//! hands relabelled. A walk walks the outcome's subtree once, and where it would add the image's
+//! value `q(n·image, h)` it adds the outcome's `q(n·o, perm[h])`, image by image in the order
+//! the game gives them, right after the outcome's own value, whether or not it splits the
+//! chance node ([the parallel walk](#the-parallel-walk) adds each child's values so too):
+//!
+//! ```text
+//! q(n, h) = Σ_o ( q(n·o, h) + Σ_{images of o} q(n·o, perm[h]) )
+//! ```
+//!
+//! That is the value the image's own subtree would return when it is the outcome's subtree with
+//! the hands relabelled, its payoffs and the hands it rules out included, and the opponent's
+//! reach entering the chance node is the same for each hand `o` as for `perm[o]`. Keeping both
+//! is the game's business, as a symmetry of the game does (see `pk_postflop::merged`); the walks
+//! assume nothing of the kind, and compute the sum above. For a pair of hands, the probabilities
+//! of a chance node sum to 1 over the outcomes and images that leave both possible. A game
+//! without images, which is the default, is the game of the sections above.
+//!
+//! # Alike hands
+//!
+//! A game may also say which of a player's hands are *alike* at a node
+//! ([`PublicGame::alike`]): hands whose values there it knows to be equal, as when a symmetry of
+//! the game keeps the node and maps one hand onto the other. It gives, for each hand, the first
+//! hand of its class. Computed in floating point, alike hands' values can still differ in their
+//! last bits, since a terminal's evaluation and a chance node's sum add their terms in an order
+//! that depends on the hand, and where regret matching is at zero a last-bit difference in a
+//! regret becomes a different strategy, after which the two hands play differently. So the CFR
+//! walk, at each terminal once it has the values and at each chance node once it has added up
+//! the outcomes', on one thread and in the parallel walk alike, gives every hand the value of
+//! its class's first hand.
+//!
+//! That is enough to keep alike hands alike bit for bit, provided the game keeps three things:
+//! the deal is the same for alike hands at the root, for both players; a player node's
+//! children have the node's classes; and a chance node's children have classes within the
+//! node's, each outcome ruling out all of a class at the child or none of it. For then, by
+//! induction down the walk, the reaches entering a node are equal within its classes; a player
+//! node computes alike hands' values, regrets, strategies, strategy sums and the reaches it
+//! passes down by the same operations from equal inputs, so they come out equal; and terminals
+//! and chance nodes are made equal. So the stored values of alike hands are equal at every node
+//! after every iteration. The measurement walks store nothing and do not use it. A game without
+//! alike hands, which is the default, is the game of the sections above.
+//!
 //! # Storage
 //!
 //! [`VectorCfr`] keeps, for each player node, one slice of regrets and one of strategy sums,
@@ -60,7 +108,9 @@
 //! 3. The walk returns, for each hand `h` of the traverser, the counterfactual value without
 //!    its own deal factor, `q(n, h) = Σ_o ρ(o) · v_i(n, h, o)` over the opponent's compatible
 //!    hands. A terminal's comes from [`PublicGame::terminal_values`]. A chance node's is the
-//!    sum of its outcomes'. An opponent's node's is the sum of its actions'. At the
+//!    sum of its outcomes', in outcome order, each followed by its images' (see
+//!    [images](#images)); a terminal's and a chance node's are then made equal for
+//!    [alike hands](#alike-hands). An opponent's node's is the sum of its actions'. At the
 //!    traverser's node it is `Σ_a σ(a | h) · q(n·a, h)`, summed in action order. A ruled-out
 //!    hand's is zero, whatever the game wrote for it.
 //! 4. At each node `n` of the traverser, once its children are done, the instantaneous regret
@@ -243,6 +293,29 @@ pub trait PublicGame {
         (0..self.num_hands(player)).filter(move |&hand| self.rules_out(node, outcome, player, hand))
     }
 
+    /// The images of outcome `outcome` of the chance node `node`, as the
+    /// [module documentation](self#images) defines them, each as its permutation of `player`'s
+    /// hands: `num_hands(player)` entries, entry `h` the hand of the subtree after the outcome
+    /// that stands for hand `h` after the image. The walks add the images' values in the order
+    /// given, after the outcome's.
+    ///
+    /// The default has none, which is a game without images.
+    fn images(&self, node: usize, outcome: usize, player: usize) -> impl Iterator<Item = &[u32]> {
+        let _ = (node, outcome, player);
+        iter::empty()
+    }
+
+    /// The hands of `player` that are alike at `node`, as the
+    /// [module documentation](self#alike-hands) defines them: `num_hands(player)` entries, entry
+    /// `h` the first hand of `h`'s class, so that it is at most `h` and is its own entry. The CFR
+    /// walk uses it at terminals and chance nodes.
+    ///
+    /// The default is `None`: every hand is alike only to itself.
+    fn alike(&self, node: usize, player: usize) -> Option<&[u32]> {
+        let _ = (node, player);
+        None
+    }
+
     /// At the terminal `node`, writes `player`'s value for each of its hands given the
     /// opponent's reach:
     ///
@@ -338,14 +411,15 @@ impl PublicProfile {
     }
 
     /// A profile over `num_nodes` nodes with no strategies.
-    pub(crate) fn empty(num_nodes: usize) -> PublicProfile {
+    pub fn empty(num_nodes: usize) -> PublicProfile {
         PublicProfile {
             nodes: vec![None; num_nodes],
         }
     }
 
-    /// Sets the strategy at `node`, laid out `[actions × hands]` over `num_hands` hands.
-    pub(crate) fn set(&mut self, node: usize, num_hands: usize, probabilities: Vec<f32>) {
+    /// Sets the strategy at `node`, laid out `[actions × hands]` over `num_hands` hands, in
+    /// place of any it had. Panics if `node` is not one of the profile's nodes.
+    pub fn set(&mut self, node: usize, num_hands: usize, probabilities: Vec<f32>) {
         debug_assert!(probabilities.len().is_multiple_of(num_hands));
         self.nodes[node] = Some(NodeStrategy {
             num_hands,
@@ -424,9 +498,10 @@ impl<G: PublicGame> VectorCfr<G> {
     ///
     /// Panics if the game is malformed: a player with no hands or a deal vector of the wrong
     /// length or with an entry that is negative or not finite, a node out of range or reached
-    /// twice from the root, a chance node with no outcomes or an outcome probability that is
-    /// negative or not finite, or a player node with no actions or an acting player other than
-    /// 0 or 1.
+    /// twice from the root, alike hands that are not classes named by their first hands, a
+    /// chance node with no outcomes, an outcome probability that is negative or not finite, or
+    /// an image whose permutation has the wrong length or a hand out of range, or a player node
+    /// with no actions or an acting player other than 0 or 1.
     pub fn new(game: G, schedule: Schedule) -> VectorCfr<G> {
         let mut row_of = vec![None; game.num_nodes()];
         let mut rows = Vec::new();
@@ -682,6 +757,19 @@ fn discover<G: PublicGame>(
         "node {node} is reached twice from the root, so the public tree is not a tree"
     );
     seen[node] = true;
+    for (player, possible) in possible.iter().enumerate() {
+        if let Some(alike) = game.alike(node, player) {
+            let num_hands = possible.len();
+            assert!(
+                alike.len() == num_hands
+                    && alike.iter().enumerate().all(|(hand, &first)| {
+                        first as usize <= hand && alike[first as usize] == first
+                    }),
+                "the alike hands of player {player} at node {node} are not classes of its \
+                 {num_hands} hands, each named by its first hand"
+            );
+        }
+    }
     match game.node(node) {
         PublicNode::Terminal => {}
         PublicNode::Chance { num_outcomes } => {
@@ -697,6 +785,15 @@ fn discover<G: PublicGame>(
                     let flags = refill(flags, possible[player].iter().copied());
                     for hand in game.hands_ruled_out(node, outcome, player) {
                         flags[hand] = false;
+                    }
+                    let num_hands = flags.len();
+                    for image in game.images(node, outcome, player) {
+                        assert!(
+                            image.len() == num_hands
+                                && image.iter().all(|&hand| (hand as usize) < num_hands),
+                            "an image of outcome {outcome} of node {node} is no permutation of \
+                             player {player}'s {num_hands} hands"
+                        );
                     }
                 }
                 let child = game.child(node, outcome);
@@ -737,6 +834,40 @@ impl<F: Default> Frames<F> {
     /// Gives back the frame a node took, once its children are done.
     pub(crate) fn give(&mut self, frame: F) {
         self.free.push(frame);
+    }
+}
+
+/// Adds to `values` what outcome `outcome` of the chance node `node` contributes to
+/// `player`'s values there: `child`, the values `q(node·outcome, h)` of the child after it, and
+/// then, for each of the outcome's images in the game's order, `child` read through the image's
+/// permutation, as the [module documentation](self#images) defines it.
+pub(crate) fn add_outcome_values<G: PublicGame>(
+    game: &G,
+    node: usize,
+    outcome: usize,
+    player: usize,
+    child: &[f64],
+    values: &mut [f64],
+) {
+    for (value, &child_value) in values.iter_mut().zip(child) {
+        *value += child_value;
+    }
+    for image in game.images(node, outcome, player) {
+        for (value, &hand) in values.iter_mut().zip(image) {
+            *value += child[hand as usize];
+        }
+    }
+}
+
+/// Gives each hand in `values` the value of the first hand of its class in `alike`, if the
+/// game names classes there: see [alike hands](self#alike-hands). Each first hand is its own
+/// entry and comes before the others of its class, so one pass in hand order reads it before it
+/// is written.
+fn share_alike(alike: Option<&[u32]>, values: &mut [f64]) {
+    if let Some(alike) = alike {
+        for hand in 0..values.len() {
+            values[hand] = values[alike[hand] as usize];
+        }
     }
 }
 
@@ -864,6 +995,7 @@ impl<G: PublicGame + Sync> Walk<'_, G> {
                         *value = 0.0;
                     }
                 }
+                share_alike(game.alike(node, self.traverser), values);
             }
             PublicNode::Chance { num_outcomes } if self.branches.is_some() => {
                 self.split_chance(
@@ -897,10 +1029,10 @@ impl<G: PublicGame + Sync> Walk<'_, G> {
                         &frame.possible,
                         child_values,
                     );
-                    for (value, &child_value) in values.iter_mut().zip(&frame.values) {
-                        *value += child_value;
-                    }
+                    let traverser = self.traverser;
+                    add_outcome_values(game, node, outcome, traverser, &frame.values, values);
                 }
+                share_alike(game.alike(node, self.traverser), values);
                 self.workspace.frames.give(frame);
             }
             PublicNode::Player {
@@ -964,11 +1096,17 @@ impl<G: PublicGame + Sync> Walk<'_, G> {
             outcome_values,
         );
         values.fill(0.0);
-        for child_values in outcome_values.chunks_exact(num_hands) {
-            for (value, &child_value) in values.iter_mut().zip(child_values) {
-                *value += child_value;
-            }
+        for (outcome, child_values) in outcome_values.chunks_exact(num_hands).enumerate() {
+            add_outcome_values(
+                self.game,
+                node,
+                outcome,
+                self.traverser,
+                child_values,
+                values,
+            );
         }
+        share_alike(self.game.alike(node, self.traverser), values);
         self.workspace.frames.give(frame);
     }
 
@@ -1191,6 +1329,7 @@ mod tests {
 
     use super::*;
     use crate::public_leduc::PublicLeduc;
+    use crate::public_leduc::merged::{MergedLeduc, SWAP};
     use crate::regret::Dcfr;
 
     fn schedules() -> [Schedule; 4] {
@@ -1366,6 +1505,303 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The largest difference between the full solver's stored values and the merged solver's
+    /// at the counterpart of each node, its hands swapped below a card of suit 1, as a share of
+    /// the largest value of the full solver's slice.
+    fn largest_gap_to_merged(
+        full: &VectorCfr<PublicLeduc>,
+        merged: &VectorCfr<MergedLeduc>,
+    ) -> f64 {
+        let mut largest = 0.0f64;
+        for node in player_nodes(full) {
+            let (counterpart, swapped) = merged.game().counterpart(node);
+            let pairs = [
+                (
+                    full.regrets(node).unwrap(),
+                    merged.regrets(counterpart).unwrap(),
+                ),
+                (
+                    full.strategy_sum(node).unwrap(),
+                    merged.strategy_sum(counterpart).unwrap(),
+                ),
+            ];
+            for (ours, theirs) in pairs {
+                let scale = ours.iter().fold(0.0f32, |most, v| most.max(v.abs()));
+                for (index, &value) in ours.iter().enumerate() {
+                    let (action, hand) = (index / 6, index % 6);
+                    let hand = if swapped { hand ^ 1 } else { hand };
+                    let gap = f64::from((value - theirs[action * 6 + hand]).abs());
+                    if scale > 0.0 {
+                        largest = largest.max(gap / f64::from(scale));
+                    } else {
+                        assert_eq!(gap, 0.0, "node {node}");
+                    }
+                }
+            }
+        }
+        largest
+    }
+
+    #[test]
+    fn a_game_with_images_iterates_as_the_game_it_merges() {
+        // Leduc with each public card of suit 1 an image of the card of suit 0 of its rank. The
+        // merged solver has rows only where the full game's public card is of suit 0 or not
+        // dealt, and after 1, 2 and 3 iterations from zero, under every schedule, each of its
+        // stored values is the full solver's at the same node, and the full solver's after a
+        // card of suit 1 are the merged solver's after the card of suit 0, hands swapped, all
+        // within an f32 rounding or two of the largest in their slice. A walk that dropped an
+        // image, or read it unswapped, would be off by the whole value of the card.
+        let full_nodes = player_nodes(&VectorCfr::new(PublicLeduc::new(), Schedule::Vanilla));
+        for schedule in schedules() {
+            let mut full = VectorCfr::new(PublicLeduc::new(), schedule);
+            let mut merged = VectorCfr::new(MergedLeduc::new(), schedule);
+            let merged_nodes = player_nodes(&merged);
+            assert_eq!((full_nodes.len(), merged_nodes.len()), (186, 6 + 15 * 6));
+            for &node in &merged_nodes {
+                let card = merged.game().full().public_card(node);
+                assert!(card.is_none_or(|card| card.suit() == 0), "{node}");
+            }
+            for t in 1..=3 {
+                full.iterate();
+                merged.iterate();
+                let gap = largest_gap_to_merged(&full, &merged);
+                assert!(gap <= 2.5e-7, "{schedule:?}, iteration {t}: {gap:e}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_iteration_with_images_on_several_threads_is_the_one_on_one_thread_bit_for_bit() {
+        // The merged game's chance nodes have three outcomes, each child of a split adding its
+        // image after its own values, in outcome order, on every thread count.
+        for schedule in schedules() {
+            let mut alone = VectorCfr::new(MergedLeduc::new(), schedule);
+            alone.run(40, |_| {});
+            for threads in [2, 5, 16] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let mut pooled = VectorCfr::new(MergedLeduc::new(), schedule);
+                pool.install(|| pooled.run(40, |_| {}));
+                assert_eq!(pooled.branches.len(), 3, "{threads} threads");
+                assert_eq!(
+                    stored_bits(&pooled),
+                    stored_bits(&alone),
+                    "{schedule:?}, {threads} threads"
+                );
+            }
+        }
+    }
+
+    /// A game whose one image of each outcome is one hand short.
+    struct ShortImages(MergedLeduc);
+
+    impl PublicGame for ShortImages {
+        fn num_hands(&self, player: usize) -> usize {
+            self.0.num_hands(player)
+        }
+
+        fn deal(&self, player: usize) -> &[f64] {
+            self.0.deal(player)
+        }
+
+        fn num_nodes(&self) -> usize {
+            self.0.num_nodes()
+        }
+
+        fn root(&self) -> usize {
+            self.0.root()
+        }
+
+        fn node(&self, node: usize) -> PublicNode {
+            self.0.node(node)
+        }
+
+        fn child(&self, node: usize, index: usize) -> usize {
+            self.0.child(node, index)
+        }
+
+        fn outcome_probability(&self, node: usize, outcome: usize) -> f64 {
+            self.0.outcome_probability(node, outcome)
+        }
+
+        fn rules_out(&self, node: usize, outcome: usize, player: usize, hand: usize) -> bool {
+            self.0.rules_out(node, outcome, player, hand)
+        }
+
+        fn images(&self, _: usize, _: usize, _: usize) -> impl Iterator<Item = &[u32]> {
+            iter::once(&SWAP[..5])
+        }
+
+        fn terminal_values(&self, node: usize, player: usize, reach: &[f64], values: &mut [f64]) {
+            self.0.terminal_values(node, player, reach, values);
+        }
+    }
+
+    /// A game for the tests of alike hands, with two hands a side: player 0's node at the root,
+    /// each of whose two actions leads to a chance node of two outcomes, each to a terminal.
+    /// Every terminal pays player 0 an amount that depends on its hand, so that its two hands
+    /// are not alike, and the game says they are at the terminals, at the chance nodes, or
+    /// nowhere, as `alike_at` gives.
+    struct Unalike {
+        alike_at: Option<PublicNode>,
+        /// What the game gives as the classes.
+        classes: [u32; 2],
+    }
+
+    impl Unalike {
+        const NODES: [(PublicNode, [usize; 2]); 7] = [
+            (BET, [1, 4]),
+            (PublicNode::Chance { num_outcomes: 2 }, [2, 3]),
+            (PublicNode::Terminal, [0, 0]),
+            (PublicNode::Terminal, [0, 0]),
+            (PublicNode::Chance { num_outcomes: 2 }, [5, 6]),
+            (PublicNode::Terminal, [0, 0]),
+            (PublicNode::Terminal, [0, 0]),
+        ];
+
+        fn at(alike_at: Option<PublicNode>) -> Unalike {
+            Unalike {
+                alike_at,
+                classes: [0, 0],
+            }
+        }
+    }
+
+    impl PublicGame for Unalike {
+        fn num_hands(&self, _player: usize) -> usize {
+            2
+        }
+
+        fn deal(&self, _player: usize) -> &[f64] {
+            &[0.5, 0.5]
+        }
+
+        fn num_nodes(&self) -> usize {
+            Unalike::NODES.len()
+        }
+
+        fn root(&self) -> usize {
+            0
+        }
+
+        fn node(&self, node: usize) -> PublicNode {
+            Unalike::NODES[node].0
+        }
+
+        fn child(&self, node: usize, index: usize) -> usize {
+            Unalike::NODES[node].1[index]
+        }
+
+        fn outcome_probability(&self, _node: usize, _outcome: usize) -> f64 {
+            0.5
+        }
+
+        fn rules_out(&self, _: usize, _: usize, _: usize, _: usize) -> bool {
+            false
+        }
+
+        /// Player 0's two hands, where the game says so; player 1's never.
+        fn alike(&self, node: usize, player: usize) -> Option<&[u32]> {
+            let kind = match self.node(node) {
+                PublicNode::Chance { .. } => PublicNode::Chance { num_outcomes: 2 },
+                other => other,
+            };
+            (player == 0 && self.alike_at == Some(kind)).then_some(&self.classes[..])
+        }
+
+        /// Player 0 wins the node's index times a third, and with hand 1 a tenth of the index
+        /// more; player 1 loses as much.
+        fn terminal_values(&self, node: usize, player: usize, reach: &[f64], values: &mut [f64]) {
+            let opponent: f64 = reach.iter().sum();
+            for (hand, value) in values.iter_mut().enumerate() {
+                let won = (node as f64 / 3.0) * (1.0 + 0.3 * hand as f64);
+                *value = opponent * if player == 0 { won } else { -won };
+            }
+        }
+    }
+
+    #[test]
+    fn the_walk_gives_alike_hands_their_first_hands_value_at_terminals_and_chance_nodes() {
+        // Hand 1 of player 0 is paid more than hand 0, so its regrets at the root differ. Alike
+        // at the terminals, or at the chance nodes above them, it is given hand 0's values there,
+        // so its regrets at the root are hand 0's bit for bit, on one thread and on four, where
+        // the chance nodes split.
+        let root_regrets = |game: Unalike, threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let mut solver = VectorCfr::new(game, Schedule::Vanilla);
+            pool.install(|| solver.run(3, |_| {}));
+            let bits: Vec<u32> = solver
+                .regrets(0)
+                .unwrap()
+                .iter()
+                .map(|r| r.to_bits())
+                .collect();
+            bits
+        };
+        let apart = root_regrets(Unalike::at(None), 1);
+        assert!(apart[0] != apart[1] && apart[2] != apart[3], "{apart:?}");
+        for alike_at in [PublicNode::Terminal, PublicNode::Chance { num_outcomes: 2 }] {
+            for threads in [1, 4] {
+                let together = root_regrets(Unalike::at(Some(alike_at)), threads);
+                assert_eq!(together[0], together[1], "{alike_at:?}, {threads} threads");
+                assert_eq!(together[2], together[3], "{alike_at:?}, {threads} threads");
+                // Hand 0's own values are unchanged.
+                assert_eq!((together[0], together[2]), (apart[0], apart[2]));
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "are not classes")]
+    fn alike_hands_must_be_named_by_their_first_hand() {
+        let game = Unalike {
+            alike_at: Some(PublicNode::Terminal),
+            classes: [1, 1],
+        };
+        VectorCfr::new(game, Schedule::Vanilla);
+    }
+
+    #[test]
+    fn leduc_merged_and_with_its_first_round_hands_alike_keeps_them_alike() {
+        // In the first round the swap of the suits keeps every node, so the merged Leduc says
+        // each card is alike to the card of its rank in the other suit there. After 40
+        // iterations under every schedule, on one thread and on four, the two cards of a rank
+        // store the same values bit for bit at every first-round node.
+        for schedule in schedules() {
+            for threads in [1, 4] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let mut solver = VectorCfr::new(MergedLeduc::new(), schedule);
+                pool.install(|| solver.run(40, |_| {}));
+                for node in player_nodes(&solver) {
+                    if solver.game().full().public_card(node).is_some() {
+                        continue;
+                    }
+                    for values in [solver.regrets(node), solver.strategy_sum(node)] {
+                        let values = values.unwrap();
+                        for (index, value) in values.iter().enumerate() {
+                            let other = values[index ^ 1];
+                            assert_eq!(value.to_bits(), other.to_bits(), "{schedule:?}, {node}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "no permutation")]
+    fn an_image_of_the_wrong_length_is_rejected() {
+        VectorCfr::new(ShortImages(MergedLeduc::new()), Schedule::Vanilla);
     }
 
     #[test]

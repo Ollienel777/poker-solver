@@ -30,8 +30,10 @@
 //! sums over every runout.
 //!
 //! The fifth invariant of the brief and of issue #30, identical results on suit-isomorphic
-//! boards, is not checked yet. It needs two solves: a board and a suit permutation of it, whose
-//! strategies and values must match hand for hand once the permutation maps the combos.
+//! boards, is not checked here, since it needs two solves: a board and a suit permutation of it,
+//! whose strategies and values must match hand for hand once the permutation maps the combos.
+//! `tests/merged.rs` checks it, within rounding, on the spots written for the merging of
+//! suit-isomorphic cards (DECISIONS P61).
 //!
 //! # Reporting
 //!

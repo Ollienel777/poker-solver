@@ -4,7 +4,7 @@
 //! compare the two outputs line for line.
 //!
 //! ```text
-//! cargo run --release -p pk-postflop --example fingerprint -- <spot file> <iterations> [--threads <n>]
+//! cargo run --release -p pk-postflop --example fingerprint -- <spot file> <iterations> [--threads <n>] [--merged]
 //! cargo run --release -p pk-postflop --example fingerprint -- crates/postflop/tests/data/turn_small.toml 30
 //! cargo run --release -p pk-postflop --example fingerprint -- crates/postflop/tests/data/turn_small.toml 30 --threads 8
 //! ```
@@ -30,6 +30,14 @@
 //! more than one. Without it, everything runs on the main thread, as before the walks could
 //! split. The output does not name the thread count, so that the outputs for every count, and
 //! those made before, compare line for line.
+//!
+//! With `--merged`, the iterations run on the spot's merged game
+//! ([`pk_postflop::merged`]), as a solve with merging on does, when the spot has a symmetry to
+//! merge: the first line says so, the regrets and strategy sums are the merged solver's, node by
+//! node of the merged tree, and everything after is of its average strategy expanded onto the
+//! full tree, measured on the full game, as the solve measures it. On a spot with nothing to
+//! merge the output is the one without `--merged`. Outputs with `--merged` compare with each
+//! other across thread counts and builds, not with those without it.
 
 use std::process::ExitCode;
 
@@ -37,9 +45,9 @@ use pk_cfr::{
     Dcfr, PublicGame, PublicProfile, Schedule, VectorCfr, vector_best_response,
     vector_expected_value,
 };
-use pk_postflop::{PostflopGame, Spot, exploitability, node_values};
+use pk_postflop::{MergedGame, PostflopGame, Spot, exploitability, node_values};
 
-const USAGE: &str = "usage: fingerprint <spot file> <iterations> [--threads <n>]";
+const USAGE: &str = "usage: fingerprint <spot file> <iterations> [--threads <n>] [--merged]";
 
 fn main() -> ExitCode {
     match run() {
@@ -52,7 +60,9 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let merged = args.iter().any(|arg| arg == "--merged");
+    args.retain(|arg| arg != "--merged");
     let (path, iterations, threads) = match args.as_slice() {
         [path, iterations] => (path, iterations, None),
         [path, iterations, flag, threads] if flag == "--threads" => {
@@ -74,32 +84,35 @@ fn run() -> Result<(), String> {
                 .num_threads(threads)
                 .build()
                 .map_err(|e| e.to_string())?;
-            pool.install(|| fingerprint(path, iterations))
+            pool.install(|| fingerprint(path, iterations, merged))
         }
-        None => fingerprint(path, iterations),
+        None => fingerprint(path, iterations, merged),
     }
 }
 
-/// Runs `iterations` iterations on the spot at `path` and prints the fingerprint.
-fn fingerprint(path: &str, iterations: u64) -> Result<(), String> {
+/// Runs `iterations` iterations on the spot at `path`, on its merged game if `merged` and it has
+/// one, and prints the fingerprint.
+fn fingerprint(path: &str, iterations: u64, merged: bool) -> Result<(), String> {
     let spot = Spot::load(path).map_err(|e| e.to_string())?;
     let game = PostflopGame::from_spot(&spot).map_err(|e| e.to_string())?;
-    let mut solver = VectorCfr::new(game, Schedule::Discounted(Dcfr::default()));
-    solver.run(iterations, |_| {});
-    let game = solver.game();
-    println!("{} after {iterations} iterations", spot.name);
-
-    let mut stored = Fnv::new();
-    for node in 0..game.num_nodes() {
-        if let (Some(regrets), Some(sums)) = (solver.regrets(node), solver.strategy_sum(node)) {
-            stored.index(node);
-            stored.f32s(regrets);
-            stored.f32s(sums);
+    let schedule = Schedule::Discounted(Dcfr::default());
+    let merged_game = if merged { MergedGame::new(&game) } else { None };
+    let (stored, average) = match merged_game {
+        Some(merged_game) => {
+            let mut solver = VectorCfr::new(merged_game, schedule);
+            solver.run(iterations, |_| {});
+            println!("{} after {iterations} iterations, merged", spot.name);
+            (stored(&solver), MergedGame::average_strategy(&solver))
         }
-    }
+        None => {
+            let mut solver = VectorCfr::new(game.clone(), schedule);
+            solver.run(iterations, |_| {});
+            println!("{} after {iterations} iterations", spot.name);
+            (stored(&solver), solver.average_strategy())
+        }
+    };
+    let game = &game;
     println!("regrets and strategy sums  {}", stored.hex());
-
-    let average = solver.average_strategy();
     println!("average strategy           {}", profile(&average).hex());
 
     for player in 0..2 {
@@ -140,6 +153,20 @@ fn fingerprint(path: &str, iterations: u64) -> Result<(), String> {
     println!("values                     {:?}", measured.values);
     println!("best responses             {:?}", measured.best_responses);
     Ok(())
+}
+
+/// The hash of a solver's stored values: each node that has a row, with its regrets and
+/// strategy sums.
+fn stored<G: PublicGame>(solver: &VectorCfr<G>) -> Fnv {
+    let mut stored = Fnv::new();
+    for node in 0..solver.game().num_nodes() {
+        if let (Some(regrets), Some(sums)) = (solver.regrets(node), solver.strategy_sum(node)) {
+            stored.index(node);
+            stored.f32s(regrets);
+            stored.f32s(sums);
+        }
+    }
+    stored
 }
 
 /// The hash of a profile: each node that has a strategy, with its probabilities.

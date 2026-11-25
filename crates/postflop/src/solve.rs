@@ -44,6 +44,21 @@
 //! thread. A river spot has no chance node, so it makes no pool and runs on the calling thread,
 //! as does a solve on one thread.
 //!
+//! # Merging
+//!
+//! With [`SolveOptions::merge_isomorphic`], on by default, a spot whose deal a relabelling of
+//! the suits keeps, and which has a chance node, is iterated on its
+//! [merged game](crate::merged): each class of turn or river cards that such a relabelling makes
+//! alike is dealt once, and the solver stores the regrets and strategy sums of the merged tree
+//! only. Everything else is on the full game, which the solve builds and keeps as before: each
+//! measurement expands the merged average strategy onto the full public tree and measures that
+//! profile there, and the [`Solution`] holds the full game and the expanded strategy, so that
+//! nothing that reads a solution knows the solve was merged. A merged iteration is the full
+//! game's in exact arithmetic, and agrees with it within rounding in floating point. With the
+//! option off, or on a spot that no relabelling keeps (an unpaired rainbow flop, a turn of four
+//! suits, ranges that name single combos) or that has no chance node, the solve iterates on the
+//! full game, exactly as without the option.
+//!
 //! # Progress
 //!
 //! The callback is called once per measurement, in iteration order, with a [`Progress`]: every
@@ -58,8 +73,9 @@
 //! strategy after `t` iterations is the same bit for bit in every run, whatever `check_every`,
 //! the target and the caps. The walks give the same results bit for bit on any number of
 //! threads (DECISIONS P5), so the strategy and every measurement are the same whatever
-//! `threads` is too. A time cap makes the number of iterations depend on the machine, but not
-//! the strategy reached at any given number.
+//! `threads` is too, merged or not. A time cap makes the number of iterations depend on the
+//! machine, but not the strategy reached at any given number. A merged solve and the solve with
+//! merging off part within rounding, so they are the same solve only at a tolerance.
 //!
 //! # References
 //!
@@ -83,6 +99,7 @@ use crate::game::{ClassView, PostflopGame};
 use crate::hands::HandList;
 use crate::invariants::debug_assert_valid;
 use crate::memory::{estimate_memory, format_bytes};
+use crate::merged::MergedGame;
 use crate::spot::{Spot, SpotError};
 
 // The tests below build the river game by the name they were written with.
@@ -153,6 +170,11 @@ pub struct SolveOptions {
     /// count. Defaults to [`SolveOptions::default_threads`], all the machine offers. Must be at
     /// least 1.
     pub threads: usize,
+    /// Iterate on the [merged game](crate::merged), which deals once each class of turn or
+    /// river cards that a symmetry of the suits makes alike, when the spot has such a symmetry
+    /// (see [the module documentation](self#merging)). Defaults to true. Off, or on a spot with
+    /// no symmetry to use, the solve iterates on the full game.
+    pub merge_isomorphic: bool,
 }
 
 impl Default for SolveOptions {
@@ -166,6 +188,7 @@ impl Default for SolveOptions {
             max_nodes: PostflopGame::DEFAULT_MAX_NODES,
             max_memory: SolveOptions::DEFAULT_MAX_MEMORY,
             threads: SolveOptions::default_threads(),
+            merge_isomorphic: true,
         }
     }
 }
@@ -376,7 +399,7 @@ impl Solution {
 pub fn solve(
     spot: &Spot,
     options: &SolveOptions,
-    mut progress: impl FnMut(&Progress),
+    progress: impl FnMut(&Progress),
 ) -> Result<Solution, SolveError> {
     let start = Instant::now();
     options.check()?;
@@ -388,24 +411,102 @@ pub fn solve(
         });
     }
     let game = PostflopGame::with_node_limit(spot, options.max_nodes)?;
-    let mut solver = VectorCfr::new(game, options.schedule);
-    // The solve's own pool, when it has threads to share out and chance nodes to split.
-    let pool = if estimate.threads > 1 {
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(options.threads)
-            .build()
-            .map_err(|error| SolveError::Threads {
-                threads: options.threads,
-                reason: error.to_string(),
-            })?;
-        Some(pool)
+    let merged = if options.merge_isomorphic {
+        MergedGame::new(&game)
     } else {
         None
     };
-    let mut measure = |solver: &VectorCfr<PostflopGame>| -> (Progress, PublicProfile) {
-        let (strategy, exploitability) = on_pool(pool.as_ref(), || {
-            let strategy = solver.average_strategy();
-            let exploitability = exploitability(solver.game(), &strategy);
+    match merged {
+        Some(merged) => {
+            let mut solver = VectorCfr::new(merged, options.schedule);
+            let pool = solve_pool(options, estimate.threads)?;
+            Ok(run(&mut solver, options, pool.as_ref(), start, progress))
+        }
+        None => {
+            let mut solver = VectorCfr::new(game, options.schedule);
+            let pool = solve_pool(options, estimate.threads)?;
+            Ok(run(&mut solver, options, pool.as_ref(), start, progress))
+        }
+    }
+}
+
+/// The solve's own pool, when it has threads to share out and chance nodes to split: when the
+/// estimate's thread count is more than one.
+fn solve_pool(options: &SolveOptions, threads: u64) -> Result<Option<ThreadPool>, SolveError> {
+    if threads <= 1 {
+        return Ok(None);
+    }
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(options.threads)
+        .build()
+        .map_err(|error| SolveError::Threads {
+            threads: options.threads,
+            reason: error.to_string(),
+        })?;
+    Ok(Some(pool))
+}
+
+/// What the solve loop iterates: a solver, of the full game or of the merged one, with its
+/// average strategy on the full game's public tree.
+trait Iterated: Sync + Send {
+    fn iterate(&mut self);
+    fn iterations(&self) -> u64;
+    /// The game the solve measures and returns, the full game.
+    fn full_game(&self) -> &PostflopGame;
+    /// The average strategy on the full game's public tree.
+    fn full_average_strategy(&self) -> PublicProfile;
+}
+
+impl Iterated for VectorCfr<PostflopGame> {
+    fn iterate(&mut self) {
+        VectorCfr::iterate(self);
+    }
+
+    fn iterations(&self) -> u64 {
+        VectorCfr::iterations(self)
+    }
+
+    fn full_game(&self) -> &PostflopGame {
+        self.game()
+    }
+
+    fn full_average_strategy(&self) -> PublicProfile {
+        self.average_strategy()
+    }
+}
+
+impl Iterated for VectorCfr<MergedGame<'_>> {
+    fn iterate(&mut self) {
+        VectorCfr::iterate(self);
+    }
+
+    fn iterations(&self) -> u64 {
+        VectorCfr::iterations(self)
+    }
+
+    fn full_game(&self) -> &PostflopGame {
+        self.game().full()
+    }
+
+    /// The merged average strategy, expanded onto the full tree.
+    fn full_average_strategy(&self) -> PublicProfile {
+        MergedGame::average_strategy(self)
+    }
+}
+
+/// The solve loop of the [module documentation](self#the-loop) on `solver`, just built:
+/// iterating, measuring and stopping, then the solution.
+fn run(
+    solver: &mut impl Iterated,
+    options: &SolveOptions,
+    pool: Option<&ThreadPool>,
+    start: Instant,
+    mut progress: impl FnMut(&Progress),
+) -> Solution {
+    let mut measure = |solver: &dyn Iterated| -> (Progress, PublicProfile) {
+        let (strategy, exploitability) = on_pool(pool, || {
+            let strategy = solver.full_average_strategy();
+            let exploitability = exploitability(solver.full_game(), &strategy);
             (strategy, exploitability)
         });
         let measured = Progress {
@@ -424,9 +525,9 @@ pub fn solve(
         if options.max_time.is_some_and(|cap| start.elapsed() >= cap) {
             break StopReason::TimeCap;
         }
-        on_pool(pool.as_ref(), || solver.iterate());
+        on_pool(pool, || solver.iterate());
         if solver.iterations().is_multiple_of(options.check_every) {
-            let measured = measure(&solver);
+            let measured = measure(&*solver);
             let reached = options
                 .target
                 .is_some_and(|target| measured.0.exploitability.percent_of_pot <= target);
@@ -440,10 +541,10 @@ pub fn solve(
         Some((measured, strategy)) if measured.iterations == solver.iterations() => {
             (measured, strategy)
         }
-        _ => measure(&solver),
+        _ => measure(&*solver),
     };
     let solution = Solution {
-        game: solver.game().clone(),
+        game: solver.full_game().clone(),
         strategy,
         stop,
         iterations: measured.iterations,
@@ -452,7 +553,7 @@ pub fn solve(
     };
     // A debug assertion, which the elapsed time does not count.
     debug_assert_valid(&solution);
-    Ok(solution)
+    solution
 }
 
 /// Runs `walk` on the solve's pool, if it has one, and otherwise on the calling thread.

@@ -1,0 +1,19 @@
+format = 1
+name = "flop_paired"
+description = "Illustrative ranges, not from a reference: made up for the tests of merging suit-isomorphic cards. A paired flop, on which the suits of the pair are alike, with ranges written in hand classes and few enough hands for the fast tests. The only bet on each street is all-in."
+board = "9s9h5d"
+pot_bb = 10.0
+effective_stack_bb = 5.0
+oop_range = "AA,KQs:0.45,QJs,87s:0.6,55"
+ip_range = "KK:0.75,99,AJs,T8s:0.35,65s"
+
+[rake]
+percent = 5.0
+cap_bb = 3.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+flop = { bets = [1.0], raises = [], allin = false }
+turn = { bets = [1.0], raises = [], allin = false }
+river = { bets = [1.0], raises = [], allin = false }

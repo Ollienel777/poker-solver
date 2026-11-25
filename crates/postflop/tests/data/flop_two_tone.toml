@@ -1,0 +1,19 @@
+format = 1
+name = "flop_two_tone"
+description = "Illustrative ranges, not from a reference: made up for the tests of merging suit-isomorphic cards. A two-tone flop, on which the two suits off the board are alike, with ranges written in hand classes and few enough hands for the fast tests. The only bet on each street is all-in."
+board = "Qh8h3c"
+pot_bb = 10.0
+effective_stack_bb = 5.0
+oop_range = "AA:0.7,KQs,JTs:0.55,76s,A5s:0.3"
+ip_range = "QQ,88:0.65,AKs,T9s:0.4,65s"
+
+[rake]
+percent = 5.0
+cap_bb = 3.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+flop = { bets = [1.0], raises = [], allin = false }
+turn = { bets = [1.0], raises = [], allin = false }
+river = { bets = [1.0], raises = [], allin = false }

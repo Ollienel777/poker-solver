@@ -21,8 +21,9 @@
 //!
 //! where `v*_i` is the responder's value when it plays the best response below `n`. At a
 //! terminal that comes from [`PublicGame::terminal_values`], at a chance node it is the sum
-//! over the outcomes, at a node of `j` the sum over the actions, and it is zero for a hand
-//! ruled out at `n`. At a node `n` of the responder,
+//! over the outcomes, each followed by its images as [`crate::vector`] defines them (see
+//! [its images](crate::vector#images)), at a node of `j` the sum over the actions, and it is
+//! zero for a hand ruled out at `n`. At a node `n` of the responder,
 //!
 //! ```text
 //! q*(n, h) = max_a q*(n·a, h)
@@ -45,6 +46,8 @@
 //! ```
 //!
 //! in the game's units when the deal's probabilities sum to 1 (see [`PublicGame::deal`]).
+//! On a game with images, an image's subtree has no node of its own, so the best response there
+//! is the outcome's relabelled, and the strategy the walk returns has no entry for it.
 //!
 //! Every quantity is `f64`, and the `f32` probabilities of `σ` are widened exactly.
 //!
@@ -86,11 +89,12 @@
 //! its inputs from the chance node's, walks its subtree on one thread with a workspace of its
 //! own, the walk's workspace `o` for a chance node's children, and writes its values into its
 //! own slice of the chance node's frame; once every child has returned, the chance node adds
-//! them up in outcome order, starting from zero. Every value is then the walk on one thread's,
-//! bit for bit, whatever the number of threads. A best response's choice at a node depends only
-//! on the values below it, and each node of the responder is set once, by the walk of the child
-//! that holds it, so its strategy is the same too. The children's walks set their choices in
-//! the one strategy the walk returns, through a lock.
+//! them up in outcome order, starting from zero, each followed by its outcome's images as on one
+//! thread. Every value is then the walk on one thread's, bit for bit, whatever the number of
+//! threads. A best response's choice at a node depends only on the values below it, and each
+//! node of the responder is set once, by the walk of the child that holds it, so its strategy is
+//! the same too. The children's walks set their choices in the one strategy the walk returns,
+//! through a lock.
 //!
 //! # Exploitability
 //!
@@ -110,7 +114,8 @@ use std::sync::{Mutex, PoisonError};
 use std::{iter, mem};
 
 use crate::vector::{
-    Frames, PublicGame, PublicNode, PublicProfile, check_game, refill, resized, splits_chance_nodes,
+    Frames, PublicGame, PublicNode, PublicProfile, add_outcome_values, check_game, refill, resized,
+    splits_chance_nodes,
 };
 
 /// A best response of one player to the other's strategy, from [`vector_best_response`].
@@ -400,10 +405,15 @@ impl<G: PublicGame + Sync> Split<'_, G> {
             &walk_one,
         );
         values.fill(0.0);
-        for child_values in outcome_values.chunks_exact(num_hands) {
-            for (value, &child_value) in values.iter_mut().zip(child_values) {
-                *value += child_value;
-            }
+        for (outcome, child_values) in outcome_values.chunks_exact(num_hands).enumerate() {
+            add_outcome_values(
+                self.game,
+                self.node,
+                outcome,
+                self.player,
+                child_values,
+                values,
+            );
         }
         workspace.frames.give(frame);
     }
@@ -519,9 +529,7 @@ impl<G: PublicGame + Sync> Follow<'_, G> {
                     let child = game.child(node, outcome);
                     let child_values = resized(&mut frame.values, num_hands, 0.0);
                     self.visit(child, &frame.opponent_reach, &frame.possible, child_values);
-                    for (value, &child_value) in values.iter_mut().zip(&frame.values) {
-                        *value += child_value;
-                    }
+                    add_outcome_values(game, node, outcome, self.player, &frame.values, values);
                 }
                 self.workspace.frames.give(frame);
             }
@@ -669,9 +677,7 @@ impl<G: PublicGame + Sync> Respond<'_, G> {
                     let child = game.child(node, outcome);
                     let child_values = resized(&mut frame.values, num_hands, 0.0);
                     self.visit(child, &frame.opponent_reach, &frame.possible, child_values);
-                    for (value, &child_value) in values.iter_mut().zip(&frame.values) {
-                        *value += child_value;
-                    }
+                    add_outcome_values(game, node, outcome, self.player, &frame.values, values);
                 }
                 self.workspace.frames.give(frame);
             }
@@ -744,6 +750,7 @@ mod tests {
     use crate::best_response::{best_response, exploitability};
     use crate::leduc::{Leduc, LeducAction, LeducInfoSet};
     use crate::public_leduc::PublicLeduc;
+    use crate::public_leduc::merged::MergedLeduc;
     use crate::regret::{Dcfr, Schedule};
     use crate::tabular::{Cfr, Profile, expected_values};
     use crate::vector::VectorCfr;
@@ -985,6 +992,99 @@ mod tests {
                     exploitability.to_bits(),
                     "{at}"
                 );
+            }
+        }
+    }
+
+    /// A profile of Leduc that the swap of the suits keeps: at each node, each hand plays what
+    /// the hand of the other suit plays at the node the swap maps it to, the weights made up
+    /// from `seed`, with about one probability in five zero.
+    fn symmetric_profile(merged: &MergedLeduc, seed: usize) -> PublicProfile {
+        let game = merged.full();
+        PublicProfile::from_fn(game, |node, hand| {
+            let (counterpart, swapped) = merged.counterpart(node);
+            let hand = if swapped { hand ^ 1 } else { hand };
+            // In the first round the swap maps each node to itself, so a hand plays as the
+            // hand of its rank in the other suit does.
+            let hand = if game.public_card(node).is_none() {
+                hand / 2
+            } else {
+                hand
+            };
+            let PublicNode::Player { num_actions, .. } = game.node(node) else {
+                unreachable!("from_fn asks at player nodes only");
+            };
+            let mut weights: Vec<f32> = (0..num_actions)
+                .map(|action| {
+                    let mixed = (counterpart * 7 + hand * 13 + action * 31 + seed * 17) % 23;
+                    if mixed < 5 { 0.0 } else { mixed as f32 }
+                })
+                .collect();
+            if weights.iter().all(|&w| w == 0.0) {
+                weights[0] = 1.0;
+            }
+            let total: f32 = weights.iter().sum();
+            weights.iter().map(|w| w / total).collect()
+        })
+    }
+
+    #[test]
+    fn on_a_game_with_images_the_walks_give_the_values_of_the_game_it_merges() {
+        // For profiles that the swap of the suits keeps, each best response's value, hand
+        // values and choices, and each expected value, on Leduc with the cards of suit 1
+        // merged into those of suit 0, are those on Leduc itself, within 1e-12. The merged walks
+        // never reach a node after a card of suit 1.
+        let merged = MergedLeduc::new();
+        let full = merged.full();
+        for seed in 0..6 {
+            let profile = symmetric_profile(&merged, seed);
+            for player in 0..2 {
+                let ours = vector_best_response(&merged, &profile, player);
+                let theirs = vector_best_response(full, &profile, player);
+                assert!((ours.value - theirs.value).abs() < 1e-12, "seed {seed}");
+                for (a, b) in ours.hand_values.iter().zip(&theirs.hand_values) {
+                    assert!((a - b).abs() < 1e-12, "seed {seed}");
+                }
+                for node in ours.strategy.nodes() {
+                    assert_eq!(merged.counterpart(node), (node, false));
+                    assert_eq!(ours.strategy.get(node), theirs.strategy.get(node), "{node}");
+                }
+                assert_eq!(ours.strategy.nodes().count(), 48, "seed {seed}");
+                let ours = vector_expected_value(&merged, &profile, player);
+                let theirs = vector_expected_value(full, &profile, player);
+                assert!((ours.value - theirs.value).abs() < 1e-12, "seed {seed}");
+            }
+            let gap =
+                vector_exploitability(&merged, &profile) - vector_exploitability(full, &profile);
+            assert!(gap.abs() < 1e-12, "seed {seed}: {gap:e}");
+        }
+    }
+
+    #[test]
+    fn with_images_on_several_threads_the_walks_give_what_they_give_on_one_bit_for_bit() {
+        let merged = MergedLeduc::new();
+        let bits = |values: &[f64]| -> Vec<u64> { values.iter().map(|v| v.to_bits()).collect() };
+        let walks = |profile: &PublicProfile| {
+            let responses = [0, 1].map(|p| vector_best_response(&merged, profile, p));
+            let values = [0, 1].map(|p| vector_expected_value(&merged, profile, p));
+            (responses, values)
+        };
+        for seed in 0..3 {
+            let profile = symmetric_profile(&merged, seed);
+            let (responses, values) = walks(&profile);
+            for threads in [2, 5, 16] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let (pooled, pooled_values) = pool.install(|| walks(&profile));
+                for player in 0..2 {
+                    let (one, many) = (&responses[player], &pooled[player]);
+                    assert_eq!(bits(&many.hand_values), bits(&one.hand_values), "{threads}");
+                    assert_eq!(many.strategy, one.strategy, "{threads}");
+                    let (one, many) = (&values[player], &pooled_values[player]);
+                    assert_eq!(bits(&many.hand_values), bits(&one.hand_values), "{threads}");
+                }
             }
         }
     }

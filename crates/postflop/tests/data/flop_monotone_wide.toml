@@ -1,0 +1,19 @@
+format = 1
+name = "flop_monotone_wide"
+description = "Illustrative ranges, not from a reference: made up for the tests of merging suit-isomorphic cards. The monotone flop of flop_monotone with ranges of 191 and 164 hands, in hand classes, wide enough that the merged solver, left to itself, rounds two hands that a symmetry of the suits makes alike apart within a few iterations. The only bet on each street is all-in."
+board = "Qs8s3s"
+pot_bb = 10.0
+effective_stack_bb = 5.0
+oop_range = "22+,A2s+,K9s+,QTs+,JTs,T9s,98s,ATo+"
+ip_range = "33+,A5s+,KTs+,QJs,JTs,T9s,87s,AJo+,KQo"
+
+[rake]
+percent = 5.0
+cap_bb = 3.0
+
+[tree]
+max_raises = 0
+allin_threshold = 1.0
+flop = { bets = [1.0], raises = [], allin = false }
+turn = { bets = [1.0], raises = [], allin = false }
+river = { bets = [1.0], raises = [], allin = false }

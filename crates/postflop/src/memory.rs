@@ -13,11 +13,12 @@
 //! capacities of its vectors, on the machine the code is built for.
 //!
 //! - **Regrets and strategy sums**: one `f32` of each per action and hand of the acting player
-//!   at every player node of the public tree. The hands are all of the player's hands on the
-//!   spot's board, on every street (DECISIONS P25).
-//! - **Solver bookkeeping**: `pk_cfr::VectorCfr`'s index from every public node to its row,
-//!   16 bytes a node, the row headers, and a `bool` per hand at each player node saying whether
-//!   the hand is possible there.
+//!   at every player node of the tree the solver iterates on: the public tree, or the merged
+//!   tree when the solve merges (see [A merged solve](#a-merged-solve)). The hands are all of the
+//!   player's hands on the spot's board, on every street (DECISIONS P25).
+//! - **Solver bookkeeping**: `pk_cfr::VectorCfr`'s index from every node of that tree to its
+//!   row, 16 bytes a node, the row headers, and a `bool` per hand at each player node saying
+//!   whether the hand is possible there.
 //! - **Public tree**: a record for every node, and the children and cards of each player and
 //!   chance node, each its own allocation.
 //! - **Hands on each board**: a `BoardHands` for every board the tree reaches, with each
@@ -50,6 +51,26 @@
 //!   game, made while the solver still holds the original.
 //! - **Invariant check**: in a build with debug assertions, the check of the solution that the
 //!   solve makes before it returns ([`crate::invariants`]). Zero in a release build.
+//!
+//! # A merged solve
+//!
+//! When the solve iterates on the [merged game](crate::merged), the estimate counts the merged
+//! tree from the betting tree and the classes of cards at each chance node, which
+//! [`NextCards`](pk_core::NextCards) gives for the spot's board and for each turn's
+//! representative, without building either game. It counts:
+//!
+//! - the solver's rows, bookkeeping and CFR walk on the merged tree, whose split chance nodes
+//!   have one outcome per class;
+//! - **Merged game**: its nodes, its chance nodes' representatives, children and images, the
+//!   counterpart of every node of the full tree, each player's hands relabelled by each member
+//!   of `Γ`, and the stabilizers of its nodes with the classes of alike hands of each, held from
+//!   the solver's start to the end of the solve, beside the full game;
+//! - everything measured on the full tree as before: the profiles, the best response and the
+//!   measurement walks, and the room in which the expansion of the average strategy onto the
+//!   full tree holds one node's strategy.
+//!
+//! The boards and the public tree are the full game's, which the solve holds as it does without
+//! merging.
 //!
 //! # When the most is held
 //!
@@ -119,12 +140,16 @@ use std::fmt;
 use std::mem::size_of;
 use std::ops::{Add, AddAssign, Mul};
 
-use pk_core::{CardSet, Combo, HandRank, NUM_CARDS};
+use pk_core::{CardSet, Combo, DealtBoard, HandRank, NUM_CARDS, SuitGroup, SuitPermutation};
 use pk_game::{Action, Node, Player, PostflopTree, Street};
 use serde::Serialize;
 
 use crate::expected_rake::TerminalOutcome;
 use crate::game::{BOARD_BYTES, PUBLIC_NODE_BYTES};
+use crate::merged::{
+    COUNTERPART_BYTES, IMAGE_BYTES, MERGED_CHANCE_BYTES, MERGED_NODE_BYTES, STABILIZER_BYTES,
+    merging_group,
+};
 use crate::payoff::Payoff;
 use crate::solve::{SolveError, SolveOptions};
 use crate::spot::Spot;
@@ -229,6 +254,14 @@ const RANKED: u64 = size_of::<(HandRank, u32)>() as u64;
 /// An entry of the invariant check's stack: a node and both players' reaches.
 const REACH_ENTRY: u64 = size_of::<(u32, [Vec<f64>; 2])>() as u64;
 const TERMINAL: u64 = size_of::<TerminalOutcome>() as u64;
+const MERGED_NODE: u64 = MERGED_NODE_BYTES as u64;
+const MERGED_CHANCE: u64 = MERGED_CHANCE_BYTES as u64;
+const IMAGE: u64 = IMAGE_BYTES as u64;
+const COUNTERPART: u64 = COUNTERPART_BYTES as u64;
+const STABILIZER: u64 = STABILIZER_BYTES as u64;
+const MEMBER: u64 = size_of::<SuitPermutation>() as u64;
+/// The vector of one player's hands relabelled by one member of `Γ`.
+const RELABELLED: u64 = size_of::<Vec<u32>>() as u64;
 
 /// The phase of a solve that holds the most memory: see the
 /// [module documentation](self#when-the-most-is-held).
@@ -265,8 +298,14 @@ pub struct MemoryEstimate {
     pub terminal_nodes: u64,
     /// The boards the public tree reaches, the spot's included.
     pub boards: u64,
+    /// Whether the solve iterates on the [merged game](crate::merged).
+    pub merged: bool,
+    /// The nodes of the merged tree, and its player nodes: 0 when the solve does not merge.
+    pub merged_nodes: u64,
+    pub merged_player_nodes: u64,
     /// The values in each of the solver's two arrays: actions times the acting player's hands,
-    /// summed over the player nodes.
+    /// summed over the player nodes of the tree the solver iterates on, the merged one when the
+    /// solve merges.
     pub stored_values: u64,
 
     pub regrets_and_sums: u64,
@@ -278,6 +317,8 @@ pub struct MemoryEstimate {
     pub board_hands: u64,
     /// The betting tree, the payoffs and the deal.
     pub betting_tree: u64,
+    /// The merged game, held beside the full one: 0 when the solve does not merge.
+    pub merged_game: u64,
     /// One average-strategy profile.
     pub average_strategy: u64,
     /// The most average-strategy profiles the solve holds at once: 2 when it can measure
@@ -558,6 +599,130 @@ fn census(tree: &PostflopTree, hands: [u64; 2]) -> Census {
     census
 }
 
+/// Counts over the merged tree, from the betting tree and the classes of cards at each chance
+/// node.
+#[derive(Default)]
+struct MergedCensus {
+    public_nodes: u64,
+    player_nodes: u64,
+    chance_nodes: u64,
+    /// Σ actions over the merged player nodes.
+    actions: u64,
+    /// Σ actions × the actor's hands over each player's merged player nodes.
+    stored: [u64; 2],
+    /// Σ the actor's hands over the merged player nodes.
+    flags: u64,
+    /// Σ outcomes, the classes, over the merged chance nodes.
+    outcomes: u64,
+    /// Σ images over the merged chance nodes, and the chance nodes that have any.
+    images: u64,
+    with_images: u64,
+    /// By street: the outcomes of a merged chance node that deals the spot's next card, the
+    /// node a walk splits.
+    split_outcomes: [u64; 3],
+    /// The stabilizers of the merged nodes, each once.
+    stabilizers: Vec<SuitGroup>,
+}
+
+/// The merged tree's counts. Each betting node stands for as many merged nodes as there are
+/// classes of the cards dealt on its line: on a flop spot one on the flop, the turn's classes on
+/// the turn, and on the river the river's classes after each turn's representative, summed.
+fn merged_census(
+    tree: &PostflopTree,
+    hands: [u64; 2],
+    board: CardSet,
+    group: SuitGroup,
+) -> MergedCensus {
+    let start = DealtBoard::new(board).expect("a spot's board has 3 to 5 cards");
+    let index = |street: Street| street as usize;
+    // By street: the merged copies of a betting node on it, and the copies of a chance node
+    // dealing it that have images.
+    let mut copies = [0u64; 3];
+    let mut with_images = [0u64; 3];
+    let mut split_outcomes = [0u64; 3];
+    // The stabilizer of each board the merged tree reaches: the spot's, each turn's
+    // representative, and on a flop spot whose tree reaches the river each river's after each.
+    let mut stabilizers: Vec<SuitGroup> = Vec::new();
+    let mut stabilizer_of = |board: DealtBoard| {
+        let stabilizer = board.symmetries().intersection(group);
+        if !stabilizers.contains(&stabilizer) {
+            stabilizers.push(stabilizer);
+        }
+    };
+    stabilizer_of(start);
+    let reaches_river = tree.nodes().iter().any(|node| {
+        matches!(
+            node,
+            Node::Chance {
+                street: Street::River,
+                ..
+            }
+        )
+    });
+    let first = index(tree.spec().street);
+    copies[first] = 1;
+    if first < 2 {
+        let next = start.next_cards_within(group);
+        let classes = next.classes().len() as u64;
+        copies[first + 1] = classes;
+        split_outcomes[first + 1] = classes;
+        with_images[first + 1] = u64::from(classes < next.live_cards().len() as u64);
+        for class in next.classes() {
+            let dealt = start
+                .deal(class.representative())
+                .expect("a representative is off the board");
+            stabilizer_of(dealt);
+            if first == 0 {
+                let rivers = dealt.next_cards_within(group);
+                let classes = rivers.classes().len() as u64;
+                copies[2] += classes;
+                with_images[2] += u64::from(classes < rivers.live_cards().len() as u64);
+                if reaches_river {
+                    for river in rivers.classes() {
+                        let dealt = dealt
+                            .deal(river.representative())
+                            .expect("a representative is off the board");
+                        stabilizer_of(dealt);
+                    }
+                }
+            }
+        }
+    }
+    let mut census = MergedCensus {
+        split_outcomes,
+        stabilizers,
+        ..MergedCensus::default()
+    };
+    for node in tree.nodes() {
+        match node {
+            Node::Player {
+                street,
+                actor,
+                children,
+                ..
+            } => {
+                let (m, p, a) = (copies[index(*street)], actor.index(), children.len() as u64);
+                census.public_nodes += m;
+                census.player_nodes += m;
+                census.actions += m * a;
+                census.stored[p] += m * a * hands[p];
+                census.flags += m * hands[p];
+            }
+            Node::Chance { street, .. } => {
+                let dealt = index(*street);
+                let m = copies[dealt - 1];
+                census.public_nodes += m;
+                census.chance_nodes += m;
+                census.outcomes += copies[dealt];
+                census.images += m * outcomes(*street) - copies[dealt];
+                census.with_images += with_images[dealt];
+            }
+            Node::Terminal { .. } => census.public_nodes += copies[index(node.street())],
+        }
+    }
+    census
+}
+
 /// Which walk a workspace is for.
 #[derive(Clone, Copy, PartialEq)]
 enum Walk {
@@ -627,7 +792,17 @@ impl Needs {
 /// the room at a terminal, which the walk's own then never needs. The children of index `o` of
 /// every chance node split share workspace `o`, so each workspace is counted as large as the
 /// most any child needs at each depth.
-fn workspace(tree: &PostflopTree, hands: [u64; 2], walk: Walk, terminal: u64, split: bool) -> Heap {
+///
+/// `split_outcomes(street)` is the number of outcomes of a split chance node that deals
+/// `street`: the cards off its board on the full tree, and their classes on the merged one.
+fn workspace(
+    tree: &PostflopTree,
+    hands: [u64; 2],
+    walk: Walk,
+    terminal: u64,
+    split: bool,
+    split_outcomes: impl Fn(Street) -> u64,
+) -> Heap {
     let nodes = tree.nodes();
     let n = hands[0].max(hands[1]);
     let cfr = walk == Walk::Cfr;
@@ -659,7 +834,7 @@ fn workspace(tree: &PostflopTree, hands: [u64; 2], walk: Walk, terminal: u64, sp
             (Node::Terminal { .. }, _) => continue,
             // Every outcome's values.
             (Node::Chance { street, .. }, _) if splits => {
-                let outcomes = outcomes(*street);
+                let outcomes = split_outcomes(*street);
                 branches = branches.max(outcomes);
                 let values = match walk {
                     Walk::Cfr => n,
@@ -751,6 +926,13 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         });
     }
     let [n0, n1] = hands;
+    // Whether the solve iterates on the merged game, as `MergedGame::new` decides it.
+    let group = merging_group(
+        spot.board,
+        [root.hands(Player::Oop), root.hands(Player::Ip)],
+    );
+    let merged = (options.merge_isomorphic && census.chance_nodes > 0 && !group.is_trivial())
+        .then(|| merged_census(&tree, hands, spot.board, group));
     // The threads the walks run on: a spot with no chance node runs on the calling thread.
     let threads = if census.chance_nodes > 0 {
         (options.threads as u64).max(1)
@@ -854,18 +1036,69 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
     let game = betting + public_tree + board_hands;
     let game_copy = betting_copy + public_tree + board_hands_copy;
 
+    // The tree the solver iterates on, the merged one when the solve merges: its nodes, player
+    // nodes, stored values and flags.
+    let (solver_nodes, solver_player_nodes, stored, flags) = match &merged {
+        Some(merged) => (
+            merged.public_nodes,
+            merged.player_nodes,
+            merged.stored[0] + merged.stored[1],
+            merged.flags,
+        ),
+        None => (
+            census.public_nodes,
+            census.player_nodes,
+            census.stored[0] + census.stored[1],
+            census.flags,
+        ),
+    };
     // The solver: its index of rows, the rows, and each row's flags, regrets and sums.
-    let stored = census.stored[0] + census.stored[1];
-    let rows = grown(census.player_nodes, ROW_BYTES);
-    let regrets_and_sums = Heap::spread(8 * stored, 2 * census.player_nodes);
-    let bookkeeping = Heap::one(census.public_nodes * ROW_INDEX_BYTES)
+    let rows = grown(solver_player_nodes, ROW_BYTES);
+    let regrets_and_sums = Heap::spread(8 * stored, 2 * solver_player_nodes);
+    let bookkeeping = Heap::one(solver_nodes * ROW_INDEX_BYTES)
         + Heap::one(rows * ROW_BYTES)
-        + Heap::spread(census.flags, census.player_nodes);
+        + Heap::spread(flags, solver_player_nodes);
     let solver = regrets_and_sums + bookkeeping;
 
-    // A profile: an entry per node, and a strategy per player node.
+    // The merged game: its nodes, grown by pushes, and each player node's children; its chance
+    // nodes, grown by pushes, each with its representatives, its children, where each
+    // outcome's images start and the images; the counterpart of every node of the full tree;
+    // the members of `Γ`, collected from a filter; each player's hands relabelled by each; and
+    // the stabilizers of its nodes, grown by pushes, each that holds more than the identity
+    // with each player's classes of alike hands.
+    let merged_game = match &merged {
+        Some(merged) => {
+            let order = group.order() as u64;
+            let mut heap = Heap::one(grown(merged.public_nodes, MERGED_NODE) * MERGED_NODE)
+                + Heap::spread(4 * merged.actions, merged.player_nodes)
+                + Heap::one(grown(merged.chance_nodes, MERGED_CHANCE) * MERGED_CHANCE)
+                + Heap::spread(
+                    9 * merged.outcomes + 4 * merged.chance_nodes,
+                    3 * merged.chance_nodes,
+                )
+                + Heap::spread(IMAGE * merged.images, merged.with_images)
+                + Heap::one(census.public_nodes * COUNTERPART)
+                + Heap::one(grown(order, MEMBER) * MEMBER);
+            for n in hands {
+                heap += Heap::one(order * RELABELLED) + Heap::spread(order * 4 * n, order);
+            }
+            let stabilizers = merged.stabilizers.len() as u64;
+            heap += Heap::one(grown(stabilizers, STABILIZER) * STABILIZER);
+            for stabilizer in &merged.stabilizers {
+                if !stabilizer.is_trivial() {
+                    heap += Heap::one(4 * hands[0]) + Heap::one(4 * hands[1]);
+                }
+            }
+            heap
+        }
+        None => Heap::default(),
+    };
+
+    // A profile: an entry per node, and a strategy per player node, on the full tree whether
+    // the solve merges or not.
+    let full_stored = census.stored[0] + census.stored[1];
     let profile = Heap::one(census.public_nodes * PROFILE_ENTRY_BYTES)
-        + Heap::spread(4 * stored, census.player_nodes);
+        + Heap::spread(4 * full_stored, census.player_nodes);
     // The last measurement's profile is held while the next is made, and, when the solve can
     // stop after an iteration it did not measure, while it measures once more and returns.
     let measures_twice = options.max_iterations > options.check_every;
@@ -891,7 +1124,14 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
                 + Heap::spread(4 * census.stored[p], census.player_nodes_of[p])
                 + Heap::one(8 * hands[p])
                 + Heap::one(hands[p])
-                + workspace(&tree, hands, Walk::Respond(p), terminal_room, split)
+                + workspace(
+                    &tree,
+                    hands,
+                    Walk::Respond(p),
+                    terminal_room,
+                    split,
+                    outcomes,
+                )
         })
         .into_iter()
         .fold(Heap::default(), Heap::max);
@@ -899,21 +1139,56 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         .map(|p| {
             Heap::one(8 * hands[p])
                 + Heap::one(hands[p])
-                + workspace(&tree, hands, Walk::Follow(p), terminal_room, split)
+                + workspace(
+                    &tree,
+                    hands,
+                    Walk::Follow(p),
+                    terminal_room,
+                    split,
+                    outcomes,
+                )
         })
         .into_iter()
         .fold(Heap::default(), Heap::max);
     let chance_levels = u64::from(census.turn_chance) + u64::from(census.river_chance);
-    let mut shape_check = Heap::one(census.public_nodes)
-        + Heap::one(n0)
-        + Heap::one(n1)
-        + Heap::spread(chance_levels * (n0 + n1), 2 * chance_levels);
+    let mut check_frames =
+        Heap::one(n0) + Heap::one(n1) + Heap::spread(chance_levels * (n0 + n1), 2 * chance_levels);
     if chance_levels > 0 {
-        shape_check += Heap::one(grown(chance_levels, CHECK_FRAME_BYTES) * CHECK_FRAME_BYTES);
+        check_frames += Heap::one(grown(chance_levels, CHECK_FRAME_BYTES) * CHECK_FRAME_BYTES);
     }
-    let measuring_extra = best_response.max(follow).max(shape_check);
-    // The CFR walk's workspace, which the solver keeps from its first iteration on.
-    let cfr_walk = workspace(&tree, hands, Walk::Cfr, terminal_room, split);
+    // The check of the full tree before each walk of a measurement, and the check of the
+    // solver's tree when the solver is built.
+    let shape_check = Heap::one(census.public_nodes) + check_frames;
+    let solver_shape_check = Heap::one(solver_nodes) + check_frames;
+    // A merged solve expands its average strategy onto the full tree through the room of one
+    // node's strategy, which grows to the largest.
+    let expansion = if merged.is_some() {
+        let largest = tree
+            .nodes()
+            .iter()
+            .filter_map(|node| match node {
+                Node::Player {
+                    actor, children, ..
+                } => Some(children.len() as u64 * hands[actor.index()]),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        Heap::one(4 * largest)
+    } else {
+        Heap::default()
+    };
+    let measuring_extra = best_response.max(follow).max(shape_check).max(expansion);
+    // The CFR walk's workspace, which the solver keeps from its first iteration on, on the
+    // merged tree when the solve merges.
+    let cfr_walk = match &merged {
+        Some(merged) => {
+            let split_outcomes = merged.split_outcomes;
+            let classes = |street: Street| split_outcomes[street as usize];
+            workspace(&tree, hands, Walk::Cfr, terminal_room, split, classes)
+        }
+        None => workspace(&tree, hands, Walk::Cfr, terminal_room, split, outcomes),
+    };
     // The solve's own pool, made once the solver is built and dropped when the solve returns.
     let thread_pool = if split {
         Heap::spread(POOL_BYTES + threads * POOL_THREAD_BYTES, 8 + 12 * threads)
@@ -931,8 +1206,9 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
     // The phases. Building ends with the solver's rows, while its check of the tree holds a
     // flag per node and its vector of rows has just doubled. From the first iteration on, the
     // solver holds its walk's workspace too, and the solve its pool.
-    let building = game + solver + shape_check + Heap::one(rows / 2 * ROW_BYTES);
-    let held = game + solver + cfr_walk + thread_pool;
+    let building =
+        game + merged_game + solver + solver_shape_check + Heap::one(rows / 2 * ROW_BYTES);
+    let held = game + merged_game + solver + cfr_walk + thread_pool;
     let iterating = held + profile * (profiles_held - 1);
     let measuring = held + profile * profiles_held + measuring_extra;
     let finishing = held + profile * profiles_at_finish + game_copy + check;
@@ -961,12 +1237,16 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         chance_nodes: census.chance_nodes,
         terminal_nodes: census.terminal_nodes,
         boards: num_boards,
+        merged: merged.is_some(),
+        merged_nodes: merged.as_ref().map_or(0, |merged| merged.public_nodes),
+        merged_player_nodes: merged.as_ref().map_or(0, |merged| merged.player_nodes),
         stored_values: stored,
         regrets_and_sums: regrets_and_sums.bytes,
         solver_bookkeeping: bookkeeping.bytes,
         public_tree: public_tree.bytes,
         board_hands: board_hands.bytes,
         betting_tree: betting.bytes,
+        merged_game: merged_game.bytes,
         average_strategy: profile.bytes,
         profiles_held,
         best_response: best_response.bytes,
@@ -1045,6 +1325,14 @@ impl fmt::Display for MemoryEstimate {
             self.betting_nodes,
             self.boards
         )?;
+        if self.merged {
+            writeln!(
+                f,
+                "The solver iterates on a merged tree of {} nodes ({} player), dealing once each \
+                 class of cards that a symmetry of the suits makes alike",
+                self.merged_nodes, self.merged_player_nodes
+            )?;
+        }
         let profiles = format!("average strategy, {} held at once", self.profiles_held);
         let pool = match self.threads {
             1 => "thread pool, none on one thread".to_string(),
@@ -1056,6 +1344,7 @@ impl fmt::Display for MemoryEstimate {
             ("public tree", self.public_tree),
             ("hands on each board", self.board_hands),
             ("betting tree, payoffs and deal", self.betting_tree),
+            ("merged game", self.merged_game),
             (
                 profiles.as_str(),
                 self.average_strategy * self.profiles_held,
@@ -1194,6 +1483,53 @@ mod tests {
         };
         assert_eq!(boards("tests/data/flop_small"), 1 + 49 + 1176);
         assert_eq!(boards("tests/data/turn_small"), 1 + 48);
+    }
+
+    #[test]
+    fn the_estimate_counts_the_merged_tree_the_merged_game_builds() {
+        use crate::game::PostflopGame;
+        use crate::merged::MergedGame;
+        use pk_cfr::{PublicGame, PublicNode};
+
+        // The merged tree's nodes, player nodes and stored values, counted from the betting
+        // tree and the classes of cards, are the merged game's, on a turn and four flop spots,
+        // the benchmark's turn among them; with merging off the estimate counts the full tree.
+        for path in [
+            "benches/data/turn_srp",
+            "tests/data/turn_four_flush",
+            "tests/data/flop_monotone",
+            "tests/data/flop_two_tone",
+            "tests/data/flop_paired",
+            "tests/data/flop_broken",
+        ] {
+            let spot = load(path);
+            let estimate = estimate_memory(&spot, &SolveOptions::default()).unwrap();
+            let full = PostflopGame::from_spot(&spot).unwrap();
+            let game = MergedGame::new(&full).unwrap();
+            let (mut player_nodes, mut stored) = (0, 0);
+            for node in 0..game.num_nodes() {
+                if let PublicNode::Player {
+                    player,
+                    num_actions,
+                } = game.node(node)
+                {
+                    player_nodes += 1;
+                    stored += (num_actions * game.num_hands(player)) as u64;
+                }
+            }
+            assert!(estimate.merged, "{path}");
+            assert_eq!(estimate.merged_nodes, game.num_nodes() as u64, "{path}");
+            assert_eq!(estimate.merged_player_nodes, player_nodes, "{path}");
+            assert_eq!(estimate.stored_values, stored, "{path}");
+            assert_eq!(estimate.public_nodes, full.num_nodes() as u64, "{path}");
+            let off = SolveOptions {
+                merge_isomorphic: false,
+                ..SolveOptions::default()
+            };
+            let unmerged = estimate_memory(&spot, &off).unwrap();
+            assert!(!unmerged.merged && unmerged.merged_game == 0, "{path}");
+            assert!(unmerged.stored_values > stored, "{path}");
+        }
     }
 
     #[test]
