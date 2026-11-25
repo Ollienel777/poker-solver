@@ -33,6 +33,17 @@
 //! In a build with debug assertions, which the tests are, the solve then checks the solution
 //! against its [invariants](crate::invariants) and panics with the report if it breaks any.
 //!
+//! # Threads
+//!
+//! A solve on more than one thread ([`SolveOptions::threads`]) of a spot that has a chance node
+//! makes a rayon pool of its own of that many threads, and runs each iteration and each
+//! measurement on it, so that the walks run the children of chance nodes in parallel, as
+//! [`pk_cfr::vector`'s parallel walk](pk_cfr::vector#the-parallel-walk) describes. It does not
+//! touch rayon's global pool, so solves in one process, or a caller's own threads, do not share
+//! threads with it. Everything else, the progress callback included, runs on the calling
+//! thread. A river spot has no chance node, so it makes no pool and runs on the calling thread,
+//! as does a solve on one thread.
+//!
 //! # Progress
 //!
 //! The callback is called once per measurement, in iteration order, with a [`Progress`]: every
@@ -45,8 +56,10 @@
 //! An iteration depends only on the spot, the schedule and the iterations before it, and
 //! measuring exploitability reads the average strategy without changing anything. So the
 //! strategy after `t` iterations is the same bit for bit in every run, whatever `check_every`,
-//! the target and the caps. A time cap makes the number of iterations depend on the machine,
-//! but not the strategy reached at any given number.
+//! the target and the caps. The walks give the same results bit for bit on any number of
+//! threads (DECISIONS P5), so the strategy and every measurement are the same whatever
+//! `threads` is too. A time cap makes the number of iterations depend on the machine, but not
+//! the strategy reached at any given number.
 //!
 //! # References
 //!
@@ -56,10 +69,13 @@
 //!   through Monte Carlo Counterfactual Regret Minimization*, AAMAS (2012): CFR over the public
 //!   tree, with one regret per (public node, private hand).
 
+use std::num::NonZero;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use pk_cfr::{Dcfr, PublicProfile, Schedule, VectorCfr};
 use pk_game::{Player, PostflopTree, TreeError};
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use thiserror::Error;
 
 use crate::exploitability::{Exploitability, exploitability};
@@ -104,6 +120,9 @@ pub enum SolveError {
     /// An option is out of range.
     #[error("`{field}` {reason}")]
     Options { field: &'static str, reason: String },
+    /// The solve's pool of [`SolveOptions::threads`] threads could not be started.
+    #[error("could not start a pool of {threads} threads: {reason}")]
+    Threads { threads: usize, reason: String },
 }
 
 /// How a solve runs and when it stops. [`SolveOptions::default`] gives the defaults listed on
@@ -129,6 +148,11 @@ pub struct SolveOptions {
     /// [estimate](crate::memory::estimate_memory) is larger is refused before anything is
     /// allocated for it. Defaults to [`SolveOptions::DEFAULT_MAX_MEMORY`], 10 GB.
     pub max_memory: u64,
+    /// The threads the solve runs its walks on, in a pool of its own when there is more than one
+    /// (see [the module documentation](self#threads)). The results are the same for every
+    /// count. Defaults to [`SolveOptions::default_threads`], all the machine offers. Must be at
+    /// least 1.
+    pub threads: usize,
 }
 
 impl Default for SolveOptions {
@@ -141,6 +165,7 @@ impl Default for SolveOptions {
             check_every: 10,
             max_nodes: PostflopGame::DEFAULT_MAX_NODES,
             max_memory: SolveOptions::DEFAULT_MAX_MEMORY,
+            threads: SolveOptions::default_threads(),
         }
     }
 }
@@ -149,6 +174,12 @@ impl SolveOptions {
     /// The default memory limit: 10 GB, 10^10 bytes, the most a local solve may use
     /// (DECISIONS D17).
     pub const DEFAULT_MAX_MEMORY: u64 = 10_000_000_000;
+
+    /// The default number of threads: all the machine offers, as
+    /// [`std::thread::available_parallelism`] gives it, or 1 if it cannot say.
+    pub fn default_threads() -> usize {
+        thread::available_parallelism().map_or(1, NonZero::get)
+    }
 
     fn check(&self) -> Result<(), SolveError> {
         if let Some(target) = self.target
@@ -169,6 +200,12 @@ impl SolveOptions {
             return Err(SolveError::Options {
                 field: "max_nodes",
                 reason: "is 0; a public tree has at least its root".into(),
+            });
+        }
+        if self.threads == 0 {
+            return Err(SolveError::Options {
+                field: "threads",
+                reason: "is 0; a solve runs on 1 or more threads".into(),
             });
         }
         if let Schedule::Discounted(Dcfr { alpha, beta, gamma }) = self.schedule
@@ -331,10 +368,11 @@ impl Solution {
 ///
 /// Fails if the game cannot be built (see [`PostflopGame::with_node_limit`]): a spot that does
 /// not pass [`Spot::validate`], or a betting or public tree over `options.max_nodes`. Fails as
-/// well if an option is out of range: a target that is negative or not finite, a `check_every`
-/// or `max_nodes` of 0, or DCFR parameters that are not finite. And fails with
+/// well if an option is out of range: a target that is negative or not finite, a `check_every`,
+/// `max_nodes` or `threads` of 0, or DCFR parameters that are not finite. And fails with
 /// [`SolveError::MemoryTooLarge`], before the game is built, if the
-/// [memory estimate](crate::memory::estimate_memory) is over `options.max_memory`.
+/// [memory estimate](crate::memory::estimate_memory) is over `options.max_memory`, and with
+/// [`SolveError::Threads`] if its threads cannot be started.
 pub fn solve(
     spot: &Spot,
     options: &SolveOptions,
@@ -351,9 +389,25 @@ pub fn solve(
     }
     let game = PostflopGame::with_node_limit(spot, options.max_nodes)?;
     let mut solver = VectorCfr::new(game, options.schedule);
+    // The solve's own pool, when it has threads to share out and chance nodes to split.
+    let pool = if estimate.threads > 1 {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(options.threads)
+            .build()
+            .map_err(|error| SolveError::Threads {
+                threads: options.threads,
+                reason: error.to_string(),
+            })?;
+        Some(pool)
+    } else {
+        None
+    };
     let mut measure = |solver: &VectorCfr<PostflopGame>| -> (Progress, PublicProfile) {
-        let strategy = solver.average_strategy();
-        let exploitability = exploitability(solver.game(), &strategy);
+        let (strategy, exploitability) = on_pool(pool.as_ref(), || {
+            let strategy = solver.average_strategy();
+            let exploitability = exploitability(solver.game(), &strategy);
+            (strategy, exploitability)
+        });
         let measured = Progress {
             iterations: solver.iterations(),
             elapsed: start.elapsed(),
@@ -370,7 +424,7 @@ pub fn solve(
         if options.max_time.is_some_and(|cap| start.elapsed() >= cap) {
             break StopReason::TimeCap;
         }
-        solver.iterate();
+        on_pool(pool.as_ref(), || solver.iterate());
         if solver.iterations().is_multiple_of(options.check_every) {
             let measured = measure(&solver);
             let reached = options
@@ -399,6 +453,14 @@ pub fn solve(
     // A debug assertion, which the elapsed time does not count.
     debug_assert_valid(&solution);
     Ok(solution)
+}
+
+/// Runs `walk` on the solve's pool, if it has one, and otherwise on the calling thread.
+fn on_pool<R: Send>(pool: Option<&ThreadPool>, walk: impl FnOnce() -> R + Send) -> R {
+    match pool {
+        Some(pool) => pool.install(walk),
+        None => walk(),
+    }
 }
 
 #[cfg(test)]

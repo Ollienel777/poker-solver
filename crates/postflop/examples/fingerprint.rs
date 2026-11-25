@@ -4,8 +4,9 @@
 //! compare the two outputs line for line.
 //!
 //! ```text
-//! cargo run --release -p pk-postflop --example fingerprint -- <spot file> <iterations>
+//! cargo run --release -p pk-postflop --example fingerprint -- <spot file> <iterations> [--threads <n>]
 //! cargo run --release -p pk-postflop --example fingerprint -- crates/postflop/tests/data/turn_small.toml 30
+//! cargo run --release -p pk-postflop --example fingerprint -- crates/postflop/tests/data/turn_small.toml 30 --threads 8
 //! ```
 //!
 //! It runs `iterations` iterations of DCFR(1.5, 0, 2), the solve's default schedule, and prints
@@ -23,6 +24,12 @@
 //! A hash is equal only when every value is bit for bit the same. It is not portable: the DCFR
 //! discount uses `powf`, whose last bit can differ between platforms, so compare outputs made
 //! on one machine with one toolchain, and never record a hash in a test.
+//!
+//! With `--threads <n>`, everything runs in a rayon pool of `n` threads, so that the walks of
+//! the iterations, the best responses and the expected values split chance nodes when `n` is
+//! more than one. Without it, everything runs on the main thread, as before the walks could
+//! split. The output does not name the thread count, so that the outputs for every count, and
+//! those made before, compare line for line.
 
 use std::process::ExitCode;
 
@@ -32,7 +39,7 @@ use pk_cfr::{
 };
 use pk_postflop::{PostflopGame, Spot, exploitability, node_values};
 
-const USAGE: &str = "usage: fingerprint <spot file> <iterations>";
+const USAGE: &str = "usage: fingerprint <spot file> <iterations> [--threads <n>]";
 
 fn main() -> ExitCode {
     match run() {
@@ -46,12 +53,35 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [path, iterations] = args.as_slice() else {
-        return Err(USAGE.to_string());
+    let (path, iterations, threads) = match args.as_slice() {
+        [path, iterations] => (path, iterations, None),
+        [path, iterations, flag, threads] if flag == "--threads" => {
+            let threads: usize = threads
+                .parse()
+                .ok()
+                .filter(|&threads| threads >= 1)
+                .ok_or_else(|| format!("`{threads}` is not a number of threads\n{USAGE}"))?;
+            (path, iterations, Some(threads))
+        }
+        _ => return Err(USAGE.to_string()),
     };
     let iterations: u64 = iterations
         .parse()
         .map_err(|_| format!("`{iterations}` is not a number of iterations\n{USAGE}"))?;
+    match threads {
+        Some(threads) => {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .map_err(|e| e.to_string())?;
+            pool.install(|| fingerprint(path, iterations))
+        }
+        None => fingerprint(path, iterations),
+    }
+}
+
+/// Runs `iterations` iterations on the spot at `path` and prints the fingerprint.
+fn fingerprint(path: &str, iterations: u64) -> Result<(), String> {
     let spot = Spot::load(path).map_err(|e| e.to_string())?;
     let game = PostflopGame::from_spot(&spot).map_err(|e| e.to_string())?;
     let mut solver = VectorCfr::new(game, Schedule::Discounted(Dcfr::default()));

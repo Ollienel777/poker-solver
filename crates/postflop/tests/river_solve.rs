@@ -11,10 +11,9 @@
 //! Every solution here is checked against the invariants of `pk_postflop::invariants`, in a
 //! release build too, where the solve does not check them itself.
 
-use std::cell::Cell;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use pk_cfr::{Dcfr, PublicGame, PublicNode, Schedule, VectorCfr, vector_expected_values};
@@ -438,7 +437,7 @@ fn raked_values_are_lower_than_rake_free_values_by_the_expected_rake() {
 /// take.
 struct Timed<'a> {
     game: &'a RiverGame,
-    terminal: Cell<Duration>,
+    terminal: Mutex<Duration>,
 }
 
 impl PublicGame for Timed<'_> {
@@ -477,7 +476,7 @@ impl PublicGame for Timed<'_> {
     fn terminal_values(&self, node: usize, player: usize, reach: &[f64], values: &mut [f64]) {
         let start = Instant::now();
         self.game.terminal_values(node, player, reach, values);
-        self.terminal.set(self.terminal.get() + start.elapsed());
+        *self.terminal.lock().unwrap() += start.elapsed();
     }
 }
 
@@ -535,14 +534,14 @@ fn measure(spot: &Spot, cap: u64) -> Row {
     // Iterations alone, with the terminal evaluations timed.
     let timed = Timed {
         game: &game,
-        terminal: Cell::new(Duration::ZERO),
+        terminal: Mutex::new(Duration::ZERO),
     };
     let mut solver = VectorCfr::new(timed, schedule);
     let iterations = 400;
     let start = Instant::now();
     solver.run(iterations, |_| {});
     let total = start.elapsed().as_secs_f64();
-    let terminal = solver.game().terminal.get().as_secs_f64();
+    let terminal = solver.game().terminal.lock().unwrap().as_secs_f64();
     let average = solver.average_strategy();
     let start = Instant::now();
     let repeats = 50;

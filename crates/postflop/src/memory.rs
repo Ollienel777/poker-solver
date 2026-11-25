@@ -41,7 +41,11 @@
 //!   depth needs, and the vectors kept once, the game's room at a terminal among them. The CFR
 //!   walk's serves both players, and the solver keeps it from its first iteration to the end of
 //!   the solve; each exploitability walk makes its own and drops it. They are small, since a
-//!   frame holds a few vectors of the hands.
+//!   frame holds a few vectors of the hands. On more than one thread, each walk also has a
+//!   workspace for each outcome of the chance nodes it splits, and the frame of a split chance
+//!   node holds the values of all its outcomes (see [On several threads](#on-several-threads)).
+//! - **Thread pool**: on more than one thread, the solve's rayon pool, [`POOL_BYTES`] and
+//!   [`POOL_THREAD_BYTES`] a thread.
 //! - **Copy of the game in the solution**: [`Solution`](crate::Solution) holds a copy of the
 //!   game, made while the solver still holds the original.
 //! - **Invariant check**: in a build with debug assertions, the check of the solution that the
@@ -53,8 +57,8 @@
 //!
 //! - **Building**: the game, then the solver's rows, with the transient copies their growth
 //!   makes and the solver's check of the tree.
-//! - **Iterating**: the game, the solver with its walk's working memory, and the profile kept
-//!   from the last measurement.
+//! - **Iterating**: the game, the solver with its walk's working memory, the thread pool on
+//!   several threads, and the profile kept from the last measurement.
 //! - **Measuring**: the same with the new profile, and a best response or an exploitability
 //!   walk's working memory.
 //! - **Finishing**: the game, the solver with its walk's working memory, the profiles, and the
@@ -76,12 +80,38 @@
 //! compares with its limit. Both allowances are on the high side, because the estimate's job is
 //! to refuse a solve that would not fit.
 //!
+//! # On several threads
+//!
+//! A solve on more than one thread of a spot with a chance node ([`MemoryEstimate::threads`])
+//! splits the first chance node on each line, as `pk_cfr`'s parallel walk does, and the
+//! estimate counts what that holds, which is the same whatever the thread count above one:
+//!
+//! - each walk's own frames down to the split chance nodes, the frame of a split chance node
+//!   holding `outcomes × hands` values;
+//! - a workspace for each outcome of the largest chance node split, 49 on a flop spot and 48 on
+//!   a turn spot, holding a frame for its child's inputs and one for each depth below, each
+//!   buffer as large as the most the child of that index needs at that depth under any chance
+//!   node split, with its room at a terminal; the CFR walk's are kept from the first iteration
+//!   to the end of the solve, and an exploitability walk's while it runs;
+//! - the solve's pool, which is the one figure that grows with the thread count.
+//!
+//! The walks' working memory is then a function of the tree, as on one thread. What the solve
+//! holds at its peak still depends on how the pool's threads shared out the jobs: how much the
+//! pool's threads have allocated for themselves, which the allowance takes at its most, and
+//! whether the vectors of frames of several children's workspaces grow at once near the end of
+//! an exploitability walk, which the estimate counts for every child. So the estimate is never
+//! below the peak, and can be above it by those two, a few kilobytes a thread and a few hundred
+//! bytes a child, on top of what it is above on one thread. The threads of an earlier solve's
+//! pool can also still be freeing what they held while the next solve runs, which makes the
+//! next solve look smaller. `tests/memory_estimate.rs` holds the estimate on several threads to
+//! at most 5%, 16 KiB a thread and 64 KiB above the measured peak.
+//!
 //! # What it depends on
 //!
 //! The figures follow the solver's code, not a model of a solver, so a change to what the solver
-//! allocates must change this module too. Four layouts are private to `pk_cfr`, the solver's
-//! row, a profile's entry and the frames of the two kinds of walk, and are mirrored here by
-//! structs with the same fields. A `Vec` filled by pushes is taken to grow as the standard
+//! allocates must change this module too. Six layouts are private to `pk_cfr`, the solver's
+//! row, a profile's entry, and the frames and the workspaces of the two kinds of walk, and are
+//! mirrored here by structs with the same fields. A `Vec` filled by pushes is taken to grow as the standard
 //! library grows it, doubling from four elements, and a walk's buffer to grow to exactly what
 //! it is asked to hold. The test against a counting allocator catches a change to any of these.
 
@@ -103,6 +133,16 @@ use crate::spot::Spot;
 /// its stacks and the standard library's buffers. 16 MiB, about three times what the example
 /// program holds before it solves.
 pub const PROCESS_BYTES: u64 = 16 << 20;
+
+/// What [`MemoryEstimate::thread_pool`] allows for a solve's rayon pool apart from its threads:
+/// 12 KiB, for its registry, its queue of jobs and the lock a thread outside it waits on.
+pub const POOL_BYTES: u64 = 12 << 10;
+
+/// What [`MemoryEstimate::thread_pool`] allows for each thread of a solve's rayon pool: 6 KiB,
+/// for its queue of jobs, its sleep state, the epoch record its first steal registers and what
+/// the standard library allocates to start it. Measured with a counting allocator, a pool held
+/// about 4.9 kB a thread, and 9 kB more at most, once its threads had run jobs.
+pub const POOL_THREAD_BYTES: u64 = 6 << 10;
 
 /// The layout of the row `pk_cfr::VectorCfr` keeps for each player node, which is private to
 /// `pk_cfr`: the acting player, whether each hand is possible, the regrets and the strategy sums.
@@ -142,6 +182,24 @@ struct ResponseFrameLayout {
     choices: Vec<usize>,
 }
 
+/// The layout of the workspace of `pk_cfr::VectorCfr`'s walk, which is private to `pk_cfr`: the
+/// frames, the instantaneous regrets, the reach as `f32` and the room at a terminal.
+#[allow(dead_code)]
+struct CfrWorkspaceLayout {
+    frames: Vec<CfrFrameLayout>,
+    regrets: Vec<f32>,
+    reach: Vec<f32>,
+    terminal: Vec<f64>,
+}
+
+/// The layout of the workspace of `pk_cfr::vector_best_response`'s walks, which is private to
+/// `pk_cfr`: the frames and the room at a terminal.
+#[allow(dead_code)]
+struct ResponseWorkspaceLayout {
+    frames: Vec<ResponseFrameLayout>,
+    terminal: Vec<f64>,
+}
+
 /// The buffers of a walk's frame, in the order of [`FrameNeeds`], with the size of an entry
 /// of each: the strategy (`f32`), the children's values, the traverser's reach and the
 /// opponent's reach (`f64`), the possible hands (`bool`) and a best response's choices
@@ -154,6 +212,8 @@ type FrameNeeds = [u64; 6];
 const ROW_BYTES: u64 = size_of::<NodeRowLayout>() as u64;
 const CFR_FRAME_BYTES: u64 = size_of::<CfrFrameLayout>() as u64;
 const RESPONSE_FRAME_BYTES: u64 = size_of::<ResponseFrameLayout>() as u64;
+const CFR_WORKSPACE_BYTES: u64 = size_of::<CfrWorkspaceLayout>() as u64;
+const RESPONSE_WORKSPACE_BYTES: u64 = size_of::<ResponseWorkspaceLayout>() as u64;
 /// A frame of the check of the tree's shape: both players' possible hands.
 const CHECK_FRAME_BYTES: u64 = size_of::<[Vec<bool>; 2]>() as u64;
 const ROW_INDEX_BYTES: u64 = size_of::<Option<usize>>() as u64;
@@ -226,8 +286,15 @@ pub struct MemoryEstimate {
     /// The larger player's best response, with its walk's buffers.
     pub best_response: u64,
     /// The larger of a CFR walk's buffers and an exploitability walk's: their working memory,
-    /// which for the CFR walk the solver keeps from its first iteration on.
+    /// which for the CFR walk the solver keeps from its first iteration on, with, on more than
+    /// one thread, the workspaces of the children of the chance nodes they split.
     pub traversal: u64,
+    /// The threads the walks run on: [`SolveOptions::threads`] on a spot with a chance node,
+    /// and 1 on a river spot, which has none to split.
+    pub threads: u64,
+    /// The solve's rayon pool, on more than one thread: [`POOL_BYTES`] and [`POOL_THREAD_BYTES`]
+    /// a thread.
+    pub thread_pool: u64,
     /// The copy of the game that the solution holds.
     pub solution_game: u64,
     /// The invariant check of a build with debug assertions; 0 in a release build.
@@ -502,27 +569,104 @@ enum Walk {
     Respond(usize),
 }
 
+/// The most each buffer of one workspace's frames has held, frame by frame, and the most the
+/// CFR walk's instantaneous regrets and reach as `f32`, which it keeps once, have held.
+#[derive(Default)]
+struct Needs {
+    frames: Vec<FrameNeeds>,
+    regrets: u64,
+    reach: u64,
+}
+
+impl Needs {
+    /// Frame `frame` needs at least `needs`.
+    fn add(&mut self, frame: usize, needs: FrameNeeds) {
+        if self.frames.len() <= frame {
+            self.frames.resize(frame + 1, [0; 6]);
+        }
+        for (most, need) in self.frames[frame].iter_mut().zip(needs) {
+            *most = (*most).max(need);
+        }
+    }
+
+    /// The workspace's heap: the frames' buffers, the vector of the frames, of `frame_bytes`
+    /// each, and the buffers kept once, the game's room at a terminal, `terminal` entries,
+    /// among them. The vector of frames grows by pushes as nodes give their frames back, the
+    /// last as the walk's first node does. With `ends_growing`, the walk holds the most it ever
+    /// does then, as an exploitability walk does, so it holds the old block and the new one at
+    /// once if that push is one that grows it.
+    fn heap(&self, frame_bytes: u64, terminal: u64, ends_growing: bool) -> Heap {
+        let slots = grown(self.frames.len() as u64, frame_bytes);
+        let mut heap = Heap::one(slots * frame_bytes)
+            + Heap::one(4 * self.regrets)
+            + Heap::one(4 * self.reach)
+            + Heap::one(8 * terminal);
+        if ends_growing {
+            heap += Heap::one(slots / 2 * frame_bytes);
+        }
+        for needs in &self.frames {
+            for (&entries, bytes) in needs.iter().zip(FRAME_ENTRY_BYTES) {
+                heap += Heap::one(entries * bytes);
+            }
+        }
+        heap
+    }
+}
+
 /// The working memory a walk holds once it has been over the whole tree, as `pk_cfr` keeps it:
 /// a frame for each depth of the tree, each of its buffers as large as the most a node at that
 /// depth has needed, the vector of the frames, and the buffers kept once, among them the
 /// game's room at a terminal, `terminal` entries. The CFR walk holds one frame more, for its
 /// inputs at the root. Every public copy of a betting node needs the same, with at most the
 /// spot's hands.
-fn workspace(tree: &PostflopTree, hands: [u64; 2], walk: Walk, terminal: u64) -> Heap {
+///
+/// With `split`, on several threads, the walk splits the first chance node on each line, as
+/// `pk_cfr`'s parallel walk does: its own frames serve the nodes down to those chance nodes,
+/// whose frames hold the values of every outcome, and a workspace for each outcome serves the
+/// children's walks, with a frame for each child's inputs and one for each depth below it, and
+/// the room at a terminal, which the walk's own then never needs. The children of index `o` of
+/// every chance node split share workspace `o`, so each workspace is counted as large as the
+/// most any child needs at each depth.
+fn workspace(tree: &PostflopTree, hands: [u64; 2], walk: Walk, terminal: u64, split: bool) -> Heap {
     let nodes = tree.nodes();
     let n = hands[0].max(hands[1]);
-    // By frame, the most each buffer has held.
-    let mut frames: Vec<FrameNeeds> = Vec::new();
+    let cfr = walk == Walk::Cfr;
+    let (mut own, mut branch) = (Needs::default(), Needs::default());
+    // The most outcomes of a chance node the walk splits, one workspace each.
+    let mut branches = 0;
+    // For each betting node, its depth, and the depth of the split chance node above it, if any.
     let mut depth = vec![0usize; nodes.len()];
-    // The instantaneous regrets and the reach as `f32`, which the CFR walk keeps once.
-    let (mut regrets, mut reach) = (0, 0);
-    if walk == Walk::Cfr {
+    let mut below = vec![None; nodes.len()];
+    if cfr {
         // The root's inputs: its values, the traverser's reach and its possible hands.
-        frames.push([0, n, n, 0, n, 0]);
+        own.add(0, [0, n, n, 0, n, 0]);
     }
     for (index, node) in nodes.iter().enumerate() {
-        let needs: FrameNeeds = match (node, walk) {
+        let splits = split && below[index].is_none() && matches!(node, Node::Chance { .. });
+        for &child in node.children() {
+            depth[child as usize] = depth[index] + 1;
+            below[child as usize] = if splits {
+                Some(depth[index])
+            } else {
+                below[index]
+            };
+        }
+        let needs = match below[index] {
+            Some(_) => &mut branch,
+            None => &mut own,
+        };
+        let frame: FrameNeeds = match (node, walk) {
             (Node::Terminal { .. }, _) => continue,
+            // Every outcome's values.
+            (Node::Chance { street, .. }, _) if splits => {
+                let outcomes = outcomes(*street);
+                branches = branches.max(outcomes);
+                let values = match walk {
+                    Walk::Cfr => n,
+                    Walk::Follow(me) | Walk::Respond(me) => hands[me],
+                };
+                [0, outcomes * values, 0, 0, 0, 0]
+            }
             // The possible hands after the card, both reaches and the card's values.
             (Node::Chance { .. }, Walk::Cfr) => [0, n, n, n, n, 0],
             // The possible hands after the card, the opponent's reach and the card's values.
@@ -541,8 +685,8 @@ fn workspace(tree: &PostflopTree, hands: [u64; 2], walk: Walk, terminal: u64) ->
                     // after an action; as the opponent's, a child's values and the opponent's
                     // reach after an action.
                     Walk::Cfr => {
-                        regrets = regrets.max(a * hands[p]);
-                        reach = reach.max(hands[p]);
+                        needs.regrets = needs.regrets.max(a * hands[p]);
+                        needs.reach = needs.reach.max(hands[p]);
                         let values = (a * hands[p]).max(hands[1 - p]);
                         [a * hands[p], values, hands[p], hands[p], 0, 0]
                     }
@@ -557,43 +701,35 @@ fn workspace(tree: &PostflopTree, hands: [u64; 2], walk: Walk, terminal: u64) ->
                 }
             }
         };
-        let frame = depth[index] + usize::from(walk == Walk::Cfr);
-        if frames.len() <= frame {
-            frames.resize(frame + 1, [0; 6]);
-        }
-        for (most, need) in frames[frame].iter_mut().zip(needs) {
-            *most = (*most).max(need);
-        }
-        for &child in node.children() {
-            depth[child as usize] = depth[index] + 1;
+        match below[index] {
+            // Below a split, frame 0 holds the child's inputs.
+            Some(split_depth) => branch.add(depth[index] - split_depth, frame),
+            None => own.add(depth[index] + usize::from(cfr), frame),
         }
     }
-    let frame_bytes = match walk {
-        Walk::Cfr => CFR_FRAME_BYTES,
-        Walk::Follow(_) | Walk::Respond(_) => RESPONSE_FRAME_BYTES,
+    let (frame_bytes, workspace_bytes) = match walk {
+        Walk::Cfr => (CFR_FRAME_BYTES, CFR_WORKSPACE_BYTES),
+        Walk::Follow(_) | Walk::Respond(_) => (RESPONSE_FRAME_BYTES, RESPONSE_WORKSPACE_BYTES),
     };
-    // The vector of frames grows by pushes as nodes give their frames back, the last as the
-    // root does. An exploitability walk then holds the most it ever does, so it holds the old
-    // block and the new one at once if that push is one that grows it.
-    let slots = grown(frames.len() as u64, frame_bytes);
-    let mut heap = Heap::one(slots * frame_bytes)
-        + Heap::one(4 * regrets)
-        + Heap::one(4 * reach)
-        + Heap::one(8 * terminal);
-    if walk != Walk::Cfr {
-        heap += Heap::one(slots / 2 * frame_bytes);
+    if branches == 0 {
+        return own.heap(frame_bytes, terminal, !cfr);
     }
-    for needs in &frames {
-        for (&entries, bytes) in needs.iter().zip(FRAME_ENTRY_BYTES) {
-            heap += Heap::one(entries * bytes);
-        }
-    }
-    heap
+    // A child's inputs: the traverser's possible hands and both reaches, or the player's
+    // possible hands and the opponent's reach.
+    let inputs = match walk {
+        Walk::Cfr => [0, 0, n, n, n, 0],
+        Walk::Follow(me) | Walk::Respond(me) => [0, 0, 0, hands[1 - me], hands[me], 0],
+    };
+    branch.add(0, inputs);
+    // The walk's own frames reach terminals on the spot's board only, which need no room.
+    own.heap(frame_bytes, 0, !cfr)
+        + branch.heap(frame_bytes, terminal, !cfr) * branches
+        + Heap::one(branches * workspace_bytes)
 }
 
 /// Estimates what solving `spot` with `options` will need, as the [module documentation](self)
 /// describes, without building the game. Of the options, `max_nodes`, `max_iterations`,
-/// `check_every` and whether there is a `max_time` matter.
+/// `check_every`, `threads` and whether there is a `max_time` matter.
 ///
 /// Fails as [`PostflopGame::with_node_limit`](crate::PostflopGame::with_node_limit) does with
 /// `options.max_nodes`: on a spot that fails [`Spot::validate`], a betting tree over the limit,
@@ -615,6 +751,13 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         });
     }
     let [n0, n1] = hands;
+    // The threads the walks run on: a spot with no chance node runs on the calling thread.
+    let threads = if census.chance_nodes > 0 {
+        (options.threads as u64).max(1)
+    } else {
+        1
+    };
+    let split = threads > 1;
 
     // The boards: the spot's, then each turn and each river the tree reaches.
     let players = lists.each_ref().map(|list| PlayerHands::new(list));
@@ -748,7 +891,7 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
                 + Heap::spread(4 * census.stored[p], census.player_nodes_of[p])
                 + Heap::one(8 * hands[p])
                 + Heap::one(hands[p])
-                + workspace(&tree, hands, Walk::Respond(p), terminal_room)
+                + workspace(&tree, hands, Walk::Respond(p), terminal_room, split)
         })
         .into_iter()
         .fold(Heap::default(), Heap::max);
@@ -756,7 +899,7 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         .map(|p| {
             Heap::one(8 * hands[p])
                 + Heap::one(hands[p])
-                + workspace(&tree, hands, Walk::Follow(p), terminal_room)
+                + workspace(&tree, hands, Walk::Follow(p), terminal_room, split)
         })
         .into_iter()
         .fold(Heap::default(), Heap::max);
@@ -770,7 +913,13 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
     }
     let measuring_extra = best_response.max(follow).max(shape_check);
     // The CFR walk's workspace, which the solver keeps from its first iteration on.
-    let cfr_walk = workspace(&tree, hands, Walk::Cfr, terminal_room);
+    let cfr_walk = workspace(&tree, hands, Walk::Cfr, terminal_room, split);
+    // The solve's own pool, made once the solver is built and dropped when the solve returns.
+    let thread_pool = if split {
+        Heap::spread(POOL_BYTES + threads * POOL_THREAD_BYTES, 8 + 12 * threads)
+    } else {
+        Heap::default()
+    };
 
     // The invariant check, in a build with debug assertions only.
     let check = if cfg!(debug_assertions) {
@@ -781,11 +930,12 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
 
     // The phases. Building ends with the solver's rows, while its check of the tree holds a
     // flag per node and its vector of rows has just doubled. From the first iteration on, the
-    // solver holds its walk's workspace too.
+    // solver holds its walk's workspace too, and the solve its pool.
     let building = game + solver + shape_check + Heap::one(rows / 2 * ROW_BYTES);
-    let iterating = game + solver + cfr_walk + profile * (profiles_held - 1);
-    let measuring = game + solver + cfr_walk + profile * profiles_held + measuring_extra;
-    let finishing = game + solver + cfr_walk + profile * profiles_at_finish + game_copy + check;
+    let held = game + solver + cfr_walk + thread_pool;
+    let iterating = held + profile * (profiles_held - 1);
+    let measuring = held + profile * profiles_held + measuring_extra;
+    let finishing = held + profile * profiles_at_finish + game_copy + check;
     let (peak_phase, peak) = [
         (Phase::Iterating, iterating),
         (Phase::Measuring, measuring),
@@ -821,6 +971,8 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         profiles_held,
         best_response: best_response.bytes,
         traversal: cfr_walk.max(follow).bytes,
+        threads,
+        thread_pool: thread_pool.bytes,
         solution_game: game_copy.bytes,
         invariant_check: check.bytes,
         building: building.bytes,
@@ -894,6 +1046,10 @@ impl fmt::Display for MemoryEstimate {
             self.boards
         )?;
         let profiles = format!("average strategy, {} held at once", self.profiles_held);
+        let pool = match self.threads {
+            1 => "thread pool, none on one thread".to_string(),
+            threads => format!("thread pool, {threads} threads"),
+        };
         let items = [
             ("regrets and strategy sums", self.regrets_and_sums),
             ("solver bookkeeping", self.solver_bookkeeping),
@@ -906,6 +1062,7 @@ impl fmt::Display for MemoryEstimate {
             ),
             ("best response", self.best_response),
             ("traversal buffers", self.traversal),
+            (pool.as_str(), self.thread_pool),
             ("copy of the game in the solution", self.solution_game),
             ("invariant check (debug builds)", self.invariant_check),
         ];

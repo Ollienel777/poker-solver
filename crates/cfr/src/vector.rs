@@ -107,7 +107,41 @@
 //! None of this changes a number: every buffer is written in full before it is read, and each
 //! value is computed from the same values in the same order as with vectors made at each node.
 //! A walk of a subtree needs only a stack of frames of its own, which may start empty, so that
-//! walks of different subtrees can each have one.
+//! walks of different subtrees can each have one, as the parallel walk's do.
+//!
+//! # The parallel walk
+//!
+//! Called on a thread of a rayon pool of more than one thread, [`VectorCfr::iterate`] walks the
+//! children of the first chance node on each line from the root as rayon tasks, which the pool's
+//! threads share out. Called on a pool of one thread, or outside any pool, it walks the whole
+//! tree on the calling thread, as above. The thread count is the pool's: a caller that wants `n`
+//! threads runs the iteration in a pool of `n`, with `rayon::ThreadPool::install`.
+//!
+//! At such a chance node, the walk of the child after outcome `o`:
+//!
+//! - computes its inputs, the traverser's possible hands, `π` and `ρ` after the outcome, from
+//!   the chance node's, by the same code as the walk on one thread;
+//! - walks the child's subtree on one thread, chance nodes included, by the same code, with the
+//!   rows of the subtree's player nodes, which are consecutive in the solver's rows because rows
+//!   are kept in the order the walk first reaches their nodes, and which no other child's walk
+//!   is given;
+//! - holds its working memory in a workspace of its own, the solver's workspace `o` of those it
+//!   keeps for the children of a chance node, from one iteration to the next;
+//! - writes its values `q(child, h)` into its own slice of the chance node's frame, which holds
+//!   every child's values until the last has returned.
+//!
+//! The chance node's thread then adds them up in outcome order, starting from zero, as the walk
+//! on one thread adds each child's values when it returns. So each child's values come from the
+//! same inputs by the same code, each sum has the same terms in the same order, and a row is
+//! read and written only by the walk of the subtree that holds its node. No number depends on
+//! how many threads there are, which thread walks which child, or in which order the children
+//! finish: every result is the walk on one thread's, bit for bit. The thread count decides only
+//! whether the chance nodes are split, and the split is the same for every count above one.
+//!
+//! The solver keeps a workspace for each outcome of the largest chance node it splits, each of
+//! which ends as large as the most its children need at each depth, so that an iteration on
+//! several threads, after the first, allocates nothing either. The chance node's frame holds
+//! `q` for every outcome, `outcomes × hands` values, instead of one child's.
 //!
 //! # References
 //!
@@ -123,6 +157,7 @@
 //! [`Cfr`]: crate::tabular::Cfr
 
 use std::iter;
+use std::ops::Range;
 
 use crate::regret::{
     Discount, Schedule, accumulate_strategy, average_strategy, current_strategy, update_regrets,
@@ -364,6 +399,10 @@ pub struct VectorCfr<G: PublicGame> {
     rows: Vec<NodeRow>,
     /// The walk's working memory, kept from one iteration to the next.
     workspace: Workspace,
+    /// The working memory of the walks of a split chance node's children, one per outcome,
+    /// kept from one iteration to the next: see the
+    /// [module documentation](self#the-parallel-walk). Empty until an iteration splits.
+    branches: Vec<Workspace>,
 }
 
 /// The stored state of one player node.
@@ -406,6 +445,7 @@ impl<G: PublicGame> VectorCfr<G> {
             row_of,
             rows,
             workspace: Workspace::default(),
+            branches: Vec::new(),
         }
     }
 
@@ -422,48 +462,6 @@ impl<G: PublicGame> VectorCfr<G> {
     /// The number of iterations completed.
     pub fn iterations(&self) -> u64 {
         self.iterations
-    }
-
-    /// Runs one iteration, as the [module documentation](self) specifies.
-    pub fn iterate(&mut self) {
-        let t = self.iterations + 1;
-        let discount = self.schedule.discount(t);
-        for traverser in 0..2 {
-            let opponent = 1 - traverser;
-            let num_hands = self.game.num_hands(traverser);
-            // The walk's inputs at the root, and the values it returns there.
-            let mut root = self.workspace.frames.take();
-            refill(&mut root.own_reach, iter::repeat_n(1.0, num_hands));
-            refill(&mut root.possible, iter::repeat_n(true, num_hands));
-            let values = resized(&mut root.values, num_hands, 0.0);
-            let mut walk = Walk {
-                game: &self.game,
-                row_of: &self.row_of,
-                rows: &mut self.rows,
-                traverser,
-                deal: self.game.deal(traverser),
-                discount,
-                workspace: &mut self.workspace,
-            };
-            walk.visit(
-                self.game.root(),
-                &root.own_reach,
-                self.game.deal(opponent),
-                &root.possible,
-                values,
-            );
-            self.workspace.frames.give(root);
-        }
-        self.iterations = t;
-    }
-
-    /// Runs `iterations` iterations, calling `on_iteration` after each one with the solver as
-    /// it stands.
-    pub fn run(&mut self, iterations: u64, mut on_iteration: impl FnMut(&VectorCfr<G>)) {
-        for _ in 0..iterations {
-            self.iterate();
-            on_iteration(self);
-        }
     }
 
     /// The average strategy at every player node, which is the strategy CFR converges to. A
@@ -555,6 +553,75 @@ impl<G: PublicGame> VectorCfr<G> {
             }
         }
         profile
+    }
+}
+
+impl<G: PublicGame + Sync> VectorCfr<G> {
+    /// Runs one iteration, as the [module documentation](self) specifies: on the threads of the
+    /// rayon pool it is called on, if it has more than one (see
+    /// [the parallel walk](self#the-parallel-walk)), and otherwise on the calling thread, with
+    /// the same result.
+    pub fn iterate(&mut self) {
+        let t = self.iterations + 1;
+        let discount = self.schedule.discount(t);
+        let parallel = splits_chance_nodes();
+        for traverser in 0..2 {
+            let opponent = 1 - traverser;
+            let num_hands = self.game.num_hands(traverser);
+            // The walk's inputs at the root, and the values it returns there.
+            let mut root = self.workspace.frames.take();
+            refill(&mut root.own_reach, iter::repeat_n(1.0, num_hands));
+            refill(&mut root.possible, iter::repeat_n(true, num_hands));
+            let values = resized(&mut root.values, num_hands, 0.0);
+            let mut walk = Walk {
+                game: &self.game,
+                row_of: &self.row_of,
+                rows: &mut self.rows,
+                first_row: 0,
+                traverser,
+                deal: self.game.deal(traverser),
+                discount,
+                workspace: &mut self.workspace,
+                branches: parallel.then_some(&mut self.branches),
+            };
+            walk.visit(
+                self.game.root(),
+                &root.own_reach,
+                self.game.deal(opponent),
+                &root.possible,
+                values,
+            );
+            self.workspace.frames.give(root);
+        }
+        self.iterations = t;
+    }
+
+    /// Runs `iterations` iterations, calling `on_iteration` after each one with the solver as
+    /// it stands.
+    pub fn run(&mut self, iterations: u64, mut on_iteration: impl FnMut(&VectorCfr<G>)) {
+        for _ in 0..iterations {
+            self.iterate();
+            on_iteration(self);
+        }
+    }
+}
+
+/// Whether a walk started here splits chance nodes: on a thread of a rayon pool of more than
+/// one thread, as the [module documentation](self#the-parallel-walk) says. Outside any pool it
+/// does not ask rayon for the number of threads, which would start rayon's global pool.
+pub(crate) fn splits_chance_nodes() -> bool {
+    rayon::current_thread_index().is_some() && rayon::current_num_threads() > 1
+}
+
+/// The position of the first row in the subtree of `node`, from the rows' positions `row_of`,
+/// or `None` if the subtree has no player node. A subtree's rows are consecutive, from its
+/// first.
+fn subtree_row<G: PublicGame>(game: &G, row_of: &[Option<usize>], node: usize) -> Option<usize> {
+    match game.node(node) {
+        PublicNode::Player { .. } => row_of[node],
+        PublicNode::Terminal => None,
+        PublicNode::Chance { num_outcomes } => (0..num_outcomes)
+            .find_map(|outcome| subtree_row(game, row_of, game.child(node, outcome))),
     }
 }
 
@@ -721,19 +788,59 @@ struct Frame {
     possible: Vec<bool>,
 }
 
-/// The working state of one player's walk on one iteration.
+impl Frame {
+    /// At the chance node `node`, walked for `traverser` with its possible hands `possible`, its
+    /// reach `own_reach` and the opponent's `opponent_reach`, writes what the child after
+    /// `outcome` is walked with: the traverser's possible hands, and both reaches, the
+    /// opponent's times the outcome's probability, zero for the hands the outcome rules out.
+    #[allow(clippy::too_many_arguments)]
+    fn after_outcome<G: PublicGame>(
+        &mut self,
+        game: &G,
+        node: usize,
+        outcome: usize,
+        traverser: usize,
+        possible: &[bool],
+        own_reach: &[f64],
+        opponent_reach: &[f64],
+    ) {
+        let probability = game.outcome_probability(node, outcome);
+        let after = refill(&mut self.possible, possible.iter().copied());
+        for hand in game.hands_ruled_out(node, outcome, traverser) {
+            after[hand] = false;
+        }
+        let own = own_reach
+            .iter()
+            .zip(&self.possible)
+            .map(|(&reach, &p)| if p { reach } else { 0.0 });
+        refill(&mut self.own_reach, own);
+        let other = opponent_reach.iter().map(|&reach| reach * probability);
+        let other = refill(&mut self.opponent_reach, other);
+        for hand in game.hands_ruled_out(node, outcome, 1 - traverser) {
+            other[hand] = 0.0;
+        }
+    }
+}
+
+/// The working state of one player's walk on one iteration, or of the walk of one child of a
+/// split chance node.
 struct Walk<'a, G> {
     game: &'a G,
     row_of: &'a [Option<usize>],
+    /// The rows of the subtree walked, and maybe others: those from position `first_row` on.
     rows: &'a mut [NodeRow],
+    first_row: usize,
     traverser: usize,
     /// `deal(traverser)`.
     deal: &'a [f64],
     discount: Discount,
     workspace: &'a mut Workspace,
+    /// The workspaces of the children of a chance node, if the walk splits the chance nodes it
+    /// reaches: see the [module documentation](self#the-parallel-walk).
+    branches: Option<&'a mut Vec<Workspace>>,
 }
 
-impl<G: PublicGame> Walk<'_, G> {
+impl<G: PublicGame + Sync> Walk<'_, G> {
     /// Walks the tree below `node`, writing `q(node, h)` for each hand `h` of the traverser
     /// into `values`. `own_reach` is `π`, `opponent_reach` is `ρ`, and `possible` says which of
     /// the traverser's hands are possible at `node`.
@@ -756,26 +863,29 @@ impl<G: PublicGame> Walk<'_, G> {
                     }
                 }
             }
+            PublicNode::Chance { num_outcomes } if self.branches.is_some() => {
+                self.split_chance(
+                    node,
+                    num_outcomes,
+                    own_reach,
+                    opponent_reach,
+                    possible,
+                    values,
+                );
+            }
             PublicNode::Chance { num_outcomes } => {
-                let opponent = 1 - self.traverser;
                 let mut frame = self.workspace.frames.take();
                 values.fill(0.0);
                 for outcome in 0..num_outcomes {
-                    let probability = game.outcome_probability(node, outcome);
-                    let after = refill(&mut frame.possible, possible.iter().copied());
-                    for hand in game.hands_ruled_out(node, outcome, self.traverser) {
-                        after[hand] = false;
-                    }
-                    let own = own_reach
-                        .iter()
-                        .zip(&frame.possible)
-                        .map(|(&reach, &p)| if p { reach } else { 0.0 });
-                    refill(&mut frame.own_reach, own);
-                    let other = opponent_reach.iter().map(|&reach| reach * probability);
-                    let other = refill(&mut frame.opponent_reach, other);
-                    for hand in game.hands_ruled_out(node, outcome, opponent) {
-                        other[hand] = 0.0;
-                    }
+                    frame.after_outcome(
+                        game,
+                        node,
+                        outcome,
+                        self.traverser,
+                        possible,
+                        own_reach,
+                        opponent_reach,
+                    );
                     let child = game.child(node, outcome);
                     let child_values = resized(&mut frame.values, values.len(), 0.0);
                     self.visit(
@@ -796,7 +906,7 @@ impl<G: PublicGame> Walk<'_, G> {
                 num_actions,
             } => {
                 let position = self.row_of[node].expect("every reachable player node has a row");
-                let row = &self.rows[position];
+                let row = &self.rows[position - self.first_row];
                 assert!(
                     row.player == player && row.regrets.len() == num_actions * row.possible.len(),
                     "node {node} changed its acting player or number of actions"
@@ -810,10 +920,60 @@ impl<G: PublicGame> Walk<'_, G> {
         }
     }
 
+    /// The chance node `node`, its children walked as rayon tasks, as the
+    /// [module documentation](self#the-parallel-walk) describes: writes `q(node, h)` into
+    /// `values`, the sum of the children's in outcome order, once every child has returned.
+    fn split_chance(
+        &mut self,
+        node: usize,
+        num_outcomes: usize,
+        own_reach: &[f64],
+        opponent_reach: &[f64],
+        possible: &[bool],
+        values: &mut [f64],
+    ) {
+        let num_hands = values.len();
+        let branches = self
+            .branches
+            .as_deref_mut()
+            .expect("a walk that splits has the children's workspaces");
+        if branches.len() < num_outcomes {
+            branches.reserve_exact(num_outcomes - branches.len());
+            branches.resize_with(num_outcomes, Workspace::default);
+        }
+        let mut frame = self.workspace.frames.take();
+        let outcome_values = resized(&mut frame.values, num_outcomes * num_hands, 0.0);
+        let split = Split {
+            game: self.game,
+            row_of: self.row_of,
+            traverser: self.traverser,
+            deal: self.deal,
+            discount: self.discount,
+            node,
+            own_reach,
+            opponent_reach,
+            possible,
+        };
+        split.walk(
+            0..num_outcomes,
+            &mut *self.rows,
+            self.first_row,
+            &mut branches[..num_outcomes],
+            outcome_values,
+        );
+        values.fill(0.0);
+        for child_values in outcome_values.chunks_exact(num_hands) {
+            for (value, &child_value) in values.iter_mut().zip(child_values) {
+                *value += child_value;
+            }
+        }
+        self.workspace.frames.give(frame);
+    }
+
     /// The strategy `σ` at the node whose row is at `position`, the [`current_strategy`] of its
     /// regrets, written into `strategy`.
     fn strategy<'s>(&self, position: usize, strategy: &'s mut Vec<f32>) -> &'s [f32] {
-        let row = &self.rows[position];
+        let row = &self.rows[position - self.first_row];
         let strategy = resized(strategy, row.regrets.len(), 0.0);
         current_strategy(&row.regrets, row.possible.len(), strategy);
         strategy
@@ -876,7 +1036,7 @@ impl<G: PublicGame> Walk<'_, G> {
             &mut self.workspace.reach,
             own_reach.iter().map(|&r| r as f32),
         );
-        let row = &mut self.rows[position];
+        let row = &mut self.rows[position - self.first_row];
         update_regrets(&mut row.regrets, instantaneous, self.discount);
         accumulate_strategy(&mut row.strategy_sum, strategy, reach, self.discount);
         self.workspace.frames.give(frame);
@@ -911,6 +1071,114 @@ impl<G: PublicGame> Walk<'_, G> {
             }
         }
         self.workspace.frames.give(frame);
+    }
+}
+
+/// A chance node whose children walk as rayon tasks, with what their walks share: the chance
+/// node's inputs, read by every child.
+struct Split<'a, G> {
+    game: &'a G,
+    row_of: &'a [Option<usize>],
+    traverser: usize,
+    deal: &'a [f64],
+    discount: Discount,
+    node: usize,
+    own_reach: &'a [f64],
+    opponent_reach: &'a [f64],
+    possible: &'a [bool],
+}
+
+impl<G: PublicGame + Sync> Split<'_, G> {
+    /// Walks the children after `outcomes`, each with the workspace of its place in
+    /// `workspaces`, writing each one's values into its place in `values`, `hands` entries a
+    /// child. `rows` are the rows from position `first_row` on, and hold every row of the
+    /// children's subtrees. Halves the outcomes, and the rows at the first row of the second
+    /// half's subtrees, and walks the halves as two rayon tasks, down to one child a task.
+    fn walk(
+        &self,
+        outcomes: Range<usize>,
+        rows: &mut [NodeRow],
+        first_row: usize,
+        workspaces: &mut [Workspace],
+        values: &mut [f64],
+    ) {
+        if outcomes.len() == 1 {
+            self.walk_child(outcomes.start, rows, first_row, &mut workspaces[0], values);
+            return;
+        }
+        let half = outcomes.len() / 2;
+        let middle = outcomes.start + half;
+        let (game, node) = (self.game, self.node);
+        let middle_row = (middle..outcomes.end)
+            .find_map(|outcome| subtree_row(game, self.row_of, game.child(node, outcome)))
+            .unwrap_or(first_row + rows.len());
+        let (first_rows, second_rows) = rows.split_at_mut(middle_row - first_row);
+        let (first_workspaces, second_workspaces) = workspaces.split_at_mut(half);
+        let (first_values, second_values) = values.split_at_mut(half * self.own_reach.len());
+        rayon::join(
+            || {
+                let outcomes = outcomes.start..middle;
+                self.walk(
+                    outcomes,
+                    first_rows,
+                    first_row,
+                    first_workspaces,
+                    first_values,
+                );
+            },
+            || {
+                let outcomes = middle..outcomes.end;
+                self.walk(
+                    outcomes,
+                    second_rows,
+                    middle_row,
+                    second_workspaces,
+                    second_values,
+                );
+            },
+        );
+    }
+
+    /// Walks the child after `outcome` on this thread, from its inputs, which it computes into a
+    /// frame of `workspace`, writing its values into `values`.
+    fn walk_child(
+        &self,
+        outcome: usize,
+        rows: &mut [NodeRow],
+        first_row: usize,
+        workspace: &mut Workspace,
+        values: &mut [f64],
+    ) {
+        let mut inputs = workspace.frames.take();
+        inputs.after_outcome(
+            self.game,
+            self.node,
+            outcome,
+            self.traverser,
+            self.possible,
+            self.own_reach,
+            self.opponent_reach,
+        );
+        let mut walk = Walk {
+            game: self.game,
+            row_of: self.row_of,
+            rows,
+            first_row,
+            traverser: self.traverser,
+            deal: self.deal,
+            discount: self.discount,
+            workspace: &mut *workspace,
+            branches: None,
+        };
+        let child = self.game.child(self.node, outcome);
+        walk.visit(
+            child,
+            &inputs.own_reach,
+            &inputs.opponent_reach,
+            &inputs.possible,
+            values,
+        );
+        workspace.frames.give(inputs);
     }
 }
 
@@ -1037,6 +1305,86 @@ mod tests {
                 }
             }
             assert_eq!(first.average_strategy(), second.average_strategy());
+        }
+    }
+
+    /// The bits of every stored regret and strategy sum, node by node.
+    fn stored_bits<G: PublicGame>(solver: &VectorCfr<G>) -> Vec<(Vec<u32>, Vec<u32>)> {
+        let bits = |values: &[f32]| -> Vec<u32> { values.iter().map(|v| v.to_bits()).collect() };
+        player_nodes(solver)
+            .into_iter()
+            .map(|node| {
+                let regrets = bits(solver.regrets(node).unwrap());
+                let sums = bits(solver.strategy_sum(node).unwrap());
+                (regrets, sums)
+            })
+            .collect()
+    }
+
+    /// The bits of every probability of a profile, node by node.
+    fn profile_bits(profile: &PublicProfile) -> Vec<(usize, Vec<u32>)> {
+        let bits = |values: &[f32]| -> Vec<u32> { values.iter().map(|v| v.to_bits()).collect() };
+        let nodes = profile.nodes();
+        nodes
+            .map(|node| (node, bits(profile.get(node).unwrap())))
+            .collect()
+    }
+
+    #[test]
+    fn an_iteration_on_several_threads_is_the_one_on_one_thread_bit_for_bit() {
+        // Leduc's chance nodes deal the public card, six outcomes each, so on a pool of more
+        // than one thread every iteration walks their children as rayon tasks. The pools have
+        // more threads than the CI's machines have cores, so that the tasks interleave there
+        // too. Every stored value and the average strategy must be those of the walk on the
+        // calling thread, bit for bit, under every schedule.
+        for schedule in schedules() {
+            let mut alone = VectorCfr::new(PublicLeduc::new(), schedule);
+            alone.run(40, |_| {});
+            assert!(alone.branches.is_empty(), "the walk outside a pool split");
+            for threads in [1, 2, 5, 16] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let mut pooled = VectorCfr::new(PublicLeduc::new(), schedule);
+                pool.install(|| pooled.run(40, |_| {}));
+                // It split on several threads, with a workspace for each of the six cards, and
+                // not on one.
+                let expected = if threads > 1 { 6 } else { 0 };
+                assert_eq!(pooled.branches.len(), expected, "{threads} threads");
+                assert_eq!(
+                    stored_bits(&pooled),
+                    stored_bits(&alone),
+                    "{schedule:?}, {threads} threads"
+                );
+                assert_eq!(
+                    profile_bits(&pooled.average_strategy()),
+                    profile_bits(&alone.average_strategy()),
+                    "{schedule:?}, {threads} threads"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_solver_moves_between_one_thread_and_several_without_a_change() {
+        // Iterations alternate between the calling thread and a pool of several, and the state
+        // after each is that of a solver that runs every iteration on the calling thread.
+        let schedule = Schedule::Discounted(Dcfr::default());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(7)
+            .build()
+            .unwrap();
+        let mut alone = VectorCfr::new(PublicLeduc::new(), schedule);
+        let mut mixed = VectorCfr::new(PublicLeduc::new(), schedule);
+        for t in 0..30 {
+            alone.iterate();
+            if t % 3 == 0 {
+                mixed.iterate();
+            } else {
+                pool.install(|| mixed.iterate());
+            }
+            assert_eq!(stored_bits(&mixed), stored_bits(&alone), "iteration {t}");
         }
     }
 

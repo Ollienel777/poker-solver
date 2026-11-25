@@ -7,6 +7,13 @@
 //!
 //! The estimate must never be below the measured peak, since its job is to refuse a solve that
 //! would not fit, and must be within 5% above it, so that it does not refuse solves that would.
+//!
+//! Those are the bounds on one thread, where the solve holds the same at every run. On several
+//! threads the solve holds its pool's own memory, which depends on how the pool's threads have
+//! shared out the jobs, and the estimate counts the growth of every child's vector of frames as
+//! if it came at the peak; the threads of an earlier pool, the solve's or a test's, may also
+//! still be freeing theirs while the next solve is measured. So the estimate must still never be
+//! below the measured peak, and is held to 5% above it plus 16 KiB a thread and 64 KiB.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
@@ -14,6 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
 use pk_cfr::{Dcfr, Schedule, VectorCfr};
 use pk_postflop::{MemoryEstimate, PostflopGame, SolveOptions, Spot, estimate_memory, solve};
+use rayon::ThreadPoolBuilder;
 
 /// The system allocator, counting the bytes held and the most held since the last reset.
 struct Counting;
@@ -83,6 +91,32 @@ fn measure(spot: &Spot, options: &SolveOptions) -> (MemoryEstimate, u64) {
 /// Checks the estimate against the measured peak, and prints both.
 fn check(name: &str, spot: &Spot, options: &SolveOptions) {
     let (estimate, measured) = measure(spot, options);
+    print_and_check_below(name, &estimate, measured);
+    let ratio = estimate.heap_bytes as f64 / measured as f64;
+    assert!(
+        ratio <= 1.05,
+        "{name}: the estimate, {} bytes, is more than 5% above the measured peak, \
+         {measured}\n{estimate}",
+        estimate.heap_bytes
+    );
+}
+
+/// Checks the estimate of a solve on `options.threads` threads against the measured peak, as
+/// the [file's documentation](self) says, and prints both.
+fn check_threads(name: &str, spot: &Spot, options: &SolveOptions) {
+    let (estimate, measured) = measure(spot, options);
+    print_and_check_below(name, &estimate, measured);
+    let allowed = measured + measured / 20 + 16_384 * options.threads as u64 + 65_536;
+    assert!(
+        estimate.heap_bytes <= allowed,
+        "{name}: the estimate, {} bytes, is more than 5%, 16 KiB a thread and 64 KiB above the \
+         measured peak, {measured}\n{estimate}",
+        estimate.heap_bytes
+    );
+}
+
+/// Prints the estimate and the measured peak, and checks that the estimate is not below it.
+fn print_and_check_below(name: &str, estimate: &MemoryEstimate, measured: u64) {
     let ratio = estimate.heap_bytes as f64 / measured as f64;
     println!(
         "{name}: estimated {} bytes {}, measured {measured}, ratio {ratio:.4}; total with \
@@ -100,20 +134,16 @@ fn check(name: &str, spot: &Spot, options: &SolveOptions) {
         "{name}: the estimate, {} bytes, is below the measured peak, {measured}\n{estimate}",
         estimate.heap_bytes
     );
-    assert!(
-        ratio <= 1.05,
-        "{name}: the estimate, {} bytes, is more than 5% above the measured peak, \
-         {measured}\n{estimate}",
-        estimate.heap_bytes
-    );
 }
 
-/// Two measurements and a third at the end, so that the solve holds two profiles at once.
+/// Two measurements and a third at the end, so that the solve holds two profiles at once, on one
+/// thread.
 fn capped(iterations: u64) -> SolveOptions {
     SolveOptions {
         target: None,
         max_iterations: iterations,
         check_every: 10,
+        threads: 1,
         ..SolveOptions::default()
     }
 }
@@ -142,7 +172,45 @@ fn the_estimate_covers_what_a_solve_allocates_and_is_within_five_percent() {
     assert_eq!(estimate.profiles_held, 1);
     check("turn_small, measured once", &spot, &capped(10));
     // To the default target, as the solve runs by default.
-    check("turn_small, to its target", &spot, &SolveOptions::default());
+    let to_target = SolveOptions {
+        threads: 1,
+        ..SolveOptions::default()
+    };
+    check("turn_small, to its target", &spot, &to_target);
+}
+
+#[test]
+fn on_several_threads_the_estimate_covers_what_a_solve_allocates() {
+    // More threads than the CI's cores, so that the threads interleave there too.
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let on = |threads: usize, iterations: u64| SolveOptions {
+        threads,
+        ..capped(iterations)
+    };
+    for threads in [2, 4, 16] {
+        for (name, path, iterations) in [
+            ("turn_small", "tests/data/turn_small", 25),
+            ("flop_small", "tests/data/flop_small", 12),
+        ] {
+            let name = format!("{name}, {threads} threads");
+            check_threads(&name, &load(path), &on(threads, iterations));
+        }
+    }
+    check_threads(
+        "turn_srp, 16 threads",
+        &load("benches/data/turn_srp"),
+        &on(16, 12),
+    );
+    // A river spot has no chance node to split, so it makes no pool and holds what it holds on
+    // one thread, within the bounds of one thread.
+    let river = load("../../reference/spots/river/deep_high_spr");
+    let one = estimate_memory(&river, &capped(25)).unwrap();
+    let many = estimate_memory(&river, &on(16, 25)).unwrap();
+    assert_eq!((many.threads, many.thread_pool), (1, 0));
+    assert_eq!(many.heap_bytes, one.heap_bytes);
+    check("river deep_high_spr, 16 threads", &river, &on(16, 25));
 }
 
 #[test]
@@ -169,6 +237,35 @@ fn after_the_first_iteration_an_iteration_asks_for_no_memory() {
 }
 
 #[test]
+fn after_the_first_iteration_an_iteration_on_several_threads_asks_for_no_memory() {
+    // On several threads the solver keeps a workspace for each outcome of the chance nodes it
+    // splits, which the first iteration sizes, and rayon holds each task of a split on the
+    // stack of the thread that forks it. So once the first iteration in a pool has sized the
+    // workspaces and the pool's threads have each run a task, an iteration takes nothing. Here
+    // the iterations run in one call into the pool; the solve calls into its pool once per
+    // iteration, and that call queues a job, which takes a block of rayon's queue every few
+    // dozen calls.
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pool = ThreadPoolBuilder::new().num_threads(8).build().unwrap();
+    for path in ["tests/data/turn_small", "tests/data/flop_small"] {
+        let game = PostflopGame::from_spot(&load(path)).unwrap();
+        let mut solver = VectorCfr::new(game, Schedule::Discounted(Dcfr::default()));
+        pool.install(|| {
+            solver.iterate();
+            for _ in 0..3 {
+                let before = HELD.load(SeqCst);
+                MOST.store(before, SeqCst);
+                solver.iterate();
+                assert_eq!(MOST.load(SeqCst), before, "{path}");
+                assert_eq!(HELD.load(SeqCst), before, "{path}");
+            }
+        });
+    }
+}
+
+#[test]
 #[ignore = "slow"]
 fn the_estimate_covers_what_the_flop_benchmark_spot_allocates() {
     // About 1 GB, and a few minutes in a test build.
@@ -176,4 +273,24 @@ fn the_estimate_covers_what_the_flop_benchmark_spot_allocates() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     check("flop_srp", &load("benches/data/flop_srp"), &capped(12));
+}
+
+#[test]
+#[ignore = "slow"]
+fn on_16_threads_the_estimate_covers_what_the_flop_benchmark_spot_allocates() {
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let options = SolveOptions {
+        threads: 16,
+        ..capped(12)
+    };
+    let spot = load("benches/data/flop_srp");
+    check_threads("flop_srp, 16 threads", &spot, &options);
+    let one = estimate_memory(&spot, &capped(12)).unwrap();
+    let many = estimate_memory(&spot, &options).unwrap();
+    println!(
+        "flop_srp: estimated {} bytes more on 16 threads than on one",
+        many.heap_bytes - one.heap_bytes
+    );
 }

@@ -78,6 +78,20 @@
 //! one vector at each node of the responder, which the walk returns. The working memory is the
 //! walk's own and is dropped with it.
 //!
+//! # The parallel walk
+//!
+//! Called on a thread of a rayon pool of more than one thread, each walk splits the first
+//! chance node on each line from the root as [`crate::vector`]'s walk does (see
+//! [its parallel walk](crate::vector#the-parallel-walk)): the child after outcome `o` computes
+//! its inputs from the chance node's, walks its subtree on one thread with a workspace of its
+//! own, the walk's workspace `o` for a chance node's children, and writes its values into its
+//! own slice of the chance node's frame; once every child has returned, the chance node adds
+//! them up in outcome order, starting from zero. Every value is then the walk on one thread's,
+//! bit for bit, whatever the number of threads. A best response's choice at a node depends only
+//! on the values below it, and each node of the responder is set once, by the walk of the child
+//! that holds it, so its strategy is the same too. The children's walks set their choices in
+//! the one strategy the walk returns, through a lock.
+//!
 //! # Exploitability
 //!
 //! For a two-player zero-sum game, `(BR_0(σ) + BR_1(σ)) / 2`, which is zero exactly at a Nash
@@ -91,9 +105,13 @@
 //!   Extensive Games*, IJCAI (2011): best response by one walk of the public tree, with a
 //!   vector of the opponent's reaches over its private hands.
 
-use std::iter;
+use std::ops::Range;
+use std::sync::{Mutex, PoisonError};
+use std::{iter, mem};
 
-use crate::vector::{Frames, PublicGame, PublicNode, PublicProfile, check_game, refill, resized};
+use crate::vector::{
+    Frames, PublicGame, PublicNode, PublicProfile, check_game, refill, resized, splits_chance_nodes,
+};
 
 /// A best response of one player to the other's strategy, from [`vector_best_response`].
 #[derive(Debug, Clone, PartialEq)]
@@ -113,12 +131,13 @@ pub struct VectorBestResponse {
 
 /// Player `player`'s best response to the other player's strategy in `profile`, as the
 /// [module documentation](self) defines it. The profile's strategies at `player`'s own nodes
-/// are ignored, and may be missing.
+/// are ignored, and may be missing. The walk runs on the threads of the rayon pool it is called
+/// on, if it has more than one (see [the parallel walk](self#the-parallel-walk)).
 ///
 /// Panics if `player` is not 0 or 1, if `profile` has no strategy, or one of the wrong size,
 /// at a node of the other player reachable from the root, or for any reason
 /// [`VectorCfr::new`](crate::vector::VectorCfr::new) panics on a malformed game.
-pub fn vector_best_response<G: PublicGame>(
+pub fn vector_best_response<G: PublicGame + Sync>(
     game: &G,
     profile: &PublicProfile,
     player: usize,
@@ -126,12 +145,16 @@ pub fn vector_best_response<G: PublicGame>(
     assert!(player < 2, "player {player} is not 0 or 1");
     check_game(game, |_, _, _, _| {});
     let num_hands = game.num_hands(player);
+    let mut strategy = PublicProfile::empty(game.num_nodes());
+    let mut workspace = Workspace::default();
+    let mut branches = Vec::new();
     let mut walk = Respond {
         game,
         profile,
         player,
-        strategy: PublicProfile::empty(game.num_nodes()),
-        workspace: Workspace::default(),
+        strategy: Choices::Own(&mut strategy),
+        workspace: &mut workspace,
+        branches: splits_chance_nodes().then_some(&mut branches),
     };
     let mut hand_values = vec![0.0; num_hands];
     let possible = vec![true; num_hands];
@@ -149,7 +172,7 @@ pub fn vector_best_response<G: PublicGame>(
         player,
         value,
         hand_values,
-        strategy: walk.strategy,
+        strategy,
     }
 }
 
@@ -157,7 +180,7 @@ pub fn vector_best_response<G: PublicGame>(
 /// [module documentation](self) defines it. Zero exactly at a Nash equilibrium.
 ///
 /// Panics for any reason [`vector_best_response`] panics.
-pub fn vector_exploitability<G: PublicGame>(game: &G, profile: &PublicProfile) -> f64 {
+pub fn vector_exploitability<G: PublicGame + Sync>(game: &G, profile: &PublicProfile) -> f64 {
     let first = vector_best_response(game, profile, 0).value;
     let second = vector_best_response(game, profile, 1).value;
     (first + second) / 2.0
@@ -176,12 +199,13 @@ pub struct VectorExpectedValue {
 }
 
 /// Player `player`'s expected value when both players follow `profile`, as the
-/// [module documentation](self) defines it.
+/// [module documentation](self) defines it. The walk runs on the threads of the rayon pool it
+/// is called on, if it has more than one (see [the parallel walk](self#the-parallel-walk)).
 ///
 /// Panics if `player` is not 0 or 1, if `profile` has no strategy, or one of the wrong size,
 /// at a player node reachable from the root, or for any reason
 /// [`VectorCfr::new`](crate::vector::VectorCfr::new) panics on a malformed game.
-pub fn vector_expected_value<G: PublicGame>(
+pub fn vector_expected_value<G: PublicGame + Sync>(
     game: &G,
     profile: &PublicProfile,
     player: usize,
@@ -189,11 +213,14 @@ pub fn vector_expected_value<G: PublicGame>(
     assert!(player < 2, "player {player} is not 0 or 1");
     check_game(game, |_, _, _, _| {});
     let num_hands = game.num_hands(player);
+    let mut workspace = Workspace::default();
+    let mut branches = Vec::new();
     let mut walk = Follow {
         game,
         profile,
         player,
-        workspace: Workspace::default(),
+        workspace: &mut workspace,
+        branches: splits_chance_nodes().then_some(&mut branches),
     };
     let mut hand_values = vec![0.0; num_hands];
     let possible = vec![true; num_hands];
@@ -218,7 +245,7 @@ pub fn vector_expected_value<G: PublicGame>(
 /// [module documentation](self) defines them.
 ///
 /// Panics for any reason [`vector_expected_value`] panics.
-pub fn vector_expected_values<G: PublicGame>(game: &G, profile: &PublicProfile) -> [f64; 2] {
+pub fn vector_expected_values<G: PublicGame + Sync>(game: &G, profile: &PublicProfile) -> [f64; 2] {
     [0, 1].map(|player| vector_expected_value(game, profile, player).value)
 }
 
@@ -312,15 +339,131 @@ impl Frame {
     }
 }
 
-/// The working state of one expected-value walk.
+/// A chance node whose children walk as rayon tasks, with what their walks share: the chance
+/// node's inputs, read by every child.
+struct Split<'a, G> {
+    game: &'a G,
+    node: usize,
+    player: usize,
+    opponent_reach: &'a [f64],
+    possible: &'a [bool],
+}
+
+impl<G: PublicGame + Sync> Split<'_, G> {
+    /// Walks the chance node's `num_outcomes` children as the
+    /// [module documentation](self#the-parallel-walk) describes, holding their values in a frame
+    /// of `workspace`, and writes `q(node, h)` or `q*(node, h)` into `values`: their sum in
+    /// outcome order, once every child has returned. Child `o` computes its inputs into a frame of
+    /// `branches[o]`, which grows to the outcomes if it has fewer, and `walk_child(workspace,
+    /// opponent_reach, possible, child, values)` walks it on its thread with that workspace.
+    fn walk(
+        &self,
+        workspace: &mut Workspace,
+        branches: &mut Vec<Workspace>,
+        num_outcomes: usize,
+        values: &mut [f64],
+        walk_child: &(impl Fn(&mut Workspace, &[f64], &[bool], usize, &mut [f64]) + Sync),
+    ) {
+        let num_hands = values.len();
+        if branches.len() < num_outcomes {
+            branches.reserve_exact(num_outcomes - branches.len());
+            branches.resize_with(num_outcomes, Workspace::default);
+        }
+        let mut frame = workspace.frames.take();
+        let outcome_values = resized(&mut frame.values, num_outcomes * num_hands, 0.0);
+        let walk_one = |outcome: usize, workspace: &mut Workspace, values: &mut [f64]| {
+            let (game, node, player) = (self.game, self.node, self.player);
+            let mut inputs = workspace.frames.take();
+            inputs.after_outcome(
+                game,
+                node,
+                outcome,
+                player,
+                self.possible,
+                self.opponent_reach,
+            );
+            let child = game.child(node, outcome);
+            walk_child(
+                workspace,
+                &inputs.opponent_reach,
+                &inputs.possible,
+                child,
+                values,
+            );
+            workspace.frames.give(inputs);
+        };
+        fork(
+            0..num_outcomes,
+            &mut branches[..num_outcomes],
+            outcome_values,
+            num_hands,
+            &walk_one,
+        );
+        values.fill(0.0);
+        for child_values in outcome_values.chunks_exact(num_hands) {
+            for (value, &child_value) in values.iter_mut().zip(child_values) {
+                *value += child_value;
+            }
+        }
+        workspace.frames.give(frame);
+    }
+}
+
+/// Calls `walk_one(outcome, workspace, values)` for each of `outcomes`, with the workspace of its
+/// place in `workspaces` and its place in `values`, `num_hands` entries an outcome: halves the
+/// outcomes and walks the halves as two rayon tasks, down to one outcome a task.
+fn fork(
+    outcomes: Range<usize>,
+    workspaces: &mut [Workspace],
+    values: &mut [f64],
+    num_hands: usize,
+    walk_one: &(impl Fn(usize, &mut Workspace, &mut [f64]) + Sync),
+) {
+    if outcomes.len() == 1 {
+        walk_one(outcomes.start, &mut workspaces[0], values);
+        return;
+    }
+    let half = outcomes.len() / 2;
+    let middle = outcomes.start + half;
+    let (first_workspaces, second_workspaces) = workspaces.split_at_mut(half);
+    let (first_values, second_values) = values.split_at_mut(half * num_hands);
+    rayon::join(
+        || {
+            let outcomes = outcomes.start..middle;
+            fork(
+                outcomes,
+                first_workspaces,
+                first_values,
+                num_hands,
+                walk_one,
+            );
+        },
+        || {
+            let outcomes = middle..outcomes.end;
+            fork(
+                outcomes,
+                second_workspaces,
+                second_values,
+                num_hands,
+                walk_one,
+            );
+        },
+    );
+}
+
+/// The working state of one expected-value walk, or of the walk of one child of a split chance
+/// node.
 struct Follow<'a, G> {
     game: &'a G,
     profile: &'a PublicProfile,
     player: usize,
-    workspace: Workspace,
+    workspace: &'a mut Workspace,
+    /// The workspaces of the children of a chance node, if the walk splits the chance nodes it
+    /// reaches: see the [module documentation](self#the-parallel-walk).
+    branches: Option<&'a mut Vec<Workspace>>,
 }
 
-impl<G: PublicGame> Follow<'_, G> {
+impl<G: PublicGame + Sync> Follow<'_, G> {
     /// Walks the tree below `node`, writing `q(node, h)` for each hand `h` of the player into
     /// `values`. `opponent_reach` is `ρ`, and `possible` says which of the player's hands are
     /// possible at `node`.
@@ -338,6 +481,35 @@ impl<G: PublicGame> Follow<'_, G> {
                 let player = self.player;
                 let workspace = &mut self.workspace;
                 workspace.terminal(game, node, player, opponent_reach, possible, values);
+            }
+            PublicNode::Chance { num_outcomes } if self.branches.is_some() => {
+                let (profile, player) = (self.profile, self.player);
+                let branches = self
+                    .branches
+                    .as_deref_mut()
+                    .expect("a walk that splits has the children's workspaces");
+                let split = Split {
+                    game,
+                    node,
+                    player,
+                    opponent_reach,
+                    possible,
+                };
+                let walk_child = |workspace: &mut Workspace,
+                                  opponent_reach: &[f64],
+                                  possible: &[bool],
+                                  child: usize,
+                                  values: &mut [f64]| {
+                    let mut walk = Follow {
+                        game,
+                        profile,
+                        player,
+                        workspace,
+                        branches: None,
+                    };
+                    walk.visit(child, opponent_reach, possible, values);
+                };
+                split.walk(self.workspace, branches, num_outcomes, values, &walk_child);
             }
             PublicNode::Chance { num_outcomes } => {
                 let mut frame = self.workspace.frames.take();
@@ -399,17 +571,42 @@ impl<G: PublicGame> Follow<'_, G> {
     }
 }
 
-/// The working state of one best-response walk.
+/// Where a best-response walk sets the choices it makes.
+enum Choices<'a> {
+    /// The strategy the walk returns, which it alone sets.
+    Own(&'a mut PublicProfile),
+    /// The same, shared with the walks of the other children of a split chance node.
+    Shared(&'a Mutex<PublicProfile>),
+}
+
+impl Choices<'_> {
+    /// Sets the strategy at `node`, laid out `[actions × hands]` over `num_hands` hands.
+    fn set(&mut self, node: usize, num_hands: usize, probabilities: Vec<f32>) {
+        match self {
+            Choices::Own(strategy) => strategy.set(node, num_hands, probabilities),
+            Choices::Shared(strategy) => {
+                let mut strategy = strategy.lock().unwrap_or_else(PoisonError::into_inner);
+                strategy.set(node, num_hands, probabilities);
+            }
+        }
+    }
+}
+
+/// The working state of one best-response walk, or of the walk of one child of a split chance
+/// node.
 struct Respond<'a, G> {
     game: &'a G,
     profile: &'a PublicProfile,
     player: usize,
     /// The choices made so far.
-    strategy: PublicProfile,
-    workspace: Workspace,
+    strategy: Choices<'a>,
+    workspace: &'a mut Workspace,
+    /// The workspaces of the children of a chance node, if the walk splits the chance nodes it
+    /// reaches: see the [module documentation](self#the-parallel-walk).
+    branches: Option<&'a mut Vec<Workspace>>,
 }
 
-impl<G: PublicGame> Respond<'_, G> {
+impl<G: PublicGame + Sync> Respond<'_, G> {
     /// Walks the tree below `node`, writing `q*(node, h)` for each hand `h` of the responder
     /// into `values`. `opponent_reach` is `ρ`, and `possible` says which of the responder's
     /// hands are possible at `node`.
@@ -427,6 +624,42 @@ impl<G: PublicGame> Respond<'_, G> {
                 let player = self.player;
                 let workspace = &mut self.workspace;
                 workspace.terminal(game, node, player, opponent_reach, possible, values);
+            }
+            PublicNode::Chance { num_outcomes } if self.branches.is_some() => {
+                let (profile, player) = (self.profile, self.player);
+                let branches = self
+                    .branches
+                    .as_deref_mut()
+                    .expect("a walk that splits has the children's workspaces");
+                let Choices::Own(strategy) = &mut self.strategy else {
+                    unreachable!("only the walk from the root splits, and it owns its strategy");
+                };
+                // Moved, not copied, into the lock and back.
+                let shared = Mutex::new(mem::replace(&mut **strategy, PublicProfile::empty(0)));
+                let split = Split {
+                    game,
+                    node,
+                    player,
+                    opponent_reach,
+                    possible,
+                };
+                let walk_child = |workspace: &mut Workspace,
+                                  opponent_reach: &[f64],
+                                  possible: &[bool],
+                                  child: usize,
+                                  values: &mut [f64]| {
+                    let mut walk = Respond {
+                        game,
+                        profile,
+                        player,
+                        strategy: Choices::Shared(&shared),
+                        workspace,
+                        branches: None,
+                    };
+                    walk.visit(child, opponent_reach, possible, values);
+                };
+                split.walk(self.workspace, branches, num_outcomes, values, &walk_child);
+                **strategy = shared.into_inner().unwrap_or_else(PoisonError::into_inner);
             }
             PublicNode::Chance { num_outcomes } => {
                 let mut frame = self.workspace.frames.take();
@@ -712,6 +945,71 @@ mod tests {
                 "[{low}, {high}]"
             );
         }
+    }
+
+    #[test]
+    fn on_several_threads_the_walks_give_what_they_give_on_one_bit_for_bit() {
+        // Leduc's chance nodes are split on a pool of more than one thread, here with more
+        // threads than the CI's machines have cores. Each best response's value, hand values
+        // and pure strategy, each expected value and the exploitability are those of the walks
+        // on the calling thread, bit for bit.
+        let game = PublicLeduc::new();
+        let bits = |values: &[f64]| -> Vec<u64> { values.iter().map(|v| v.to_bits()).collect() };
+        let walks = |public: &PublicProfile| {
+            let responses = [0, 1].map(|p| vector_best_response(&game, public, p));
+            let values = [0, 1].map(|p| vector_expected_value(&game, public, p));
+            (responses, values, vector_exploitability(&game, public))
+        };
+        for (name, profile) in profiles() {
+            let public = game.public_profile(&profile);
+            let (responses, values, exploitability) = walks(&public);
+            for threads in [2, 5, 16] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let (pooled, pooled_values, pooled_exploitability) =
+                    pool.install(|| walks(&public));
+                let at = format!("{name}, {threads} threads");
+                for player in 0..2 {
+                    let (one, many) = (&responses[player], &pooled[player]);
+                    assert_eq!(many.value.to_bits(), one.value.to_bits(), "{at}");
+                    assert_eq!(bits(&many.hand_values), bits(&one.hand_values), "{at}");
+                    assert_eq!(many.strategy, one.strategy, "{at}");
+                    let (one, many) = (&values[player], &pooled_values[player]);
+                    assert_eq!(many.value.to_bits(), one.value.to_bits(), "{at}");
+                    assert_eq!(bits(&many.hand_values), bits(&one.hand_values), "{at}");
+                }
+                assert_eq!(
+                    pooled_exploitability.to_bits(),
+                    exploitability.to_bits(),
+                    "{at}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "no strategy at node")]
+    fn on_several_threads_a_missing_strategy_below_a_chance_node_is_reported() {
+        // The panic of a child's walk reaches the caller through the pool.
+        let game = PublicLeduc::new();
+        let full = game.public_profile(&uniform());
+        let below = (0..game.num_nodes())
+            .find(|&node| {
+                game.public_card(node).is_some()
+                    && matches!(game.node(node), PublicNode::Player { player: 1, .. })
+            })
+            .unwrap();
+        let mut partial = PublicProfile::empty(game.num_nodes());
+        for node in full.nodes().filter(|&node| node != below) {
+            partial.set(node, 6, full.get(node).unwrap().to_vec());
+        }
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        pool.install(|| vector_best_response(&game, &partial, 0));
     }
 
     #[test]

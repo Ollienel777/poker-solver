@@ -464,6 +464,7 @@ name = "pk-cfr"
 version = "0.1.0"
 dependencies = [
  "rand_chacha",
+ "rayon",
 ]
 
 [[package]]
@@ -501,6 +502,7 @@ dependencies = [
  "pk-game",
  "proptest",
  "rand_chacha",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror",

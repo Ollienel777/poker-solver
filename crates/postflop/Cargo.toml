@@ -9,6 +9,7 @@ publish.workspace = true
 pk-cfr = { path = "../cfr" }
 pk-core = { path = "../core" }
 pk-game = { path = "../game" }
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

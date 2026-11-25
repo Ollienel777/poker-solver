@@ -15,7 +15,8 @@
 //! line exists. After each solve it appends a record of the solve's resources, the estimate, the
 //! peak resident memory, the wall time, the iterations and the exploitability, as one line of
 //! JSON to `runs/log.jsonl`, or to the file `--log` names; `--no-log` writes nothing.
-//! `--max-memory` sets the memory limit in GB, 10 by default.
+//! `--max-memory` sets the memory limit in GB, 10 by default, and `--threads` the threads the
+//! solve runs on, all the machine offers by default.
 //!
 //! ```text
 //! cargo run --release -p pk-postflop --example solve_spot -- <spot> --estimate
@@ -35,7 +36,8 @@ use pk_postflop::{
 };
 
 const USAGE: &str = "usage: solve_spot <spot file> [--node \"x b50\"] [--target <percent>] \
-     [--iterations <cap>] [--estimate] [--log <file> | --no-log] [--max-memory <GB>]";
+     [--iterations <cap>] [--estimate] [--log <file> | --no-log] [--max-memory <GB>] \
+     [--threads <n>]";
 
 /// Where the resource log goes unless `--log` or `--no-log` says otherwise.
 const LOG: &str = "runs/log.jsonl";
@@ -111,12 +113,19 @@ fn run() -> Result<(), String> {
         format_bytes(estimate.total),
         estimate.peak_phase
     );
+    let threads = match estimate.threads {
+        1 => "one thread".to_string(),
+        threads => format!("{threads} threads"),
+    };
     match options.target {
         Some(target) => println!(
-            "\nSolving to {target}% of the pot, for at most {} iterations",
+            "\nSolving to {target}% of the pot, for at most {} iterations, on {threads}",
             options.max_iterations
         ),
-        None => println!("\nSolving for {} iterations", options.max_iterations),
+        None => println!(
+            "\nSolving for {} iterations, on {threads}",
+            options.max_iterations
+        ),
     }
     let solution = solve(&spot, &options, print_progress).map_err(|e| e.to_string())?;
 
@@ -350,11 +359,17 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                     })?;
                 options.max_memory = (gb * 1e9) as u64;
             }
+            "--threads" => {
+                let text = value("the number of threads to solve on, such as 8")?;
+                options.threads = text.parse().ok().filter(|&n| n >= 1).ok_or_else(|| {
+                    format!("--threads `{text}` is not a number of threads, such as 1 or 8")
+                })?;
+            }
             "-h" | "--help" => return Err(USAGE.to_string()),
             flag if flag.starts_with("--") => {
                 return Err(format!(
                     "`{flag}` is not an option; the options are --node, --target, --iterations, \
-                     --estimate, --log, --no-log and --max-memory"
+                     --estimate, --log, --no-log, --max-memory and --threads"
                 ));
             }
             _ if spot.is_none() => spot = Some(arg.clone()),

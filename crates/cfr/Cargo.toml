@@ -7,3 +7,4 @@ publish.workspace = true
 
 [dependencies]
 rand_chacha.workspace = true
+rayon.workspace = true
