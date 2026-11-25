@@ -1,0 +1,19 @@
+format = 1
+name = "paired_raise"
+description = "Illustrative ranges, written for this fixture on 2026-11-24 and not taken from any solver, chart, site or book: a tight single-raised pot. BTN (IP) opened a narrow range to 2.5bb, the SB folded and BB (OOP), who 3-bets QQ+ and AK, called with a narrow range of pairs, suited aces, suited broadways and suited connectors, and some of JJ, AQ and KQ, so 97.5bb is left behind a 5.5bb pot on the paired flop 9s 9h 5d. Few hands hold a nine, so most of both ranges is pairs and high cards. On the flop a half-pot bet and a raise to 3x, with one raise; on the turn and the river a half-pot bet and no raises. 5% rake capped at 1bb, which binds once the pot reaches 22bb, after two bets called or a raise called, and not in the smaller pots."
+board = "9s9h5d"
+pot_bb = 5.5
+effective_stack_bb = 97.5
+oop_range = "22-TT,ATs-AJs,A4s-A5s,KTs-KJs,QTs+,JTs,T9s,98s,87s,JJ:0.5,AQs:0.5,KQs:0.5,AQo:0.5,KQo:0.5"
+ip_range = "77+,ATs+,KTs+,QTs+,JTs,T9s,AQo+,KQo,A5s:0.5,98s:0.5"
+
+[rake]
+percent = 5.0
+cap_bb = 1.0
+
+[tree]
+max_raises = 1
+allin_threshold = 1.0
+flop = { bets = [0.5], raises = [3.0], allin = false }
+turn = { bets = [0.5], raises = [], allin = false }
+river = { bets = [0.5], raises = [], allin = false }

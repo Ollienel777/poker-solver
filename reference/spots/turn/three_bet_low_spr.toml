@@ -1,0 +1,18 @@
+format = 1
+name = "three_bet_low_spr"
+description = "Illustrative ranges, written for this fixture on 2026-11-24 and not taken from any solver, chart, site or book: a 3-bet pot with a low stack-to-pot ratio. BTN opened to 2.5bb, the SB folded, BB (OOP) 3-bet to 10bb and BTN (IP) called, for the 20.5bb pot and 90bb stacks of reference/ranges/a/BB_vs_BTN_3BP.toml; on the flop Kc 9c 4d BB bet 10.25bb, half the pot, and BTN called, so 79.75bb is left behind a 41bb pot on the turn 4h, a stack-to-pot ratio near 2 at which all-in is a natural bet. OOP holds BB's bets, overpairs, top pairs, two pair, draws and some air; IP holds BTN's calls, sets, top and middle pairs and draws. A half-pot bet or all-in on the turn and the river, and facing a bet only an all-in raise. 5% rake capped at 6bb, the configs' cap, which binds once the pot passes 120bb, after a bet called on both streets or an all-in called, and not in the smaller pots."
+board = "Kc9c4h4d"
+pot_bb = 41.0
+effective_stack_bb = 79.75
+oop_range = "KK+,AKs,KQs,AKo,JJ-QQ:0.75,AJs-AQs:0.75,TT:0.5,A4s-A5s:0.5,K9s:0.5,QTs:0.5,J9s:0.5,T8s:0.25,76s:0.25,65s:0.25,AQo:0.25,KJo:0.25"
+ip_range = "99-QQ,KTs+,J9s+,T9s,98s,KQo,77-88:0.75,ATs-AQs:0.75,QTs+:0.75,44:0.5,AKs:0.5,A9s:0.5,AQo:0.5,KK:0.25,55-66:0.25,A5s-A8s:0.25,87s:0.25,AJo:0.25"
+
+[rake]
+percent = 5.0
+cap_bb = 6.0
+
+[tree]
+max_raises = 1
+allin_threshold = 1.0
+turn = { bets = [0.5], raises = [], allin = true }
+river = { bets = [0.5], raises = [], allin = true }
