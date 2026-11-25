@@ -45,8 +45,9 @@
 //!   is the actor's [`Player::index`].
 //! - A chance node's outcomes are the cards not on its board, in card order ([`Card::index`]):
 //!   49 turn cards after a flop, 48 river cards after a turn. Outcome `c` rules out each
-//!   player's hands that hold `c`. Once both players hold their hands, the next card is equally
-//!   likely to be any of the `48 − |board|` cards neither holds, so every outcome has
+//!   player's hands that hold `c`, which the game lists for each card when it is built
+//!   ([`PublicGame::hands_ruled_out`]). Once both players hold their hands, the next card is
+//!   equally likely to be any of the `48 − |board|` cards neither holds, so every outcome has
 //!   probability `1 / (48 − |board|)`, 1/45 for the turn and 1/44 for the river, and for any two
 //!   hands that can be held together at the node, the outcomes that rule out neither sum to 1
 //!   (DECISIONS P24).
@@ -73,9 +74,11 @@
 //! showdown on it, and the river reached by the turn card `a` and the river card `b` is the same
 //! board as the one reached by `b` and then `a`. A board's own hand lists hold only the hands
 //! that miss it, so the evaluation gathers the opponent's reach into the board's order and
-//! writes the values back by an index into the spot's hand lists. A hand that holds a card
-//! dealt on the way gets 0, and so does nothing that the opponent's ruled-out hands could add.
-//! On the spot's own board the evaluation is direct, which is all a river spot does.
+//! writes the values back by an index into the spot's hand lists, holding both in the room a
+//! walk keeps from terminal to terminal ([`PublicGame::terminal_values_with`]). A hand that
+//! holds a card dealt on the way gets 0, and so does nothing that the opponent's ruled-out
+//! hands could add. On the spot's own board the evaluation is direct, which is all a river spot
+//! does.
 //!
 //! # Size
 //!
@@ -156,7 +159,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use pk_cfr::{PublicGame, PublicNode, PublicProfile};
-use pk_core::{Card, CardSet, HandClass, NUM_CARDS};
+use pk_core::{Card, CardSet, Combo, HandClass, NUM_CARDS};
 use pk_game::{Action, Chips, Node, Outcome, Player, PostflopTree, Rake, Street};
 
 use crate::hands::HandList;
@@ -197,6 +200,47 @@ pub struct PostflopGame {
     deal: [Vec<f64>; 2],
     /// By betting-tree node: the payoffs at a terminal, and `None` elsewhere.
     payoffs: Vec<Option<Payoff>>,
+    /// For OOP, then IP, the hands that hold each card, which a chance node dealing the card
+    /// rules out.
+    holders: [Holders; 2],
+}
+
+/// One player's hands that hold each card: the hands of `hands[starts[c]..starts[c + 1]]`
+/// hold the card of index `c`, in hand order.
+#[derive(Debug, Clone)]
+struct Holders {
+    hands: Vec<u32>,
+    starts: [u32; NUM_CARDS + 1],
+}
+
+impl Holders {
+    /// The holders of each card among `combos`, a player's hands in hand order.
+    fn new(combos: &[Combo]) -> Holders {
+        let mut starts = [0u32; NUM_CARDS + 1];
+        for combo in combos {
+            for card in [combo.lo(), combo.hi()] {
+                starts[card.index() + 1] += 1;
+            }
+        }
+        for card in 0..NUM_CARDS {
+            starts[card + 1] += starts[card];
+        }
+        let mut next = starts;
+        let mut hands = vec![0; 2 * combos.len()];
+        for (hand, combo) in combos.iter().enumerate() {
+            for card in [combo.lo(), combo.hi()] {
+                hands[next[card.index()] as usize] = hand as u32;
+                next[card.index()] += 1;
+            }
+        }
+        Holders { hands, starts }
+    }
+
+    /// The hands that hold `card`, in hand order.
+    fn of(&self, card: Card) -> &[u32] {
+        let index = card.index();
+        &self.hands[self.starts[index] as usize..self.starts[index + 1] as usize]
+    }
 }
 
 /// One node of the public tree.
@@ -378,6 +422,8 @@ impl PostflopGame {
         );
         let scale = pair_weight.sqrt();
         let deal = weights.map(|weights| weights.iter().map(|w| w / scale).collect());
+        let holders =
+            [Player::Oop, Player::Ip].map(|player| Holders::new(hands.hands(player).combos()));
         let (nodes, boards) = expand(&tree, spot, hands, size as usize);
         Ok(PostflopGame {
             tree,
@@ -388,6 +434,7 @@ impl PostflopGame {
             pair_weight,
             deal,
             payoffs,
+            holders,
         })
     }
 
@@ -984,12 +1031,42 @@ impl PublicGame for PostflopGame {
         combo.intersects(CardSet::single(cards[outcome]))
     }
 
+    /// The hands that hold the card the outcome deals, from a list made when the game is
+    /// built.
+    fn hands_ruled_out(
+        &self,
+        node: usize,
+        outcome: usize,
+        player: usize,
+    ) -> impl Iterator<Item = usize> {
+        let Kind::Chance { cards, .. } = &self.nodes[node].kind else {
+            panic!("node {node} is not a chance node");
+        };
+        let holders = self.holders[player].of(cards[outcome]);
+        holders.iter().map(|&hand| hand as usize)
+    }
+
+    /// Allocates the room [`PublicGame::terminal_values_with`] needs on a later board at each
+    /// call.
     fn terminal_values(
         &self,
         node: usize,
         player: usize,
         opponent_reach: &[f64],
         values: &mut [f64],
+    ) {
+        self.terminal_values_with(node, player, opponent_reach, values, &mut Vec::new());
+    }
+
+    /// On a later board, holds the opponent's reach gathered into the board's order and the
+    /// values in that order in `scratch`.
+    fn terminal_values_with(
+        &self,
+        node: usize,
+        player: usize,
+        opponent_reach: &[f64],
+        values: &mut [f64],
+        scratch: &mut Vec<f64>,
     ) {
         let public = &self.nodes[node];
         let payoff = self.payoffs[public.tree as usize]
@@ -1008,11 +1085,14 @@ impl PublicGame for PostflopGame {
             "the reach needs one entry per opponent hand"
         );
         let (mine, theirs) = (&board.to_root[player], &board.to_root[1 - player]);
-        let reach: Vec<f64> = theirs.iter().map(|&o| opponent_reach[o as usize]).collect();
-        let mut local = vec![0.0; mine.len()];
-        evaluate(&board.hands, traverser, payoff, &reach, &mut local);
+        scratch.clear();
+        scratch.reserve_exact(theirs.len() + mine.len());
+        scratch.extend(theirs.iter().map(|&o| opponent_reach[o as usize]));
+        scratch.resize(theirs.len() + mine.len(), 0.0);
+        let (reach, local) = scratch.split_at_mut(theirs.len());
+        evaluate(&board.hands, traverser, payoff, reach, local);
         values.fill(0.0);
-        for (&hand, value) in mine.iter().zip(local) {
+        for (&hand, &value) in mine.iter().zip(&*local) {
             values[hand as usize] = value;
         }
     }
@@ -1178,5 +1258,61 @@ mod tests {
         assert_eq!(game.outcome_probability(river as usize, 0), 1.0 / 44.0);
         assert_eq!(game.outcomes(turn).len(), 49);
         assert_eq!(game.outcomes(river).len(), 48);
+    }
+
+    #[test]
+    fn the_hands_an_outcome_rules_out_are_those_that_hold_its_card() {
+        // At every outcome of every chance node, for both players, the listed hands are the
+        // ones `rules_out` finds by testing every hand, in hand order.
+        for name in ["flop_small", "turn_small"] {
+            let game = PostflopGame::from_spot(&load(name)).unwrap();
+            let mut listed = 0;
+            for node in 0..game.num_nodes() {
+                let PublicNode::Chance { num_outcomes } = game.node(node) else {
+                    continue;
+                };
+                for outcome in 0..num_outcomes {
+                    for player in 0..2 {
+                        let hands: Vec<usize> =
+                            game.hands_ruled_out(node, outcome, player).collect();
+                        let tested: Vec<usize> = (0..game.num_hands(player))
+                            .filter(|&hand| game.rules_out(node, outcome, player, hand))
+                            .collect();
+                        assert_eq!(hands, tested, "{name}, node {node}, outcome {outcome}");
+                        listed += hands.len();
+                    }
+                }
+            }
+            assert!(listed > 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn terminal_values_with_kept_room_are_those_without() {
+        // At every terminal of the flop spot, for both players, the values written with one
+        // scratch vector kept from terminal to terminal, into values that hold the last
+        // terminal's, are bit for bit those of `terminal_values`, which starts afresh.
+        let game = PostflopGame::from_spot(&load("flop_small")).unwrap();
+        let mut scratch = Vec::new();
+        let mut kept = [0, 1].map(|player| vec![f64::NAN; game.num_hands(player)]);
+        let mut later = 0;
+        for node in 0..game.num_nodes() {
+            if game.node(node) != PublicNode::Terminal {
+                continue;
+            }
+            later += usize::from(game.nodes[node].board != 0);
+            for (player, values) in kept.iter_mut().enumerate() {
+                let reach: Vec<f64> = (0..game.num_hands(1 - player))
+                    .map(|o| ((node + 3 * o) % 7) as f64 / 7.0)
+                    .collect();
+                let mut fresh = vec![0.0; game.num_hands(player)];
+                game.terminal_values(node, player, &reach, &mut fresh);
+                game.terminal_values_with(node, player, &reach, values, &mut scratch);
+                let bits =
+                    |values: &[f64]| -> Vec<u64> { values.iter().map(|v| v.to_bits()).collect() };
+                assert_eq!(bits(values), bits(&fresh), "node {node}, player {player}");
+            }
+        }
+        assert!(later > 1000, "{later}");
     }
 }

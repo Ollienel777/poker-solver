@@ -33,6 +33,12 @@ The machine runs other work, and its speed moves with it: on 2026-11-24 the same
 - Do not compare a new number with the baseline table below from another day.
 - Each row of the log of changes says how it was measured.
 
+A change meant to leave every number alone is checked with the example `fingerprint` (DECISIONS P49), which prints hashes of the bits of everything a solve computes: run it on the same spots and iteration counts before and after the change, on this machine, and the outputs must match line for line. Its header lists what it covers; #87 ran it on `deep_high_spr`, `four_flush` and `wet_oop_polarized` (200 iterations each), `turn_small` and `turn_medium` (100), `flop_small` (30), `flop_tiny` (100), `turn_srp` (12) and `flop_srp` (4).
+
+```bash
+cargo run --release -p pk-postflop --example fingerprint -- crates/postflop/tests/data/turn_small.toml 100
+```
+
 ## Baseline
 
 2026-11-24, commit `b43ce4e` (the public tree of #36), before any M4 optimization. Criterion's estimate, with its 95% interval for the long ones.
@@ -69,6 +75,19 @@ One row per benchmark a change moves, newest last. "Before" and "after" are meas
 | Date | Change | Benchmark | Before | After | Change | How measured | Exploitability |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-11-24 | Baseline, `b43ce4e` | (the tables above) | | | | criterion, one run | |
+| 2026-11-24 | #87: the walks keep their working memory, the game lists the hands each card rules out, and keeps room for the gather and the scatter | `turn_srp`, one iteration | 0.162 s (median 0.168) | 0.128 s (0.131) | −21% (−22%) | alternating builds, below | every result bit for bit the same: `fingerprint` on 9 spots |
+| 2026-11-24 | #87 | `turn_srp`, one best response | 0.0741 s (0.0794) | 0.0628 s (0.0653) | −15% (−18%) | alternating builds, below | the same |
+| 2026-11-24 | #87 | `turn_srp`, one exploitability measurement | 0.276 s (0.288) | 0.237 s (0.249) | −14% (−14%) | alternating builds, below | the same |
+| 2026-11-24 | #87 | `flop_srp`, one iteration | 2.30 s (2.55) | 1.74 s (1.88) | −25% (−26%) | alternating builds, below | the same |
+| 2026-11-24 | #87 | `flop_srp`, one best response | 1.14 s (1.25) | 0.86 s (0.93) | −24% (−26%) | alternating builds, below | the same |
+| 2026-11-24 | #87 | `flop_srp`, one exploitability measurement | 4.04 s (4.36) | 3.25 s (3.42) | −20% (−22%) | alternating builds, below | the same |
+| 2026-11-24 | #87 | `turn_srp`, allocations in an iteration | 147,260 | 0, and 63 in the first | | counting allocator | the same |
+| 2026-11-24 | #87 | `flop_srp`, allocations in an iteration | 1,788,758 | 0, and 75 in the first | | counting allocator | the same |
+| 2026-11-24 | #87 | allocations in an exploitability measurement, `turn_srp` and `flop_srp` | 203,646 and 2,469,090 | 5,918 and 85,448, nearly all the two best responses' own strategies | −97% | counting allocator | the same |
+| 2026-11-24 | #87 | a solve's peak heap, release build: `flop_srp`, `turn_srp`, `deep_high_spr` | 1,042.32 MB, 91.62 MB, 548 kB | 1,042.52 MB, 91.86 MB, 695 kB | +0.02%, +0.26%, +27% | `tests/memory_estimate.rs` on both builds | the same |
+| 2026-11-24 | #87 | `turn_srp`, 8 independent solvers: throughput against one, and iterations a second in all | 5.8× (5.7–6.0), 26.2 a second | 6.2× (6.0–6.4), 37.8 a second | +44% iterations a second | alternating builds, below; one core taken by another job | the same |
+
+How #87 was measured. The release builds of `0190ca3` and of the change each ran a small program, outside the repository, that times what `benches/solve.rs` times without criterion: 5 warm-up iterations, then, on the warm solver, an iteration, OOP's best response to the average strategy after the warm-up, and an exploitability measurement of it, again and again. The two builds ran back to back in 4 rounds of alternating order (old, new, new, old, and so on), with 7 timings of each step a round on `turn_srp` and 4 on `flop_srp`; the table gives the minimum of them all and, in brackets, the median. Another single-threaded solve ran on the machine throughout, with a burst on several threads every 15 to 20 minutes. In every step, each round's minimum of the new build is below each round's minimum of the old. The allocations are counted with a counting allocator in another such program, the same for both builds, as calls to allocate or reallocate. The thread-scaling rows are those of [How the current code would scale on threads](#how-the-current-code-would-scale-on-threads), repeated with both builds.
 
 ## Where an iteration spends its time
 
@@ -114,6 +133,17 @@ Independent solvers of `turn_srp`, one per thread, each running 20 iterations, g
 
 The same test with the showdown sweep alone, which allocates nothing, slows each thread by about 13% at 8 threads, against 40% for the solver, so most of the solver's loss is not the cores' clock but what they share: the allocator, which every node of every walk calls, and the memory traffic of the buffers it hands out.
 
+Repeated for #87, which takes the allocator out of the walks, with the builds before and after it alternating in 4 rounds, each solver running 20 iterations from the start. Another single-threaded solve ran on the machine throughout, so one core was taken, and the times are higher than above. Medians of the rounds, with the range of the throughput:
+
+| Threads | 1 | 2 | 4 | 8 | 16 |
+| --- | --- | --- | --- | --- | --- |
+| seconds per iteration, per thread, before #87 | 0.225 | 0.269 | 0.296 | 0.305 | 0.448 |
+| throughput against one thread, before | 1.0× | 1.7× (1.6–1.7) | 3.0× (2.9–3.1) | 5.8× (5.7–6.0) | 8.1× (7.1–8.8) |
+| seconds per iteration, per thread, after #87 | 0.163 | 0.196 | 0.198 | 0.212 | 0.298 |
+| throughput against one thread, after | 1.0× | 1.7× (1.6–1.7) | 3.3× (3.1–3.5) | 6.2× (6.0–6.4) | 8.7× (8.3–8.9) |
+
+At 8 threads a solver now slows by 30% against 36% before, and the 8 do 37.8 iterations a second against 26.2, 44% more. So the allocator was a brake on threads, but not the main one. What the solvers still share is most likely the rest of the memory traffic: each streams its 92 MB of regrets and strategy sums every iteration, through 16 MB of L3 that all eight share.
+
 ### Merging suit-isomorphic branches
 
 Counted with `pk_core::isomorphism` for ranges written as hand classes, which every relabelling of the suits leaves alone: the subtrees left after merging the cards that a symmetry of the board makes equivalent. An iteration's time is close to proportional to the river subtrees, which hold all but a few hundred of the terminals.
@@ -134,20 +164,20 @@ The plan is (1) merging suit-isomorphic chance branches, (2) threads across chan
 
 | Candidate | What it addresses | What it should buy | How hard |
 | --- | --- | --- | --- |
-| Threads across chance branches (#40, planned second) | all of an iteration and of a measurement | at most 5.7× on 8 threads by the bound above, and less while every node allocates | medium: the rows of a subtree are contiguous, so a chance node's children can walk on disjoint slices and be summed in outcome order, bit for bit; it changes `pk_cfr` |
+| Threads across chance branches (#40, planned second) | all of an iteration and of a measurement | at most 6.2× on 8 threads by the bound above, measured after #87 took the allocations out (5.7× while every node allocated) | medium: the rows of a subtree are contiguous, so a chance node's children can walk on disjoint slices and be summed in outcome order, bit for bit; it changes `pk_cfr` |
 | Suit isomorphism (#39, planned first) | the merged river subtrees, in time and in memory alike | 39% on `flop_srp`, 27% on `turn_srp`, 29% averaged over flops, nothing on an unpaired rainbow flop or a four-suit turn | the hardest of these: weighted chance outcomes, values permuted back for the merged cards, and every read-out below a merged card (paths, reaches, range views) mapped through the permutation; it changes `pk_cfr` and the game |
-| Per-node allocation (not planned) | 14–17% of an iteration at 300 hands, 46% at 16, and the sharing that slows threads | about 10% single-threaded, measured above, and more under threads | easy to medium: a stack of buffers by depth in the walks of `pk_cfr::vector` and `pk_cfr::vector_best_response`, and scratch for `terminal_values`; bit for bit the same |
+| Per-node allocation (done in #87, see the log of changes) | 14–17% of an iteration at 300 hands, 46% at 16, and the sharing that slows threads | about 10% single-threaded, measured above, and more under threads | easy to medium: a stack of buffers by depth in the walks of `pk_cfr::vector` and `pk_cfr::vector_best_response`, and scratch for `terminal_values`; bit for bit the same |
 | Faster sweeps (not planned) | the showdown and fold sweeps, 41–46% | perhaps 15–20% if the showdown sweep were made twice as fast: one pass over the opponent's hands instead of two, and the per-card sums kept without the dependent stores | medium: subtle code, but every sweep is already held to an O(n²) oracle |
-| The gather and the scatter (not planned) | 8%, and 3–4% more in their allocations | most of the 11–12% | medium: evaluate on the spot's hand lists with the dead hands' reach at zero, or at least reuse the two buffers |
-| `rules_out` (not planned) | with the vectors made after each card, 3% of a turn iteration, 7.6% of a flop iteration and 12% of a flop measurement | most of that | easy: a list per card of the hands it rules out, which needs a method on `PublicGame` |
-| The instantaneous-regret buffer (not planned) | the doubling `collect` in `own_node` | 4–8%, measured above | trivial, one line in `pk_cfr::vector` |
+| The gather and the scatter (not planned; their allocations removed in #87) | 8%, and 3–4% more in their allocations | most of the 11–12% | medium: evaluate on the spot's hand lists with the dead hands' reach at zero, or at least reuse the two buffers |
+| `rules_out` (done in #87) | with the vectors made after each card, 3% of a turn iteration, 7.6% of a flop iteration and 12% of a flop measurement | most of that | easy: a list per card of the hands it rules out, which needs a method on `PublicGame` |
+| The instantaneous-regret buffer (done in #87) | the doubling `collect` in `own_node` | 4–8%, measured above | trivial, one line in `pk_cfr::vector` |
 | Fewer copies at a measurement (not planned) | memory: the last profile (215 MB on `flop_srp`) and the best response's pure strategy (115 MB), 31% of the 1.05 GB peak | 330 MB on `flop_srp`, more than 16-bit storage saves | easy: drop the last profile before measuring, and compute best-response values without building the strategy; no change to the numbers |
 | 16-bit storage (#41, planned third) | memory: the regrets and sums, 418 MB of the 1.05 GB peak (40%) | 209 MB (20%); no speed, and some cost in regret matching and the updates | medium, and it changes the numbers, so every exploitability check must be redone |
 | Measuring less often (not planned) | 15% of a solve's time at a measurement every 10 iterations | most of that | trivial, an option's default, but it decides when solves stop |
 
 So the planned order is not what the measurements favour:
 
-1. **Per-node allocation first**, with the two smaller fixes beside it (the instantaneous-regret buffer and the `rules_out` lists): together about a fifth to a quarter of an iteration, bit for bit the same results, the cheapest work on the list, and the thing most likely to stop threads from scaling.
+1. **Per-node allocation first**, with the two smaller fixes beside it (the instantaneous-regret buffer and the `rules_out` lists): together about a fifth to a quarter of an iteration, bit for bit the same results, the cheapest work on the list, and the thing most likely to stop threads from scaling. Done in #87: a fifth to a quarter less time an iteration, bit for bit the same, as the log of changes records.
 2. **Threads next**: the largest gain by far, and independent of the board.
 3. **Isomorphism third**: about 29% less time and memory on an average flop, but nothing on the 31% of flops that are rainbow and unpaired, and the most work.
 4. **For memory, the copies before the precision**: holding one profile and no best-response strategy saves more than 16-bit storage does, at no cost to the numbers. 16-bit storage after that, if a tree that matters still does not fit.
@@ -158,24 +188,24 @@ The estimate of [`pk_postflop::memory`](../crates/postflop/src/memory.rs) agains
 
 | Spot | Solve | Heap, test build | Heap, release build |
 | --- | --- | --- | --- |
-| `deep_high_spr` (river) | 25 iterations | 585 kB, 579 kB: 1.012 | 568 kB, 548 kB: 1.036 |
-| `turn_small` | 25 iterations | 1.024 MB, 1.016 MB: 1.008 | 916 kB, 908 kB: 1.008 |
-| `turn_small` | 10 iterations, one measurement | 891 kB, 883 kB: 1.009 | 782 kB, 775 kB: 1.009 |
-| `turn_small` | to 0.3% of the pot | 891 kB, 883 kB: 1.009 | 830 kB, 822 kB: 1.009 |
-| `turn_srp` | 12 iterations | 92.0 MB, 91.6 MB: 1.004 | 92.0 MB, 91.6 MB: 1.004 |
+| `deep_high_spr` (river) | 25 iterations | 718 kB, 710 kB: 1.010 | 703 kB, 695 kB: 1.010 |
+| `turn_small` | 25 iterations | 1.030 MB, 1.021 MB: 1.008 | 921 kB, 914 kB: 1.008 |
+| `turn_small` | 10 iterations, one measurement | 896 kB, 888 kB: 1.009 | 788 kB, 780 kB: 1.009 |
+| `turn_small` | to 0.3% of the pot | 896 kB, 888 kB: 1.009 | 837 kB, 829 kB: 1.009 |
+| `turn_srp` | 12 iterations | 92.2 MB, 91.9 MB: 1.004 | 92.2 MB, 91.9 MB: 1.004 |
 | `flop_small` | 12 iterations | 52.0 MB, 51.8 MB: 1.004 | 45.4 MB, 45.2 MB: 1.004 |
-| `flop_srp` | 12 iterations (slow test) | 1.046 GB, 1.042 GB: 1.004 | 1.046 GB, 1.042 GB: 1.004 |
+| `flop_srp` | 12 iterations (slow test) | 1.047 GB, 1.043 GB: 1.004 | 1.047 GB, 1.043 GB: 1.004 |
 
-Without its margin of 1/256 and 4 KiB, the largest phase of the estimate is within 0.1% of the measured peak on every spot but `deep_high_spr` in a release build, where it is 2.5% above: on a spot of half a megabyte the walks' buffers are a noticeable share, and the estimate bounds them down the costliest line on top of a best response nearly complete. It is never below. The test fails an estimate below the measured peak, or more than 5% above it.
+Measured on the code of #87, which keeps the CFR walk's working memory from the first iteration to the end of the solve (DECISIONS P48). Without its margin of 1/256 and 4 KiB, the largest phase of the estimate is within 0.1% of the measured peak on every spot, and it is never below. Before #87 it was 2.5% above on `deep_high_spr` in a release build, where it bounded the walks' buffers down the costliest line; it now counts them as they are kept, a frame for each depth of the tree. The test fails an estimate below the measured peak, or more than 5% above it.
 
 | Spot | Solve, release build | Estimate, total | Peak resident memory |
 | --- | --- | --- | --- |
 | `toy_polarized` | to 0.3% | 16.8 MB, nearly all of it the allowance for the process | 4.7–5.1 MB |
-| `turn_srp` | 25 iterations | 115.7 MB | 101.6 MB |
+| `turn_srp` | 25 iterations | 116.0 MB | 101.8 MB |
 | `flop_srp` | 25 iterations | 1.15 GB | 1.08 GB |
-| `flop_srp` | to 0.3%: 80 iterations, 268 s | 1.15 GB | 1.08 GB |
+| `flop_srp` | to 0.3%: 80 iterations, 268 s before #87 and 207 s after it, not side by side and with another solve running | 1.15 GB | 1.08 GB |
 
-The total adds to the heap an allowance for the allocator (32 bytes an allocation and 1/16 of the bytes) and 16 MiB for the process; it came 6% and 14% above the peak resident memory, which is the right side to err on.
+The total adds to the heap an allowance for the allocator (32 bytes an allocation and 1/16 of the bytes) and 16 MiB for the process; it came 6% and 14% above the peak resident memory, which is the right side to err on. The figures are those of #87, which keeps the CFR walk's working memory through the solve: on these spots it moved the estimate by 0.25 MB at most and the peak resident memory by 0.2 MB, and `toy_polarized`'s peak stayed at 4.8 MB.
 
 Where the flop spot's peak goes, while it measures exploitability: regrets and strategy sums 418 MB, two average-strategy profiles 430 MB, a best response 115 MB, the solver's bookkeeping 40 MB, the hands on its 1,226 boards 26 MB, the public tree 13 MB. Only the first is what the solve has to hold; the profiles and the best response are the "fewer copies" row above.
 

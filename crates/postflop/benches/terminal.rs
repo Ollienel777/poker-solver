@@ -1,7 +1,8 @@
 //! Benchmarks for terminal evaluation: at full range width, 1,081 hands a side on the river; at
 //! the width of the benchmark spots of `benches/solve.rs`, about 300 hands a side on a river of
 //! `turn_srp`; and through the game, where a terminal on a board after the spot's gathers the
-//! opponent's reach into the board's hand order and writes the values back.
+//! opponent's reach into the board's hand order and writes the values back, in room the walks
+//! keep from one terminal to the next.
 
 use std::hint::black_box;
 
@@ -89,10 +90,12 @@ fn bench_spot_width(c: &mut Criterion) {
         })
     });
 
-    // Through the game, with the reach and values indexed by the spot's hand lists.
+    // Through the game, with the reach and values indexed by the spot's hand lists, and the
+    // room for the gather and the scatter kept from call to call, as the walks keep it.
     let game = PostflopGame::from_spot(&spot).unwrap();
     let reach = sample_reach(game.num_hands(1));
     let mut values = vec![0.0; game.num_hands(0)];
+    let mut scratch = Vec::new();
     for (name, path) in [
         ("game fold, turn_srp spot's board", "b50 f"),
         ("game fold, turn_srp river", "x x 7h b50 f"),
@@ -101,7 +104,8 @@ fn bench_spot_width(c: &mut Criterion) {
         let node = game.find(path).unwrap() as usize;
         c.bench_function(name, |b| {
             b.iter(|| {
-                game.terminal_values(node, 0, black_box(&reach), &mut values);
+                let reach = black_box(&reach);
+                game.terminal_values_with(node, 0, reach, &mut values, &mut scratch);
                 values[0]
             })
         });

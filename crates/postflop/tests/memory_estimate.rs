@@ -12,7 +12,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
-use pk_postflop::{MemoryEstimate, SolveOptions, Spot, estimate_memory, solve};
+use pk_cfr::{Dcfr, Schedule, VectorCfr};
+use pk_postflop::{MemoryEstimate, PostflopGame, SolveOptions, Spot, estimate_memory, solve};
 
 /// The system allocator, counting the bytes held and the most held since the last reset.
 struct Counting;
@@ -142,6 +143,29 @@ fn the_estimate_covers_what_a_solve_allocates_and_is_within_five_percent() {
     check("turn_small, measured once", &spot, &capped(10));
     // To the default target, as the solve runs by default.
     check("turn_small, to its target", &spot, &SolveOptions::default());
+}
+
+#[test]
+fn after_the_first_iteration_an_iteration_asks_for_no_memory() {
+    // The estimate counts the CFR walk's working memory as kept by the solver from its first
+    // iteration on. So, once the first iteration has sized it, an iteration takes nothing
+    // beyond what the solver already holds: an allocation anywhere in the walk, made while it
+    // holds what it held before, would raise the most held above that.
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for path in ["tests/data/turn_small", "tests/data/flop_small"] {
+        let game = PostflopGame::from_spot(&load(path)).unwrap();
+        let mut solver = VectorCfr::new(game, Schedule::Discounted(Dcfr::default()));
+        solver.iterate();
+        for _ in 0..3 {
+            let before = HELD.load(SeqCst);
+            MOST.store(before, SeqCst);
+            solver.iterate();
+            assert_eq!(MOST.load(SeqCst), before, "{path}");
+            assert_eq!(HELD.load(SeqCst), before, "{path}");
+        }
+    }
 }
 
 #[test]

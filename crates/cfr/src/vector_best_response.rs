@@ -69,6 +69,15 @@
 //! measure how much each player gains by deviating, `BR_i(σ) − v_i(σ)`: never negative, and
 //! zero for both players exactly at a Nash equilibrium.
 //!
+//! # Working memory
+//!
+//! Each walk holds its working memory as [`crate::vector`]'s walk does: a node that has
+//! children holds the vectors it passes down and the values they return in a frame from the
+//! walk's stack of frames, so that the walk allocates its working memory at each depth once,
+//! not at each node. The only allocation per node left is the best response's own strategy,
+//! one vector at each node of the responder, which the walk returns. The working memory is the
+//! walk's own and is dropped with it.
+//!
 //! # Exploitability
 //!
 //! For a two-player zero-sum game, `(BR_0(σ) + BR_1(σ)) / 2`, which is zero exactly at a Nash
@@ -82,7 +91,9 @@
 //!   Extensive Games*, IJCAI (2011): best response by one walk of the public tree, with a
 //!   vector of the opponent's reaches over its private hands.
 
-use crate::vector::{PublicGame, PublicNode, PublicProfile, check_game};
+use std::iter;
+
+use crate::vector::{Frames, PublicGame, PublicNode, PublicProfile, check_game, refill, resized};
 
 /// A best response of one player to the other's strategy, from [`vector_best_response`].
 #[derive(Debug, Clone, PartialEq)]
@@ -120,8 +131,16 @@ pub fn vector_best_response<G: PublicGame>(
         profile,
         player,
         strategy: PublicProfile::empty(game.num_nodes()),
+        workspace: Workspace::default(),
     };
-    let hand_values = walk.visit(game.root(), game.deal(1 - player), &vec![true; num_hands]);
+    let mut hand_values = vec![0.0; num_hands];
+    let possible = vec![true; num_hands];
+    walk.visit(
+        game.root(),
+        game.deal(1 - player),
+        &possible,
+        &mut hand_values,
+    );
     let mut value = 0.0;
     for (&deal, &hand_value) in game.deal(player).iter().zip(&hand_values) {
         value += deal * hand_value;
@@ -170,12 +189,20 @@ pub fn vector_expected_value<G: PublicGame>(
     assert!(player < 2, "player {player} is not 0 or 1");
     check_game(game, |_, _, _, _| {});
     let num_hands = game.num_hands(player);
-    let walk = Follow {
+    let mut walk = Follow {
         game,
         profile,
         player,
+        workspace: Workspace::default(),
     };
-    let hand_values = walk.visit(game.root(), game.deal(1 - player), &vec![true; num_hands]);
+    let mut hand_values = vec![0.0; num_hands];
+    let possible = vec![true; num_hands];
+    walk.visit(
+        game.root(),
+        game.deal(1 - player),
+        &possible,
+        &mut hand_values,
+    );
     let mut value = 0.0;
     for (&deal, &hand_value) in game.deal(player).iter().zip(&hand_values) {
         value += deal * hand_value;
@@ -214,76 +241,136 @@ fn strategy_at(
     strategy
 }
 
+/// The working memory of an expected-value or best-response walk: see the
+/// [module documentation](self#working-memory).
+#[derive(Debug, Default)]
+struct Workspace {
+    frames: Frames<Frame>,
+    /// The game's room at a terminal.
+    terminal: Vec<f64>,
+}
+
+/// What a node of an expected-value or best-response walk holds while its children walk. A
+/// field a node does not use keeps what it held.
+#[derive(Debug, Default)]
+struct Frame {
+    /// One child's values, `q(n·a, h)` or `q*(n·a, h)`.
+    values: Vec<f64>,
+    /// The opponent's reach `ρ` passed to a child.
+    opponent_reach: Vec<f64>,
+    /// At a chance node, the player's possible hands after the outcome being walked.
+    possible: Vec<bool>,
+    /// At a node of the responder, the action each hand's best value so far comes from.
+    choices: Vec<usize>,
+}
+
+impl Workspace {
+    /// At the terminal `node`, writes `player`'s values `q(node, h)` into `values`, zero for
+    /// the hands that are not `possible`.
+    fn terminal<G: PublicGame>(
+        &mut self,
+        game: &G,
+        node: usize,
+        player: usize,
+        opponent_reach: &[f64],
+        possible: &[bool],
+        values: &mut [f64],
+    ) {
+        game.terminal_values_with(node, player, opponent_reach, values, &mut self.terminal);
+        for (value, &possible) in values.iter_mut().zip(possible) {
+            if !possible {
+                *value = 0.0;
+            }
+        }
+    }
+}
+
+impl Frame {
+    /// At the chance node `node`, walked for `player`, whose possible hands there are
+    /// `possible` and whose opponent's reach is `opponent_reach`, writes what a child holds
+    /// after outcome `outcome`: the player's possible hands, and the opponent's reach times the
+    /// outcome's probability, zero for the hands it rules out.
+    fn after_outcome<G: PublicGame>(
+        &mut self,
+        game: &G,
+        node: usize,
+        outcome: usize,
+        player: usize,
+        possible: &[bool],
+        opponent_reach: &[f64],
+    ) {
+        let probability = game.outcome_probability(node, outcome);
+        let after = refill(&mut self.possible, possible.iter().copied());
+        for hand in game.hands_ruled_out(node, outcome, player) {
+            after[hand] = false;
+        }
+        let other = opponent_reach.iter().map(|&reach| reach * probability);
+        let other = refill(&mut self.opponent_reach, other);
+        for hand in game.hands_ruled_out(node, outcome, 1 - player) {
+            other[hand] = 0.0;
+        }
+    }
+}
+
 /// The working state of one expected-value walk.
 struct Follow<'a, G> {
     game: &'a G,
     profile: &'a PublicProfile,
     player: usize,
+    workspace: Workspace,
 }
 
 impl<G: PublicGame> Follow<'_, G> {
-    /// Walks the tree below `node`, returning `q(node, h)` for each hand `h` of the player.
-    /// `opponent_reach` is `ρ`, and `possible` says which of the player's hands are possible
-    /// at `node`.
-    fn visit(&self, node: usize, opponent_reach: &[f64], possible: &[bool]) -> Vec<f64> {
+    /// Walks the tree below `node`, writing `q(node, h)` for each hand `h` of the player into
+    /// `values`. `opponent_reach` is `ρ`, and `possible` says which of the player's hands are
+    /// possible at `node`.
+    fn visit(
+        &mut self,
+        node: usize,
+        opponent_reach: &[f64],
+        possible: &[bool],
+        values: &mut [f64],
+    ) {
         let game = self.game;
         let num_hands = possible.len();
         match game.node(node) {
             PublicNode::Terminal => {
-                let mut values = vec![0.0; num_hands];
-                game.terminal_values(node, self.player, opponent_reach, &mut values);
-                for (value, &possible) in values.iter_mut().zip(possible) {
-                    if !possible {
-                        *value = 0.0;
-                    }
-                }
-                values
+                let player = self.player;
+                let workspace = &mut self.workspace;
+                workspace.terminal(game, node, player, opponent_reach, possible, values);
             }
             PublicNode::Chance { num_outcomes } => {
-                let opponent = 1 - self.player;
-                let mut values = vec![0.0; num_hands];
+                let mut frame = self.workspace.frames.take();
+                values.fill(0.0);
                 for outcome in 0..num_outcomes {
-                    let probability = game.outcome_probability(node, outcome);
-                    let after: Vec<bool> = possible
-                        .iter()
-                        .enumerate()
-                        .map(|(hand, &p)| p && !game.rules_out(node, outcome, self.player, hand))
-                        .collect();
-                    let other: Vec<f64> = opponent_reach
-                        .iter()
-                        .enumerate()
-                        .map(|(hand, &reach)| {
-                            if game.rules_out(node, outcome, opponent, hand) {
-                                0.0
-                            } else {
-                                reach * probability
-                            }
-                        })
-                        .collect();
+                    frame.after_outcome(game, node, outcome, self.player, possible, opponent_reach);
                     let child = game.child(node, outcome);
-                    let child_values = self.visit(child, &other, &after);
-                    for (value, child_value) in values.iter_mut().zip(child_values) {
+                    let child_values = resized(&mut frame.values, num_hands, 0.0);
+                    self.visit(child, &frame.opponent_reach, &frame.possible, child_values);
+                    for (value, &child_value) in values.iter_mut().zip(&frame.values) {
                         *value += child_value;
                     }
                 }
-                values
+                self.workspace.frames.give(frame);
             }
             PublicNode::Player {
                 player,
                 num_actions,
             } if player == self.player => {
                 let strategy = strategy_at(self.profile, node, player, num_actions, num_hands);
-                let mut values = vec![0.0; num_hands];
+                let mut frame = self.workspace.frames.take();
+                values.fill(0.0);
                 for (action, probabilities) in strategy.chunks_exact(num_hands).enumerate() {
                     let child = game.child(node, action);
-                    let child_values = self.visit(child, opponent_reach, possible);
-                    for ((value, &p), child_value) in
-                        values.iter_mut().zip(probabilities).zip(child_values)
+                    let child_values = resized(&mut frame.values, num_hands, 0.0);
+                    self.visit(child, opponent_reach, possible, child_values);
+                    for ((value, &p), &child_value) in
+                        values.iter_mut().zip(probabilities).zip(&frame.values)
                     {
                         *value += f64::from(p) * child_value;
                     }
                 }
-                values
+                self.workspace.frames.give(frame);
             }
             PublicNode::Player {
                 player,
@@ -291,20 +378,22 @@ impl<G: PublicGame> Follow<'_, G> {
             } => {
                 let num_other = opponent_reach.len();
                 let strategy = strategy_at(self.profile, node, player, num_actions, num_other);
-                let mut values = vec![0.0; num_hands];
+                let mut frame = self.workspace.frames.take();
+                values.fill(0.0);
                 for (action, probabilities) in strategy.chunks_exact(num_other).enumerate() {
-                    let reach: Vec<f64> = opponent_reach
+                    let reach = opponent_reach
                         .iter()
                         .zip(probabilities)
-                        .map(|(&reach, &p)| reach * f64::from(p))
-                        .collect();
+                        .map(|(&reach, &p)| reach * f64::from(p));
+                    let reach = refill(&mut frame.opponent_reach, reach);
                     let child = game.child(node, action);
-                    let child_values = self.visit(child, &reach, possible);
-                    for (value, child_value) in values.iter_mut().zip(child_values) {
+                    let child_values = resized(&mut frame.values, num_hands, 0.0);
+                    self.visit(child, reach, possible, child_values);
+                    for (value, &child_value) in values.iter_mut().zip(&frame.values) {
                         *value += child_value;
                     }
                 }
-                values
+                self.workspace.frames.give(frame);
             }
         }
     }
@@ -317,77 +406,67 @@ struct Respond<'a, G> {
     player: usize,
     /// The choices made so far.
     strategy: PublicProfile,
+    workspace: Workspace,
 }
 
 impl<G: PublicGame> Respond<'_, G> {
-    /// Walks the tree below `node`, returning `q*(node, h)` for each hand `h` of the responder.
-    /// `opponent_reach` is `ρ`, and `possible` says which of the responder's hands are possible
-    /// at `node`.
-    fn visit(&mut self, node: usize, opponent_reach: &[f64], possible: &[bool]) -> Vec<f64> {
+    /// Walks the tree below `node`, writing `q*(node, h)` for each hand `h` of the responder
+    /// into `values`. `opponent_reach` is `ρ`, and `possible` says which of the responder's
+    /// hands are possible at `node`.
+    fn visit(
+        &mut self,
+        node: usize,
+        opponent_reach: &[f64],
+        possible: &[bool],
+        values: &mut [f64],
+    ) {
         let game = self.game;
         let num_hands = possible.len();
         match game.node(node) {
             PublicNode::Terminal => {
-                let mut values = vec![0.0; num_hands];
-                game.terminal_values(node, self.player, opponent_reach, &mut values);
-                for (value, &possible) in values.iter_mut().zip(possible) {
-                    if !possible {
-                        *value = 0.0;
-                    }
-                }
-                values
+                let player = self.player;
+                let workspace = &mut self.workspace;
+                workspace.terminal(game, node, player, opponent_reach, possible, values);
             }
             PublicNode::Chance { num_outcomes } => {
-                let opponent = 1 - self.player;
-                let mut values = vec![0.0; num_hands];
+                let mut frame = self.workspace.frames.take();
+                values.fill(0.0);
                 for outcome in 0..num_outcomes {
-                    let probability = game.outcome_probability(node, outcome);
-                    let after: Vec<bool> = possible
-                        .iter()
-                        .enumerate()
-                        .map(|(hand, &p)| p && !game.rules_out(node, outcome, self.player, hand))
-                        .collect();
-                    let other: Vec<f64> = opponent_reach
-                        .iter()
-                        .enumerate()
-                        .map(|(hand, &reach)| {
-                            if game.rules_out(node, outcome, opponent, hand) {
-                                0.0
-                            } else {
-                                reach * probability
-                            }
-                        })
-                        .collect();
+                    frame.after_outcome(game, node, outcome, self.player, possible, opponent_reach);
                     let child = game.child(node, outcome);
-                    let child_values = self.visit(child, &other, &after);
-                    for (value, child_value) in values.iter_mut().zip(child_values) {
+                    let child_values = resized(&mut frame.values, num_hands, 0.0);
+                    self.visit(child, &frame.opponent_reach, &frame.possible, child_values);
+                    for (value, &child_value) in values.iter_mut().zip(&frame.values) {
                         *value += child_value;
                     }
                 }
-                values
+                self.workspace.frames.give(frame);
             }
             PublicNode::Player {
                 player,
                 num_actions,
             } if player == self.player => {
-                let mut best = vec![f64::NEG_INFINITY; num_hands];
-                let mut choice = vec![0; num_hands];
+                let mut frame = self.workspace.frames.take();
+                // The best value so far, and the action it comes from.
+                values.fill(f64::NEG_INFINITY);
+                refill(&mut frame.choices, iter::repeat_n(0, num_hands));
                 for action in 0..num_actions {
                     let child = game.child(node, action);
-                    let child_values = self.visit(child, opponent_reach, possible);
+                    let child_values = resized(&mut frame.values, num_hands, 0.0);
+                    self.visit(child, opponent_reach, possible, child_values);
                     for hand in 0..num_hands {
-                        if child_values[hand] > best[hand] {
-                            best[hand] = child_values[hand];
-                            choice[hand] = action;
+                        if frame.values[hand] > values[hand] {
+                            values[hand] = frame.values[hand];
+                            frame.choices[hand] = action;
                         }
                     }
                 }
                 let mut pure = vec![0.0; num_actions * num_hands];
-                for (hand, &action) in choice.iter().enumerate() {
+                for (hand, &action) in frame.choices.iter().enumerate() {
                     pure[action * num_hands + hand] = 1.0;
                 }
                 self.strategy.set(node, num_hands, pure);
-                best
+                self.workspace.frames.give(frame);
             }
             PublicNode::Player {
                 player,
@@ -402,20 +481,22 @@ impl<G: PublicGame> Respond<'_, G> {
                     num_actions * num_other,
                     "the profile's strategy at node {node} has the wrong size"
                 );
-                let mut values = vec![0.0; num_hands];
+                let mut frame = self.workspace.frames.take();
+                values.fill(0.0);
                 for (action, probabilities) in strategy.chunks_exact(num_other).enumerate() {
-                    let reach: Vec<f64> = opponent_reach
+                    let reach = opponent_reach
                         .iter()
                         .zip(probabilities)
-                        .map(|(&reach, &p)| reach * f64::from(p))
-                        .collect();
+                        .map(|(&reach, &p)| reach * f64::from(p));
+                    let reach = refill(&mut frame.opponent_reach, reach);
                     let child = game.child(node, action);
-                    let child_values = self.visit(child, &reach, possible);
-                    for (value, child_value) in values.iter_mut().zip(child_values) {
+                    let child_values = resized(&mut frame.values, num_hands, 0.0);
+                    self.visit(child, reach, possible, child_values);
+                    for (value, &child_value) in values.iter_mut().zip(&frame.values) {
                         *value += child_value;
                     }
                 }
-                values
+                self.workspace.frames.give(frame);
             }
         }
     }
