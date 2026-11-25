@@ -234,6 +234,12 @@ struct Board {
     to_root: [Vec<u32>; 2],
 }
 
+/// The size of a public node's record, for the [memory estimate](crate::memory).
+pub(crate) const PUBLIC_NODE_BYTES: usize = std::mem::size_of::<PublicTreeNode>();
+
+/// The size of a board's record, for the [memory estimate](crate::memory).
+pub(crate) const BOARD_BYTES: usize = std::mem::size_of::<Board>();
+
 /// The player of index 0 or 1.
 pub(crate) fn player_of(index: usize) -> Player {
     match index {

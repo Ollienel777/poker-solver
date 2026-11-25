@@ -505,6 +505,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "toml",
+ "windows-sys",
 ]
 
 [[package]]

@@ -9,7 +9,8 @@
 //! [`pk_cfr::vector`] specifies. Regrets and strategy sums are stored as `f32`, one entry per
 //! action and in-range combo of the acting player at each player node of the public tree, and
 //! the strategy the solve reports is the average strategy. The public tree is refused before
-//! anything is allocated for it if it has more than [`SolveOptions::max_nodes`] nodes.
+//! anything is allocated for it if it has more than [`SolveOptions::max_nodes`] nodes, and so
+//! is a solve whose [memory estimate](crate::memory) is over [`SolveOptions::max_memory`].
 //!
 //! After every [`check_every`](SolveOptions::check_every) iterations, the solve measures the
 //! [exploitability](mod@crate::exploitability) of the average strategy and calls the progress
@@ -65,6 +66,7 @@ use crate::exploitability::{Exploitability, exploitability};
 use crate::game::{ClassView, PostflopGame};
 use crate::hands::HandList;
 use crate::invariants::debug_assert_valid;
+use crate::memory::{estimate_memory, format_bytes};
 use crate::spot::{Spot, SpotError};
 
 // The tests below build the river game by the name they were written with.
@@ -91,6 +93,14 @@ pub enum SolveError {
          more than the limit of {limit}"
     )]
     PublicTreeTooLarge { nodes: u64, limit: u64 },
+    /// The solve would need more memory than [`SolveOptions::max_memory`], by the
+    /// [memory estimate](crate::memory): both are in bytes.
+    #[error(
+        "the solve would need about {} of memory by its estimate, more than the limit of {}",
+        format_bytes(*.estimate),
+        format_bytes(*.limit)
+    )]
+    MemoryTooLarge { estimate: u64, limit: u64 },
     /// An option is out of range.
     #[error("`{field}` {reason}")]
     Options { field: &'static str, reason: String },
@@ -115,6 +125,10 @@ pub struct SolveOptions {
     /// The most nodes the public tree may have: see [`PostflopGame::with_node_limit`]. Defaults
     /// to [`PostflopGame::DEFAULT_MAX_NODES`], one million. Must be at least 1.
     pub max_nodes: u64,
+    /// The most memory the solve may need, in bytes: a spot whose
+    /// [estimate](crate::memory::estimate_memory) is larger is refused before anything is
+    /// allocated for it. Defaults to [`SolveOptions::DEFAULT_MAX_MEMORY`], 10 GB.
+    pub max_memory: u64,
 }
 
 impl Default for SolveOptions {
@@ -126,11 +140,16 @@ impl Default for SolveOptions {
             max_time: None,
             check_every: 10,
             max_nodes: PostflopGame::DEFAULT_MAX_NODES,
+            max_memory: SolveOptions::DEFAULT_MAX_MEMORY,
         }
     }
 }
 
 impl SolveOptions {
+    /// The default memory limit: 10 GB, 10^10 bytes, the most a local solve may use
+    /// (DECISIONS D17).
+    pub const DEFAULT_MAX_MEMORY: u64 = 10_000_000_000;
+
     fn check(&self) -> Result<(), SolveError> {
         if let Some(target) = self.target
             && !(target.is_finite() && target >= 0.0)
@@ -313,7 +332,9 @@ impl Solution {
 /// Fails if the game cannot be built (see [`PostflopGame::with_node_limit`]): a spot that does
 /// not pass [`Spot::validate`], or a betting or public tree over `options.max_nodes`. Fails as
 /// well if an option is out of range: a target that is negative or not finite, a `check_every`
-/// or `max_nodes` of 0, or DCFR parameters that are not finite.
+/// or `max_nodes` of 0, or DCFR parameters that are not finite. And fails with
+/// [`SolveError::MemoryTooLarge`], before the game is built, if the
+/// [memory estimate](crate::memory::estimate_memory) is over `options.max_memory`.
 pub fn solve(
     spot: &Spot,
     options: &SolveOptions,
@@ -321,6 +342,13 @@ pub fn solve(
 ) -> Result<Solution, SolveError> {
     let start = Instant::now();
     options.check()?;
+    let estimate = estimate_memory(spot, options)?;
+    if estimate.total > options.max_memory {
+        return Err(SolveError::MemoryTooLarge {
+            estimate: estimate.total,
+            limit: options.max_memory,
+        });
+    }
     let game = PostflopGame::with_node_limit(spot, options.max_nodes)?;
     let mut solver = VectorCfr::new(game, options.schedule);
     let mut measure = |solver: &VectorCfr<PostflopGame>| -> (Progress, PublicProfile) {

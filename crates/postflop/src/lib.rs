@@ -13,6 +13,10 @@
 //! [`invariants`] checks a solution against the invariants every solve must keep, and in a
 //! build with debug assertions every solve checks the solution it returns.
 //!
+//! [`memory`] estimates what a solve will need before anything is allocated, and the solve
+//! refuses one over its limit. [`resource_log`] records what each solve took, for a caller to
+//! append to a log.
+//!
 //! For checking against another solver, which is only ever run as a separate program:
 //! [`dump`] is a solver-neutral JSON form of a solution, version 1 for a river spot and
 //! version 2 for a flop or turn spot, complete or of the first streets only, with the per-hand
@@ -29,8 +33,10 @@ pub mod game;
 pub mod hands;
 pub mod import;
 pub mod invariants;
+pub mod memory;
 pub mod node_values;
 pub mod payoff;
+pub mod resource_log;
 pub mod river;
 pub mod solve;
 pub mod spot;
@@ -47,8 +53,10 @@ pub use game::{ClassView, NodePathError, NodePathErrorKind, PostflopGame};
 pub use hands::HandList;
 pub use import::{ImportError, MappedSolution, Mismatch};
 pub use invariants::{Invariant, Report, Violation, check_solution};
+pub use memory::{MemoryEstimate, estimate_memory};
 pub use node_values::{NodeValues, node_values};
 pub use payoff::{Payoff, ShowdownPayoff, fold_payoffs, rake_on, showdown_payoff};
+pub use resource_log::{SolveRecord, append_record, peak_resident_bytes};
 pub use river::RiverGame;
 pub use solve::{Progress, Solution, SolveError, SolveOptions, StopReason, solve};
 pub use spot::{SPOT_FORMAT, Spot, SpotError, TreeSizing};

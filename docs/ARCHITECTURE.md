@@ -48,7 +48,7 @@ Rules:
 
 - **`cfr` knows nothing about poker.** It works on slices and on a small game trait. Kuhn and Leduc test the same regret code that both solvers use.
 - **Library crates never print.** They return results and report progress through a callback. Only `cli` writes to the terminal.
-- **Few dependencies, all permissively licensed:** `rayon`, `serde` + `toml` + `serde_json`, `rand` + `rand_chacha`, `zstd`, `memmap2`, `thiserror` in libraries and `anyhow` + `clap` in `cli`, with `criterion` and `proptest` for development only. No AGPL dependency, and no AGPL code copied (brief, Validation).
+- **Few dependencies, all permissively licensed:** `rayon`, `serde` + `toml` + `serde_json`, `rand` + `rand_chacha`, `zstd`, `memmap2`, `thiserror` in libraries, `windows-sys` in `postflop` on Windows only, for the peak resident memory (DECISIONS P43), and `anyhow` + `clap` in `cli`, with `criterion` and `proptest` for development only. No AGPL dependency, and no AGPL code copied (brief, Validation).
 
 ## Conventions
 
@@ -213,7 +213,7 @@ Spots on the flop, the turn and the river are solved by the same code. A river s
 - **Hands.** Each player's hands are its `HandList` on the spot's board: the in-range combos that miss it. Blocked and out-of-range combos have no hand index, so each player node stores regrets and strategy sums, as `f32`, for the acting player's in-range combos only (DECISIONS P9). The lists are the same on every street: a hand that holds a turn or river card is ruled out below it, keeps its place in every vector there with reach zero, and plays uniformly (DECISIONS P25).
 - **Deal.** Chance deals OOP `h` and IP `o` with probability `w_0(h) · w_1(o) / Z` when the two combos share no card, where `Z` sums that product over the pairs that can be dealt on the spot's board. The deal vectors are `w_p / √Z`, so every value is in chips per hand dealt.
 - **Terminals.** Each betting terminal's `Payoff` is computed once, with the rake, from the chips put in since the spot started. A public terminal is evaluated on its own board (DECISIONS P26): a fold with `BoardHands::fold_values`, on any street, and a showdown with `showdown_values`, always on a river board, both O(n) with card removal. The game builds a `BoardHands` for every board the public tree reaches, the spot's, each turn and each river, so a river board's hands are ranked once and serve every showdown on it; the river reached by the cards `a` then `b` shares its board with `b` then `a`. A later board's hand lists hold only the hands that miss it, so the opponent's reach is gathered into its order and the values written back by an index into the spot's lists, with 0 for the hands that hold a dealt card. An all-in called before the river runs out through the chance nodes to a showdown on every river.
-- **Size.** A flop line that reaches the river is copied 49 × 48 times. The game counts the public tree's nodes from the betting tree before building anything, and refuses one over its limit with `SolveError::PublicTreeTooLarge` (DECISIONS P28). The limit is `SolveOptions::max_nodes`, one million by default, the betting tree's own default. It bounds the tree, not the solver's storage, which grows with the hands too; the memory estimator ([#38](https://github.com/Ollienel777/poker-solver/issues/38)) bounds that.
+- **Size.** A flop line that reaches the river is copied 49 × 48 times. The game counts the public tree's nodes from the betting tree before building anything, and refuses one over its limit with `SolveError::PublicTreeTooLarge` (DECISIONS P28). The limit is `SolveOptions::max_nodes`, one million by default, the betting tree's own default. It bounds the tree, not the solver's storage, which grows with the hands too; the [memory estimate](#memory-model) bounds that.
 - **Node paths.** A public node is named by the actions and the cards from the root to it, as tokens separated by spaces: `x b50 c 7s x` is OOP's check, IP's half-pot bet and OOP's call on the flop, the seven of spades, and OOP's check on the turn. `PostflopGame::find` turns a path into a node, and says which token failed and why: an action that is not one at its node, a token at a chance node that is not a card or is a card on the board, or a token after the end of the hand. `PostflopGame::node_path` gives a node's path (DECISIONS P29).
 - **Reading a strategy.** `PostflopGame::reach` gives each player's own reach of a node by hand: its own action probabilities on the way multiplied, and 0 for a hand that holds a card dealt on the way. Summed over the acting player's range at a node, a strategy answers two different questions, with two read-outs that differ by up to several points:
   - **How often each action is taken once the node is reached.** `hand_weights` gives the probability that the acting player holds each hand once the node is reached, including card removal by the opponent's range there, and `action_frequencies` the probability of each action at the node under those weights. Use it for the probabilities of play, such as how often a bet is called.
@@ -235,6 +235,7 @@ Spots on the flop, the turn and the river are solved by the same code. A river s
 | `max_time` | none | the time cap, counted from the call |
 | `check_every` | 10 | measure exploitability after every this many iterations |
 | `max_nodes` | 1,000,000 | refuse a public tree of more nodes, before building it |
+| `max_memory` | 10 GB (10^10 bytes) | refuse a solve whose [memory estimate](#memory-model) is larger, before building the game (DECISIONS D17, P42) |
 
 The target is checked after each measurement, and the caps before each iteration. When several rules hold at once, the target wins, then the iteration cap, then the time cap. If the solve stops after an iteration it did not measure, it measures once more. That last measurement does not change the rule reported: a solve stopped by a cap reports the cap even when the measurement turns out to be at or below the target, so compare the exploitability with the target to know whether it was met. The `progress` callback receives one `Progress` (iterations, elapsed time, exploitability) per measurement, in order, and its last call matches the solution. The library never prints. Measuring only reads the average strategy, so the strategy after `t` iterations is bit-identical whatever the measurement interval and caps.
 
@@ -329,18 +330,46 @@ Both evaluations are tested against brute-force O(n²) evaluation in `f64`.
 
 ### Performance plan
 
-This is the brief's order, and each step needs a benchmark first:
+The brief's order was this, and each step needs a benchmark first:
 
-1. Vectorized terminal evaluation (M3).
+1. Vectorized terminal evaluation (M3). Done.
 2. Suit isomorphism on dealt turn and river cards (M4).
 3. `rayon` across chance branches, with fixed-order reduction (M4).
 4. 16-bit regret and strategy storage with a per-node scale (M4).
 
-After each step, exploitability on the test spots must not get worse beyond an agreed margin.
+The benchmarks are criterion benchmarks in `crates/postflop/benches` on two fixed spots with about 300 hands a side, `turn_srp` (16,317 public nodes) and `flop_srp` (191,844), described with the baseline and the profile in [BENCHMARKS.md](BENCHMARKS.md) (DECISIONS P40). Before any M4 optimization, an iteration of `flop_srp` takes 2 to 3 seconds on the development machine and an exploitability measurement about 1.8 iterations. A sampling profile of an iteration at those hand counts puts 41–46% of the time in the showdown and fold sweeps, 10–11% in gathering the reach into a later board's order and scattering the values back, 14–17% in allocating and freeing the vectors every node of every walk allocates (46% with 16 hands a side), 17–19% in regret matching and the updates, and 3–8% at chance nodes.
+
+The measurements argue for another order, proposed for the decision on #39 to #41, with the reasons and the figures in [BENCHMARKS.md](BENCHMARKS.md#what-it-says-about-the-order-of-the-planned-optimizations):
+
+1. Buffers kept from node to node instead of allocated at each, in the walks and in the game's terminal values, with a pre-sized buffer for the instantaneous regrets and a list per card of the hands it rules out: about a fifth of an iteration, bit-identical results, and the shared allocator out of the way of threads.
+2. `rayon` across chance branches, with fixed-order reduction: up to 5.7× on 8 threads by the bound measured on the current code.
+3. Suit isomorphism: 29% of the work on an average flop and 39% on `flop_srp`, but none on an unpaired rainbow flop.
+4. For memory, one average-strategy profile at a time and best responses that store no strategy, which together save more than 16-bit storage would, before 16-bit storage.
+
+After each step, exploitability on the test spots must not get worse beyond an agreed margin, and the step adds its before-and-after rows to [BENCHMARKS.md](BENCHMARKS.md#log-of-changes).
 
 ### Memory model
 
-Memory is about the sum, over the player nodes of the public tree, of actions × in-range combos of the acting player × (regret + strategy sum) × bytes per value, plus buffers for counterfactual values, the public tree itself (about 100 bytes a node) and a `BoardHands` for each board it reaches. Until the estimator exists, the public tree's node count is the only guard: it is counted from the betting tree before anything is allocated, and over `SolveOptions::max_nodes` the solve refuses to start. The estimator will compute the storage from the tree before allocating, and refuse a solve over the configured limit. Each solve logs the estimate, peak RSS, wall time, iterations and final exploitability to `runs/log.jsonl`. AWS instance sizes are chosen from that log.
+`pk_postflop::estimate_memory(spot, options)` estimates what a solve will need before anything is allocated for it (#38). It counts the public tree from the betting tree, as the node limit does, and each player's hands on every board the tree reaches, and adds up what the solve allocates, item by item, in each phase of a solve: building the game and the solver, iterating, measuring exploitability, and finishing. The largest phase is the estimate. It follows the code as it is, overheads included, so it is honest about the copies a tidier solver would not make (DECISIONS P41). On `flop_srp`, whose peak is while it measures:
+
+| Item | What it is | `flop_srp` |
+| --- | --- | --- |
+| regrets and strategy sums | an `f32` of each per action and hand of the acting player at every player node, over all the player's hands on every street (DECISIONS P25) | 418 MB |
+| solver bookkeeping | `VectorCfr`'s index of rows, 16 bytes a public node; an 80-byte row header per player node; a `bool` per hand at each player node | 40 MB |
+| public tree | a 64-byte record per node, and the children and cards of each player and chance node | 13 MB |
+| hands on each board | a `BoardHands` for each of the 1,226 boards: the hands, weights, cross index, river ranking and index back to the spot's lists | 26 MB |
+| betting tree, payoffs and deal | | 18 kB |
+| average strategy | the profile each measurement builds, an entry per public node and an `f32` per action and hand; the solve holds the last one while it makes the next | 2 × 215 MB |
+| best response | the pure strategy a best-response walk builds, for the larger player | 115 MB |
+| traversal buffers | the vectors a walk holds down its costliest line | 0.1 MB |
+| copy of the game in the solution | made while the solver still holds the original; counted at the finish, which is not the peak here | 34 MB |
+| invariant check | in a build with debug assertions only | |
+
+To the heap at the peak, 1.05 GB here, the estimate adds a margin of 1/256 and 4 KiB for allocations too small to follow one by one, an allowance for the allocator's headers and rounding of 32 bytes a live allocation and 1/16 of the bytes, and 16 MiB for the process, which makes 1.15 GB (DECISIONS P42). `solve` compares that total with `SolveOptions::max_memory`, 10 GB by default (DECISIONS D17), and over it refuses the solve, before building the game, with `SolveError::MemoryTooLarge`, which states the estimate and the limit. The public tree's node limit still applies first.
+
+`tests/memory_estimate.rs` solves a river, two turn and two flop spots under a counting allocator: the heap estimate is never below the measured peak and, the margin included, at most 0.4% above it on the larger spots and 3.6% on the smallest, and the test fails one below it or more than 5% above, in a test build and in a release build alike. On the benchmark spots in a release build, the total came 6% (flop) and 14% (turn) above the process's peak resident memory.
+
+Each solve's resources are recorded as a `pk_postflop::SolveRecord`: the spot and its board, the tree sizes and the hands, the whole itemized estimate, the peak resident memory of the process (`VmHWM` on Linux, `PeakWorkingSetSize` on Windows; DECISIONS P43), the wall time, the iterations, the stopping rule, the final exploitability, the target and caps, and the build and operating system. `pk_postflop::append_record` appends one as a line of JSON to a file the caller names; the library writes no file on its own. The example `solve_spot` appends one per solve to `runs/log.jsonl`, and `solve_spot --estimate` prints the estimate without solving, which stands in for `solver estimate` until the command line exists (DECISIONS P44). AWS instance sizes are chosen from that log.
 
 ## abstraction
 
@@ -393,7 +422,7 @@ The binary is `solver`.
 | `solve-postflop --ranges F --board Ks7d2c [--tree T] [--target 0.3] [--threads N] --out S` | M5 |
 | `inspect S [--node "x b33 c 8h"]` | M5 |
 | `compare A B` | M5 |
-| `estimate --ranges F --board B [--tree T]` (memory estimate only) | M4 |
+| `estimate --ranges F --board B [--tree T]` (memory estimate only; until M5, the example `solve_spot --estimate`) | M4 |
 | `build-buckets --street flop\|turn\|river` | M6 |
 | `solve-preflop --config a [--iters N] [--checkpoint-dir D] [--resume]` | M7 |
 | `inspect-preflop --config a --node "UTG r BTN c"` | M7 |
@@ -637,7 +666,7 @@ Checkpoints are described under [Checkpoints](#checkpoints) and bucket tables un
 | Invariants (`pk_postflop::check_solution`) | strategies sum to 1, reaches follow from the parent, values sum to the pot less the expected rake, nothing NaN or infinite | every solve in a build with debug assertions, and every test solve |
 | Cross-solver | `reference/spots/**` diffed against the reference binary, through [solution dumps](#solution-dump) and `pk_postflop::compare`; without a reference, the comparison is shown to catch each kind of wrong input | gate issues, and every push for the comparison's own tests |
 | Regression | frozen exploitability numbers per spot | every push |
-| Benchmarks (`criterion`) | showdown sweep, one DCFR iteration, best response | before and after perf work |
+| Benchmarks (`criterion`) | showdown and fold sweeps, tree and game builds, one DCFR iteration, best response and exploitability, on fixed turn and flop spots ([BENCHMARKS.md](BENCHMARKS.md)) | before and after perf work |
 
 Fixtures live in `reference/`:
 
