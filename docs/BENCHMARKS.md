@@ -501,3 +501,22 @@ A 100bb single-raised pot on the flop, pot 5.5bb and stacks 97.5bb, with `flop_s
 All four are under the node limit of a million, (c) at 89% of it, and under the 10 GB limit. An iteration's time follows the number of terminals closely, and a solve adds a measurement every 10 iterations at about 1.8 iterations each.
 
 Tree (a) solved to its target of 0.3% of the pot in 80 iterations, ending at 0.25%, in 268 s with its measurements (3.35 s an iteration all told), at a peak resident memory of 1.08 GB. At as many iterations, (b) would take about 11 minutes and (c) about 22. A tree with more actions usually needs more iterations to reach the same exploitability, so those are lower bounds: today, single-threaded on this machine, a flop solve with a raise on every street is a matter of half an hour or more and about 5 GB.
+
+## The solves of the M4 gate
+
+Every test spot solved by `solve_spot` on the code the gate was run on (`9c81bc5`) on 2026-11-25, with the default options: 16 threads, `f32` storage, merged where the spot has a symmetry. Each solve is a record in `runs/log.jsonl`, which the table is read from: the default solve to 0.3% of the pot, and for the turn and flop spots the gate compares with the reference a second solve to 0.03%, where it compares them. The estimate is its total, with its allowances, which is what a solve is refused on.
+
+| Tree | Public nodes | Hands | To 0.3%: iterations, time | To 0.03%: iterations, time | Estimate | Peak resident memory | Estimate over resident |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| the nine river spots | 9 to 87 | 12 to 315 | 30 to 350, at most 0.26 s | | 16.8–17.4 MB | 7.0–7.8 MB | 2.2–2.4 |
+| turn `called_flop_raise_allin` | 2,379 | 358, 412 | 90, 0.71 s | 300, 2.17 s | 34.7 MB | 28.5 MB, 32.5 MB | 1.22, 1.07 |
+| turn `checked_flop_two_bets` | 3,615 | 438, 422 | 70, 0.64 s | 240, 2.07 s | 40.7 MB | 36.1 MB, 38.1 MB | 1.13, 1.07 |
+| turn `three_bet_low_spr` | 3,237 | 99, 150 | 60, 0.25 s | 220, 0.77 s | 24.6 MB | 17.1 MB, 17.6 MB | 1.44, 1.39 |
+| `turn_srp` | 16,317 | 313, 291 | 190, 4.92 s | | 79.0 MB | 76.5 MB | 1.03 |
+| flop `dry_rainbow` | 191,844 | 452, 422 | 90, 31.8 s | 260, 88.2 s | 1,107 MB | 1,058 MB, 1,059 MB | 1.05 |
+| flop `monotone_pot` | 191,844 | 450, 431 | 90, 16.5 s | 280, 54.0 s | 615 MB | 584 MB, 586 MB | 1.05 |
+| flop `paired_raise` | 319,740 | 127, 126 | 100, 14.5 s | 310, 44.0 s | 475 MB | 424 MB, 426 MB | 1.12 |
+| flop `two_tone_raked` | 191,844 | 438, 422 | 70, 18.1 s | 210, 58.1 s | 828 MB | 790 MB, 792 MB | 1.05 |
+| `flop_srp` | 191,844 | 318, 295 | 80, 15.1 s | | 613 MB | 577 MB | 1.06 |
+
+The estimate was at or above the peak resident memory of every solve: 5% to 12% above on the flops, 3% to 44% on the turn spots, and more than double on the rivers, where a solve holds a few hundred kB and the estimate's 16 MiB for the process is nearly all of it. `dry_rainbow` is the largest and the slowest because nothing merges on an unpaired rainbow flop. On a solve of under 100 MB the resident peak moves by several MB from run to run, and in one run of `turn_srp` with 16-bit storage it came out 1.4% above the estimate ([Time](#time), above).
