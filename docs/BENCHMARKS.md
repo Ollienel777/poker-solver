@@ -18,8 +18,8 @@ Two spots are fixed in `crates/postflop/benches/data`, so that every number belo
 
 | Spot | Board | Pot, stack | Tree | Hands (OOP, IP) | Betting nodes | Public nodes | Player nodes | Boards | Memory estimate |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `turn_srp` | Qs8s3d 2d | 11bb, 94.75bb | turn and river: bets of 0.5 and 1 pot, a raise to 3×, all-in; one raise a street | 313, 291 | 384 | 16,317 | 5,776 | 49 | 116 MB; 110.9 MB merged, as the solve runs since #39 |
-| `flop_srp` | Qs8s3d | 5.5bb, 97.5bb | every street: one bet of 0.5 pot, no raise | 318, 295 | 117 | 191,844 | 85,264 | 1,226 | 1.15 GB; 969 MB merged, as the solve runs since #39 |
+| `turn_srp` | Qs8s3d 2d | 11bb, 94.75bb | turn and river: bets of 0.5 and 1 pot, a raise to 3×, all-in; one raise a street | 313, 291 | 384 | 16,317 | 5,776 | 49 | 116 MB; 110.9 MB merged, as the solve runs since #39; 79.0 MB since #41, and 64.5 MB with 16-bit storage |
+| `flop_srp` | Qs8s3d | 5.5bb, 97.5bb | every street: one bet of 0.5 pot, no raise | 318, 295 | 117 | 191,844 | 85,264 | 1,226 | 1.15 GB; 969 MB merged, as the solve runs since #39; 613 MB since #41, and 478 MB with 16-bit storage |
 
 `flop_srp` is also tree (a) of [what a real flop solve costs](#what-a-real-flop-solve-costs).
 
@@ -111,6 +111,14 @@ One row per benchmark a change moves, newest last. "Before" and "after" are meas
 | 2026-11-25 | #39, with P63 | peak resident memory of those solves, `flop_srp` and `monotone_pot` | 1.10 GB, 1.55 GB | 921 to 924 MB, 1.07 GB | −16%, −31% | `solve_spot` | |
 | 2026-11-25 | #39 | memory estimate on 16 threads, total (heap): `flop_srp`, `monotone_pot` | 1.16 GB (1.05 GB), 1.62 GB (1.49 GB) | 969 MB (881 MB), 1.12 GB (1.02 GB) | −17%, −31% | `solve_spot --estimate`, with the alike hands of the next row | |
 | 2026-11-25 | #39, DECISIONS P63: at each terminal and chance node the merged walk gives the hands a node's stabilizer maps onto one another their first hand's value, so that they stay alike bit for bit | one merged iteration, `flop_srp` and `monotone_pot`, 1 thread (16) | 1.126 s, 0.771 s; 0.1094 s, 0.0796 s, `49b31d8` | 1.169 s, 0.805 s; 0.1092 s, 0.0823 s | +3.8%, +4.4%; 0%, +3.4% by the minima; +3.2%, +2.6%; +7.7%, +4.3% by the medians | alternating builds, 4 rounds, 4 timings a round, the machine idle; on 16 threads the rounds' minima overlap and single timings spread by 15% | unmerged results bit for bit the same; merged `flop_srp` and `monotone_pot` change in their last bits |
+| 2026-11-25 | #41, DECISIONS P64: a solve holds one average-strategy profile at a time, its best responses keep no strategy, and the game is moved into the solution instead of copied | a solve's peak heap on 16 threads, 12 iterations: `flop_srp`, `turn_srp`, `monotone_pot` | 877.3 MB, 87.1 MB, 1,019.0 MB, `404cad9` | 547.5 MB, 57.4 MB, 552.8 MB | −38%, −34%, −46% | counting allocator, a program outside the repository built against both, and `tests/memory_estimate.rs`; the estimate 0.4% above the peak on both builds | every result bit for bit the same: `fingerprint` on the 9 spots without merging, with no pool and on 16 threads, against the outputs from before every optimization, and merged on 1, 3 and 16 threads against `404cad9`'s, on those spots and the 10 merged ones: the six test spots written for the merging, both benchmark spots, `monotone_pot` and `paired_raise` |
+| 2026-11-25 | #41 | memory estimate on 16 threads, total (heap): `flop_srp`, `turn_srp`, `monotone_pot` | 969 MB (881 MB), 111 MB (87.5 MB), 1.12 GB (1.02 GB) | 613 MB (550 MB), 79.0 MB (57.7 MB), 615 MB (555 MB) | −37%, −29%, −45% | `solve_spot --estimate` | the same |
+| 2026-11-25 | #41, DECISIONS P65, P66: 16-bit storage, `SolveOptions::compressed_storage`, off by default | a solve's peak heap on 16 threads, 12 iterations: `flop_srp`, `turn_srp`, `monotone_pot` | 547.5 MB, 57.4 MB, 552.8 MB, with `f32` storage | 420.8 MB, 43.8 MB, 466.4 MB | −23%, −24%, −16%; the regrets and strategy sums halved, 254.4 MB to 127.2 MB on `flop_srp` | counting allocator, as above | not the same numbers: [16-bit storage](#16-bit-storage-41) |
+| 2026-11-25 | #41 | memory estimate on 16 threads, total (heap): `flop_srp`, `turn_srp`, `monotone_pot` | 613 MB (550 MB), 79.0 MB (57.7 MB), 615 MB (555 MB), with `f32` storage | 478 MB (422 MB), 64.5 MB (43.9 MB), 523 MB (468 MB) | −22%, −18%, −15% | `solve_spot --estimate --compressed` | |
+| 2026-11-25 | #41 | iterations to 0.3% of the pot by the default solve, 19 spots | | the same under both storages on 17; with 16-bit storage 30 fewer on `deep_high_spr` (320) and 10 fewer on `flop_small` (50) | | [16-bit storage](#16-bit-storage-41) | a floor of 0.0002% to 0.003% of the pot where `f32` goes on |
+| 2026-11-25 | #41 | one iteration, `flop_srp` and `monotone_pot`, 1 thread (16 threads), option off | 1.154 s, 0.781 s; 0.1109 s, 0.0794 s, `404cad9` | 1.147 s, 0.749 s; 0.1073 s, 0.0792 s | −0.6%, −4.0%; −3.3%, −0.3% by the minima: within the noise | alternating builds, 4 rounds, below; single invocations spread by 3–16% | the same |
+| 2026-11-25 | #41 | one iteration, `flop_srp` and `monotone_pot`, 1 thread (16 threads), option on against off | 1.147 s, 0.749 s; 0.1073 s, 0.0792 s | 1.381 s, 0.934 s; 0.1332 s, 0.0964 s | +20%, +25%; +24%, +22% | the same runs | [16-bit storage](#16-bit-storage-41) |
+| 2026-11-25 | #41 | solves to 0.3% of the pot on 16 threads, `flop_srp` and `monotone_pot`: wall time, peak resident memory | 15.7 s and 919 MB, 17.0–17.8 s and 1.07 GB, `404cad9` | off: 15.3–15.6 s and 574 MB, 16.9–17.1 s and 581 MB; on: 17.2–17.5 s and 444 MB, 18.5–18.9 s and 491 MB | off −38% and −46% resident; on −52% and −54%, 10% to 15% more time than off | `solve_spot`, two runs each in alternating order | the same stopping iteration |
 
 How #39 was measured. The program of #87 and #40, outside the repository, built against `f4e3d6f` and against the change, times on each spot, inside a rayon pool of the thread count timed, after 6 warm-up iterations in the pool: an iteration, then a measurement as the solve makes it, the average strategy on the full public tree (the solver's own on `f4e3d6f`, the merged average expanded through the counterparts on the change) and its exploitability, again and again. The two builds ran back to back in 4 rounds of alternating order (old, new, new, old), on one thread and on 16 in each, with 7 timings of each step a round on `turn_srp` and 3 on the flops. The machine was otherwise idle. `dry_rainbow`, whose deal no relabelling keeps, runs the full game on both builds and is the check that the rest of the code costs nothing; it came within 2% by the minima. The rows of the average strategy alone are a second run of the same kind, on `flop_srp` and `monotone_pot`, with the expansion as committed, which writes a node on a path of representatives straight from the solver's row; the first run, without that, had it 16% and 24% slower on one thread, and in that second run, on a slower afternoon, the iterations came out 1.72× and 3.41× on one thread and 1.63× and 3.14× on 16, as in the first. Each row gives the minimum of the timings and, in brackets, their median.
 
@@ -261,8 +269,8 @@ The plan is (1) merging suit-isomorphic chance branches, (2) threads across chan
 | The gather and the scatter (not planned; their allocations removed in #87) | 8%, and 3–4% more in their allocations | most of the 11–12% | medium: evaluate on the spot's hand lists with the dead hands' reach at zero, or at least reuse the two buffers |
 | `rules_out` (done in #87) | with the vectors made after each card, 3% of a turn iteration, 7.6% of a flop iteration and 12% of a flop measurement | most of that | easy: a list per card of the hands it rules out, which needs a method on `PublicGame` |
 | The instantaneous-regret buffer (done in #87) | the doubling `collect` in `own_node` | 4–8%, measured above | trivial, one line in `pk_cfr::vector` |
-| Fewer copies at a measurement (not planned) | memory: the last profile (215 MB on `flop_srp`) and the best response's pure strategy (115 MB), 31% of the 1.05 GB peak | 330 MB on `flop_srp`, more than 16-bit storage saves | easy: drop the last profile before measuring, and compute best-response values without building the strategy; no change to the numbers |
-| 16-bit storage (#41, planned third) | memory: the regrets and sums, 418 MB of the 1.05 GB peak (40%) | 209 MB (20%); no speed, and some cost in regret matching and the updates | medium, and it changes the numbers, so every exploitability check must be redone |
+| Fewer copies at a measurement (#41, done first; see the log of changes) | memory: the last profile (215 MB on `flop_srp`) and the best response's pure strategy (115 MB), 31% of the 1.05 GB peak | 330 MB on `flop_srp`, more than 16-bit storage saves; it took the merged `flop_srp`'s peak heap from 877 MB to 548 MB on 16 threads, with the game moved into the solution instead of copied | easy: drop the last profile before measuring, and compute best-response values without building the strategy; no change to the numbers |
+| 16-bit storage (#41, planned third; done as an option, off by default, see [16-bit storage](#16-bit-storage-41)) | memory: the regrets and sums, 418 MB of the 1.05 GB peak (40%) | 209 MB (20%); no speed, and some cost in regret matching and the updates; it halved the merged `flop_srp`'s 254 MB, taking the peak heap from 548 MB to 421 MB | medium, and it changes the numbers, so every exploitability check must be redone |
 | Measuring less often (not planned) | 15% of a solve's time at a measurement every 10 iterations | most of that | trivial, an option's default, but it decides when solves stop |
 
 So the planned order is not what the measurements favour:
@@ -270,7 +278,7 @@ So the planned order is not what the measurements favour:
 1. **Per-node allocation first**, with the two smaller fixes beside it (the instantaneous-regret buffer and the `rules_out` lists): together about a fifth to a quarter of an iteration, bit for bit the same results, the cheapest work on the list, and the thing most likely to stop threads from scaling. Done in #87: a fifth to a quarter less time an iteration, bit for bit the same, as the log of changes records.
 2. **Threads next**: the largest gain by far, and independent of the board. Done in #40: a `flop_srp` solve to 0.3% of the pot in 35 s on 16 threads instead of 197 s on one, every result bit for bit the same.
 3. **Isomorphism third**: about 29% less time and memory on an average flop, but nothing on the 31% of flops that are rainbow and unpaired, and the most work. Done in #39: an iteration takes what the counts say on one thread, `flop_srp`'s 1.64× as fast and `monotone_pot`'s 3.50×, a `flop_srp` solve to 0.3% on 16 threads takes 16.2 s instead of 21.1 s, and a measurement, which stays on the full tree, now costs 5 to 10 iterations on 16 threads.
-4. **For memory, the copies before the precision**: holding one profile and no best-response strategy saves more than 16-bit storage does, at no cost to the numbers. 16-bit storage after that, if a tree that matters still does not fit.
+4. **For memory, the copies before the precision**: holding one profile and no best-response strategy saves more than 16-bit storage does, at no cost to the numbers. 16-bit storage after that, if a tree that matters still does not fit. Done in #41, in that order: the copies took the peak heap of a merged `flop_srp` solve on 16 threads from 877 MB to 548 MB, every number bit for bit the same, and 16-bit storage, an option off by default, takes it to 421 MB, at the cost in exploitability that [16-bit storage](#16-bit-storage-41) measures.
 
 ## Memory
 
@@ -332,6 +340,152 @@ On one thread the largest phase of the estimate is within a kilobyte of the meas
 The total adds to the heap an allowance for the allocator (32 bytes an allocation and 1/16 of the bytes) and 16 MiB for the process; it came 6% and 14% above the peak resident memory, which is the right side to err on. The figures are those of #87, which keeps the CFR walk's working memory through the solve: on these spots it moved the estimate by 0.25 MB at most and the peak resident memory by 0.2 MB, and `toy_polarized`'s peak stayed at 4.8 MB.
 
 Where the flop spot's peak goes, while it measures exploitability: regrets and strategy sums 418 MB, two average-strategy profiles 430 MB, a best response 115 MB, the solver's bookkeeping 40 MB, the hands on its 1,226 boards 26 MB, the public tree 13 MB. Only the first is what the solve has to hold; the profiles and the best response are the "fewer copies" row above.
+
+Measured again on the code of #41 on 2026-11-25, which holds one profile, no best-response strategy and no copy of the game (DECISIONS P64), and with 16-bit storage (P65), by `tests/memory_estimate.rs` with the spots and caps above, on one thread unless the row says otherwise, in a test build and in a release build, which give the same figures; those of `monotone_pot`, and of `turn_srp` on 16 threads with 16-bit storage, are from a program outside the repository with the test's counting allocator, solving as the test does:
+
+| Spot | Solve | Threads | Before #41, measured | `f32` storage: estimate, measured, ratio | 16-bit storage: estimate, measured, ratio |
+| --- | --- | --- | --- | --- | --- |
+| `deep_high_spr` (river) | 25 iterations | 1 | 710 kB, 695 kB release | 537.9 kB, 531.7 kB: 1.012 | 433.5 kB, 427.7 kB: 1.013 |
+| `turn_small` | 25 iterations | 1 | 1.021 MB, 914 kB release | 601.0 kB, 594.2 kB: 1.011 | 542.5 kB, 536.0 kB: 1.012 |
+| `turn_small` | 25 iterations | 2, 4, 16 | 1.07–1.29 MB | 909–995 kB, 804–955 kB: 1.034–1.131 | 850 kB, 746 kB: 1.140 (2); 937 kB, 906 kB: 1.034 (16) |
+| `flop_small` | 12 iterations | 1 | 51.8 MB, 45.2 MB release | 29.61 MB, 29.49 MB: 1.004 | 27.27 MB, 27.16 MB: 1.004 |
+| `flop_small` | 12 iterations | 2, 4, 16 | 51.9–52.0 MB, 45.4–45.5 MB release | 29.82–29.91 MB, 29.61–29.76 MB: 1.005–1.007 | 27.48–27.56 MB, 27.28–27.44 MB: 1.005–1.007 |
+| `turn_srp` | 12 iterations | 1 | 82.1 MB | 52.68 MB, 52.47 MB: 1.004 | 38.94 MB, 38.78 MB: 1.004 |
+| `turn_srp` | 12 iterations | 16 | 87.1 MB | 57.69 MB, 57.41 MB: 1.005 | 43.95 MB, 43.75 MB: 1.005 |
+| `turn_srp`, merging off | 12 iterations | 1 | 91.9 MB | 62.46 MB, 62.21 MB: 1.004 | |
+| `flop_monotone` | 12 iterations | 1 | 16.47 MB, 14.74 MB release | 8.842 MB, 8.804 MB: 1.004 | 8.482 MB, 8.445 MB: 1.004 |
+| `flop_monotone` | 12 iterations | 2, 16 | 16.63–16.72 MB, 14.90–14.99 MB release | 9.18–9.26 MB, 9.07–9.20 MB: 1.007–1.011 | 8.82–8.90 MB, 8.74–8.80 MB: 1.009–1.014 |
+| `flop_two_tone` | 12 iterations | 1 | 19.58 MB, 17.85 MB release | 11.68 MB, 11.63 MB: 1.004 | |
+| `turn_four_flush` | 25 iterations | 1 | 1.263 MB, 1.155 MB release | 737.0 kB, 729.7 kB: 1.010 | 674.3 kB, 667.2 kB: 1.011 |
+| `turn_four_flush` | 25 iterations | 2, 16 | 1.36–1.51 MB | 1.078–1.164 MB, 0.972–1.132 MB: 1.028–1.109 | |
+| `flop_srp` (slow test) | 12 iterations | 1 | 870.6 MB | 543.0 MB, 540.9 MB: 1.004 | 415.8 MB, 414.2 MB: 1.004 |
+| `flop_srp` (slow test) | 12 iterations | 16 | 877.2 MB | 549.7 MB, 547.5 MB: 1.004 | 422.5 MB, 420.7 MB: 1.004 |
+| `monotone_pot` | 12 iterations | 1 | 1,011.5 MB | 547.5 MB, 545.3 MB: 1.004 | 460.8 MB, 459.0 MB: 1.004 |
+| `monotone_pot` | 12 iterations | 16 | 1,019.0 MB | 555.0 MB, 552.8 MB: 1.004 | 468.3 MB, 466.4 MB: 1.004 |
+
+The "before" column is the tables above, and for `monotone_pot` the program of the last two rows built against `404cad9`. Since the finish is no longer the peak, a test build and a release build now measure the same peak, to the byte, on every spot above: the invariant check that only a test build makes comes at the finish. On several threads the figures move from run to run, as the pool's threads share out their jobs differently (DECISIONS P55); the highest ratio, 1.140 on `turn_small` on 2 threads, is within that test's bound of 5%, 16 KiB a thread and 64 KiB.
+
+Every figure of the first part is the solve of before #41 without its second profile, its best response's strategy and its copy of the game: `flop_small`'s peak in a test build falls from 51.8 MB to 29.5 MB, and `flop_srp`'s on 16 threads from 877.3 MB to 547.5 MB, where the regrets and strategy sums, 254 MB, are now 46% of it and the one profile, 215 MB, 39%. With 16-bit storage the regrets and strategy sums are half as large, and the rows 8 bytes larger: `flop_srp`'s peak falls to 420.8 MB, `turn_srp`'s to 43.8 MB and `monotone_pot`'s to 466.4 MB. The estimate is never below the measured peak, and on one thread at most 1.4% above it, on the smallest spot; on several threads within the bounds of DECISIONS P55. The finish, which held the solver, the profiles and a copy of the game, now holds the game, the profile and the pool, and is the peak on no spot.
+
+## 16-bit storage (#41)
+
+`SolveOptions::compressed_storage`, off by default, stores the regrets as `i16` codes and the strategy sums as `u16` codes, each node's slice with one `f32` scale, rounded with a Weyl sequence of offsets (`pk_cfr::compressed`; DECISIONS P65, P66). What it costs and saves, measured on 2026-11-25 on the code of #41, against `f32` storage on the same code. The margin it must keep is for the user to agree, and it stays off until then.
+
+### Exploitability
+
+Each spot solved as by default, DCFR(1.5, 0, 2), merged where the spot merges, on 16 threads (which every thread count gives): the iteration at which the default solve, measuring every 10 iterations, first reaches 0.3% of the pot, then the exploitability of the average strategy after each count, in percent of the pot, and each player's value at the last count. The program, outside the repository, calls `solve` for the first column and runs the solver as `solve` does, measuring with `exploitability` on the full tree, for the others.
+
+| Spot | Storage | To 0.3% | 100 | 200 | 500 | 1,000 | 2,000 | 5,000 | 10,000 | 20,000 | Values at the last count, OOP and IP, % of the pot |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `deep_high_spr` | f32 | 350 | 1.175 | 0.501 | 0.161 | 0.0533 | 0.0217 | 0.00387 | 0.00122 | 0.000345 | 51.99680, 40.78933 |
+|  | 16-bit | 320 | 1.499 | 0.654 | 0.132 | 0.0556 | 0.0170 | 0.00542 | 0.00297 | 0.00305 | -0.000107, +0.000047 from f32 |
+| `four_flush` | f32 | 50 | 0.0808 | 0.0312 | 0.00550 | 0.00182 | 0.000478 | 0.000107 | 0.000047 | 0.000019 | 39.24369, 60.75631 |
+|  | 16-bit | 50 | 0.0807 | 0.0312 | 0.00547 | 0.00188 | 0.000443 | 0.000364 | 0.000539 | 0.000306 | -0.000000, -0.000000 from f32 |
+| `wet_oop_polarized` | f32 | 40 | 0.0788 | 0.0248 | 0.00545 | 0.00170 | 0.000508 | 0.000117 | 0.000071 | 0.000026 | 81.09074, 12.79354 |
+|  | 16-bit | 40 | 0.0786 | 0.0247 | 0.00545 | 0.00173 | 0.000484 | 0.000115 | 0.000093 | 0.000195 | +0.000008, +0.000000 from f32 |
+| `turn_small` | f32 | 60 | 0.112 | 0.0244 | 0.00418 | 0.00117 | 0.000352 | 0.000096 | 0.000078 |  | 54.96988, 37.52707 |
+|  | 16-bit | 60 | 0.110 | 0.0250 | 0.00453 | 0.00207 | 0.00166 | 0.00168 | 0.00173 |  | -0.000008, +0.000014 from f32 |
+| `turn_medium` | f32 | 100 | 0.266 | 0.0724 | 0.0165 | 0.00418 | 0.00115 | 0.000305 | 0.000099 |  | 47.33486, 42.45162 |
+|  | 16-bit | 100 | 0.264 | 0.0722 | 0.0152 | 0.00424 | 0.00191 | 0.000965 | 0.000945 |  | -0.000003, +0.000012 from f32 |
+| `flop_small` | f32 | 60 | 0.0710 | 0.0159 | 0.00336 | 0.00132 | 0.000548 | 0.000192 | 0.000090 |  | 56.62725, 33.63695 |
+|  | 16-bit | 50 | 0.0529 | 0.0157 | 0.00361 | 0.00198 | 0.00139 | 0.00116 | 0.00142 |  | -0.000129, -0.000008 from f32 |
+| `flop_tiny` | f32 | 50 | 0.0574 | 0.0129 | 0.00186 | 0.000630 | 0.000227 | 0.000080 | 0.000048 |  | 52.14883, 40.66633 |
+|  | 16-bit | 50 | 0.0543 | 0.0103 | 0.00182 | 0.000916 | 0.00103 | 0.000889 | 0.000986 |  | -0.000008, +0.000026 from f32 |
+| `flop_monotone` | f32 | 50 | 0.0688 | 0.0209 | 0.00220 | 0.000507 | 0.000170 | 0.000048 |  |  | 35.12629, 57.21485 |
+|  | 16-bit | 50 | 0.0785 | 0.0225 | 0.00295 | 0.000896 | 0.000751 | 0.000936 |  |  | -0.000060, +0.000022 from f32 |
+| `flop_two_tone` | f32 | 40 | 0.0248 | 0.00616 | 0.00108 | 0.000343 | 0.000117 | 0.000033 |  |  | 34.90238, 57.10245 |
+|  | 16-bit | 40 | 0.0240 | 0.00619 | 0.00114 | 0.000448 | 0.000469 | 0.000297 |  |  | -0.000015, +0.000044 from f32 |
+| `flop_paired` | f32 | 60 | 0.102 | 0.0240 | 0.00319 | 0.000928 | 0.000274 | 0.000083 |  |  | 56.21035, 35.55991 |
+|  | 16-bit | 60 | 0.0827 | 0.0173 | 0.00748 | 0.00158 | 0.000575 | 0.000432 |  |  | -0.000005, +0.000013 from f32 |
+| `turn_four_flush` | f32 | 100 | 0.260 | 0.0507 | 0.00882 | 0.00273 | 0.000755 | 0.000155 |  |  | 56.30366, 36.66973 |
+|  | 16-bit | 100 | 0.265 | 0.0489 | 0.00909 | 0.00405 | 0.00308 | 0.00263 |  |  | -0.000033, -0.000241 from f32 |
+| `flop_broken` | f32 | 50 | 0.0613 | 0.0149 | 0.00302 | 0.00104 | 0.000414 | 0.000135 |  |  | 33.07873, 59.16908 |
+|  | 16-bit | 50 | 0.0604 | 0.0168 | 0.00292 | 0.00138 | 0.00104 | 0.00102 |  |  | -0.000023, +0.000010 from f32 |
+| `flop_monotone_wide` | f32 | 40 | 0.0181 | 0.00424 | 0.000710 | 0.000172 | 0.000048 |  |  |  | 40.99557, 51.17034 |
+|  | 16-bit | 40 | 0.0185 | 0.00443 | 0.000736 | 0.000210 | 0.000083 |  |  |  | -0.000006, -0.000003 from f32 |
+| `turn_srp` | f32 | 190 | 0.912 | 0.252 | 0.0644 | 0.0161 | 0.00491 |  |  |  | 33.09145, 57.66703 |
+|  | 16-bit | 190 | 0.890 | 0.258 | 0.0497 | 0.0155 | 0.00499 |  |  |  | +0.000026, -0.000172 from f32 |
+| `flop_srp` | f32 | 80 | 0.164 | 0.0384 | 0.00602 | 0.00150 | 0.000413 |  |  |  | 29.54492, 58.08200 |
+|  | 16-bit | 80 | 0.166 | 0.0387 | 0.00610 | 0.00154 | 0.00122 |  |  |  | +0.000371, +0.000039 from f32 |
+| `monotone_pot` | f32 | 90 | 0.205 | 0.0527 | 0.00984 | 0.00285 | 0.000841 | 0.000165 |  |  | 41.84828, 58.15172 |
+|  | 16-bit | 90 | 0.207 | 0.0533 | 0.00986 | 0.00289 | 0.000931 | 0.000330 |  |  | -0.000010, +0.000007 from f32 |
+| `paired_raise` | f32 | 100 | 0.246 | 0.0701 | 0.0113 | 0.0236 | 0.00359 |  |  |  | 30.60799, 59.68452 |
+|  | 16-bit | 100 | 0.262 | 0.0675 | 0.0118 | 0.00319 | 0.00132 |  |  |  | +0.000720, -0.000605 from f32 |
+| `two_tone_raked` | f32 | 70 | 0.116 | 0.0317 | 0.00635 | 0.00189 | 0.000583 |  |  |  | 36.82017, 52.67552 |
+|  | 16-bit | 70 | 0.117 | 0.0322 | 0.00665 | 0.00199 | 0.000648 |  |  |  | +0.000003, +0.000013 from f32 |
+| `dry_rainbow` | f32 | 90 | 0.213 | 0.0502 | 0.00843 | 0.00237 | 0.000702 |  |  |  | 33.71393, 66.28607 |
+|  | 16-bit | 90 | 0.213 | 0.0503 | 0.00968 | 0.00255 | 0.000771 |  |  |  | -0.000010, +0.000012 from f32 |
+
+What it shows:
+
+- **To 0.3% of the pot**, the default solve stops at the same measurement under both storages on 17 of the 19 spots, and sooner with 16-bit storage on `deep_high_spr` (320 iterations against 350) and `flop_small` (50 against 60).
+- **To 1,000 iterations**, well past that, the two are close, and either can be ahead, as two runs that round differently are (DECISIONS P20): at 1,000 iterations within a factor of 1.8 of each other on every spot but `paired_raise`, and within 8% on the other benchmark and reference spots, which have about 300 hands a side. On `paired_raise` 16-bit storage is well ahead there, because f32's exploitability rises from 0.0113% at 500 iterations to 0.0236% at 1,000 before falling again.
+- **Then 16-bit storage levels off where f32 goes on down.** Followed to 20,000 iterations, the river spots level off at 0.0002% of the pot (`wet_oop_polarized`), 0.0003% to 0.0005% (`four_flush`) and 0.003% (`deep_high_spr`), where f32 reaches 0.00003%, 0.00002% and 0.00035%. The small turn and flop spots, followed to 5,000 or 10,000 iterations, level off at 0.0003% (`flop_two_tone`) to 0.0026% (`turn_four_flush`), where f32 reaches 0.00003% to 0.00016%. The larger spots are still near f32 at their last count, 2,000 iterations or 5,000 on `monotone_pot`: within 5% on `turn_srp` and within 12% on `two_tone_raked`, 1.7 times f32 on `flop_monotone_wide`, 2.0 times on `monotone_pot` (0.00033% against 0.00016%), and 3.0 times on `flop_srp` (0.00122% against 0.00041%), whose 16-bit run flattens from 1,000 iterations on. On `dry_rainbow`, which nothing merges, 16-bit storage is within 10% of f32 at 2,000 iterations (0.00077% against 0.00070%).
+- **0.03% of the pot**, where the gate compares solves, is passed at the same count of those measured under both storages on every spot, and every level at which 16-bit storage stops is at least ten times below it.
+- **The values** at the last count are within 0.0007% of the pot of f32's on `paired_raise`, and within 0.0004% on every other spot.
+
+### How the rounding was chosen
+
+The work began with rounding to nearest, the simplest rule, with an offset drawn per node and iteration from a hash as the planned remedy if that set a floor. Both were measured, with the offsets of a Weyl sequence, with each half of the storage in `f32` and the other in 16 bits, and with exact `f32` sums quantized only when the average is read, which is what the representation alone loses. On Leduc, in chips, from the solver of `pk_cfr::public_leduc`:
+
+| Storage | Schedule | 1,000 | 3,000 | 10,000 | 30,000 |
+| --- | --- | --- | --- | --- | --- |
+| `f32` | DCFR | 1.88e-4 | 1.95e-5 | 1.51e-5 | 3.61e-5 |
+| both halves rounded to nearest | DCFR | 3.39e-4 | 4.36e-3 | 3.24e-2 | 9.77e-2 |
+| regrets to nearest, sums with a hashed offset | DCFR | 3.43e-4 | 7.54e-4 | 1.08e-3 | 2.34e-3 |
+| regrets to nearest, sums with the Weyl offsets | DCFR | 2.63e-4 | 1.90e-4 | 2.11e-4 | 2.36e-4 |
+| `f32` regrets, sums rounded to nearest | DCFR | 4.79e-4 | 5.14e-3 | 3.19e-2 | 9.77e-2 |
+| 16-bit regrets rounded to nearest, `f32` sums | DCFR | 1.57e-4 | 1.73e-5 | 1.49e-5 | 3.64e-5 |
+| `f32` sums quantized to 16 bits when read | DCFR | 1.90e-4 | 2.49e-5 | 2.19e-5 | 4.75e-5 |
+| as shipped: both halves with the Weyl offsets | DCFR | 3.44e-4 | 2.05e-4 | 2.45e-4 | 3.25e-4 |
+| `f32` | linear CFR | 5.18e-3 | 2.13e-3 | 1.28e-3 | 5.40e-4 |
+| regrets to nearest, sums with the Weyl offsets | linear CFR | 4.63e-3 | 2.93e-3 | 5.23e-3 | 2.65e-2 |
+| as shipped | linear CFR | 5.63e-3 | 2.85e-3 | 1.48e-3 | 1.33e-3 |
+| `f32` | CFR | 1.29e-2 | 5.24e-3 | 2.03e-3 | 9.47e-4 |
+| regrets to nearest, sums with the Weyl offsets | CFR | 1.18e-2 | 5.78e-3 | 8.60e-3 | 7.89e-2 |
+| as shipped | CFR | 1.19e-2 | 4.81e-3 | 2.13e-3 | 1.43e-3 |
+
+And postflop, under DCFR on 16 threads, in percent of the pot, with the regrets rounded to nearest in each row but `f32`'s:
+
+| Spot | Sums rounded | 1,000 | 2,000 or 3,000 |
+| --- | --- | --- | --- |
+| `turn_small` | `f32` | 0.00117 | 0.000190 (3,000) |
+| | to nearest | 0.00430 | 0.0308 |
+| | with a hashed offset | 0.00301 | 0.00454 |
+| | with the Weyl offsets | 0.00219 | 0.00157 |
+| `turn_srp` | `f32` | 0.0161 | 0.00491 (2,000) |
+| | to nearest | 0.0170 | 0.0164 |
+| | with a hashed offset | 0.0159 | 0.00611 |
+| | with the Weyl offsets | 0.0159 | 0.00520 |
+| `monotone_pot` | `f32` | 0.00285 | 0.000841 (2,000) |
+| | to nearest | 0.00315 | 0.00301 |
+| | with a hashed offset | 0.00297 | 0.00121 |
+| | with the Weyl offsets | 0.00288 | 0.000892 |
+
+So the sums are what costs: the regrets in 16 bits with `f32` sums are as good as `f32` under DCFR, and exact sums quantized only when read lose little, so it is their accumulation that loses. Rounded to nearest, a sum's increment, about 3/t of it an iteration under DCFR, falls below half a step for every entry but the largest after a few thousand iterations, and the average strategy freezes and then grows worse. A hashed offset is right on average, but its errors add up like a random walk, and the floor grows as the square root of the iterations. The Weyl offsets' errors cancel for a value that changes slowly, and the floor is flat. Under CFR and linear CFR the regrets also need them: those schedules do not halve negative regrets, so a node's scale grows with its dominated action's regret, and its other regrets' changes fall below half a step. The program and every run's output are in the scratch folder of #41, outside the repository.
+
+### Time
+
+One iteration as the solve runs it, merged, on a warm solver after 6 iterations in a pool of the thread count timed, by a program outside the repository built against `404cad9` and against the change, with `f32` storage (off) and with 16-bit storage (on). The three ran in 4 rounds of alternating order (now, off, on, on, off, now, then the reverse), 3 timings an invocation on one thread and 6 on 16, the machine otherwise idle. Minimum, and in brackets the median, of 24 timings on one thread and 48 on 16:
+
+| Spot | Threads | `404cad9` | Off | On | Off against `404cad9` | On against off |
+| --- | --- | --- | --- | --- | --- | --- |
+| `flop_srp` | 1 | 1.154 s (1.211) | 1.147 s (1.182) | 1.381 s (1.457) | −0.6% (−2.4%) | +20.4% (+23.2%) |
+| `flop_srp` | 16 | 0.1109 s (0.1184) | 0.1073 s (0.1185) | 0.1332 s (0.1428) | −3.3% (+0.1%) | +24.1% (+20.5%) |
+| `monotone_pot` | 1 | 0.781 s (0.831) | 0.749 s (0.797) | 0.934 s (0.993) | −4.0% (−4.1%) | +24.7% (+24.7%) |
+| `monotone_pot` | 16 | 0.0794 s (0.0890) | 0.0792 s (0.0871) | 0.0964 s (0.1049) | −0.3% (−2.1%) | +21.7% (+20.4%) |
+
+The minima of single invocations spread by 3% to 9% on one thread and 7% to 16% on 16, so the change with the option off is within the noise of `404cad9`: on `flop_srp` on one thread the two builds' invocations range over 1.147–1.183 s and 1.154–1.226 s. With the option on, every invocation is slower than every one with it off, on one thread by a fifth to a quarter. That is the encoding's price, untuned: the decoding of each regret, the scan for the largest and the second pass that writes the codes, at every node of the traverser. A measurement is unchanged, since it reads an `f32` profile, so a whole solve pays less: to 0.3% of the pot on 16 threads, `solve_spot`, two runs each in alternating order,
+
+| Spot | Iterations | `404cad9` | Off | On | Peak resident: `404cad9`, off, on | Estimate, total: off, on |
+| --- | --- | --- | --- | --- | --- | --- |
+| `turn_srp` | 190 | 4.85 s, 4.74 s | 4.91 s, 4.77 s | 5.52 s, 5.41 s | 110.5 and 107.6 MB, 73.9 and 73.6 MB, 58.4 and 57.0 MB | 79.0 MB, 64.5 MB |
+| `flop_srp` | 80 | 15.71 s, 15.73 s | 15.26 s, 15.64 s | 17.49 s, 17.25 s | 919 MB, 574 MB, 444 MB | 613 MB, 478 MB |
+| `monotone_pot` | 90 | 17.82 s, 16.98 s | 16.85 s, 17.07 s | 18.52 s, 18.93 s | 1.07 GB, 581 MB, 491 MB | 615 MB, 523 MB |
+
+Every solve stopped at the same iteration under both storages, at the same exploitability with the option off as on `404cad9` (0.2778%, 0.2530% and 0.2552% of the pot) and at 0.2840%, 0.2560% and 0.2573% with it on. With 16-bit storage a solve takes 10% to 15% longer and holds 23% (`flop_srp`) and 16% (`monotone_pot`) less resident memory than with `f32` storage, and 52% and 54% less than on `404cad9`. The estimate's total came 6% to 8% above the peak resident memory on the flops, and 7% to 13% on `turn_srp`.
+
+A second set of the same solves, four of each on a machine that was not idle, so that only its ratios and its memory count: the same iterations and exploitabilities; with the option off within the noise of `404cad9` (5.4–6.0 s against 5.1–6.2 s, 15.5–23.4 s against 16.0–24.3 s, 19.5–20.3 s against 19.1–21.0 s); with it on, 6% to 13% longer than off by the means of the four runs; and peak resident memory of 76.4–77.8 MB and 59.2–65.4 MB on `turn_srp`, 575.5–577.1 MB and 445.4–447.6 MB on `flop_srp`, and 582.8–586.7 MB and 492.7–493.4 MB on `monotone_pot`, off and on. The estimate's total was 5% to 7% above the flops' peaks. On `turn_srp` it was 2% to 3% above with the option off, and with it on from 1.4% below the peak to 9% above: the resident peak of a solve this small moves by up to 6 MB between identical runs, which is more than the estimate's allowance for the process leaves spare.
 
 ## What a real flop solve costs
 

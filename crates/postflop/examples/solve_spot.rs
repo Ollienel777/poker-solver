@@ -16,10 +16,13 @@
 //! peak resident memory, the wall time, the iterations and the exploitability, as one line of
 //! JSON to `runs/log.jsonl`, or to the file `--log` names; `--no-log` writes nothing.
 //! `--max-memory` sets the memory limit in GB, 10 by default, and `--threads` the threads the
-//! solve runs on, all the machine offers by default.
+//! solve runs on, all the machine offers by default. `--compressed` stores the regrets and
+//! strategy sums in 16 bits with a scale per node (`SolveOptions::compressed_storage`), for the
+//! estimate and the solve alike, and the record says which storage the solve used.
 //!
 //! ```text
 //! cargo run --release -p pk-postflop --example solve_spot -- <spot> --estimate
+//! cargo run --release -p pk-postflop --example solve_spot -- <spot> --compressed
 //! ```
 //!
 //! This is a way to try the library, not the `solver` command line, which comes in M5. Every
@@ -37,7 +40,7 @@ use pk_postflop::{
 
 const USAGE: &str = "usage: solve_spot <spot file> [--node \"x b50\"] [--target <percent>] \
      [--iterations <cap>] [--estimate] [--log <file> | --no-log] [--max-memory <GB>] \
-     [--threads <n>]";
+     [--threads <n>] [--compressed]";
 
 /// Where the resource log goes unless `--log` or `--no-log` says otherwise.
 const LOG: &str = "runs/log.jsonl";
@@ -117,13 +120,19 @@ fn run() -> Result<(), String> {
         1 => "one thread".to_string(),
         threads => format!("{threads} threads"),
     };
+    let storage = if options.compressed_storage {
+        "16-bit storage"
+    } else {
+        "f32 storage"
+    };
     match options.target {
         Some(target) => println!(
-            "\nSolving to {target}% of the pot, for at most {} iterations, on {threads}",
+            "\nSolving to {target}% of the pot, for at most {} iterations, on {threads}, with \
+             {storage}",
             options.max_iterations
         ),
         None => println!(
-            "\nSolving for {} iterations, on {threads}",
+            "\nSolving for {} iterations, on {threads}, with {storage}",
             options.max_iterations
         ),
     }
@@ -365,11 +374,12 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                     format!("--threads `{text}` is not a number of threads, such as 1 or 8")
                 })?;
             }
+            "--compressed" => options.compressed_storage = true,
             "-h" | "--help" => return Err(USAGE.to_string()),
             flag if flag.starts_with("--") => {
                 return Err(format!(
                     "`{flag}` is not an option; the options are --node, --target, --iterations, \
-                     --estimate, --log, --no-log, --max-memory and --threads"
+                     --estimate, --log, --no-log, --max-memory, --threads and --compressed"
                 ));
             }
             _ if spot.is_none() => spot = Some(arg.clone()),

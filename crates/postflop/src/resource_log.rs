@@ -1,6 +1,7 @@
 //! A record of what each solve took, for choosing machine sizes from measurements: the spot and
-//! the size of its trees, the memory estimate, the peak resident memory of the process, the
-//! wall time, the iterations and the exploitability reached.
+//! the size of its trees, how the solver stored its regrets and strategy sums, the memory
+//! estimate, the peak resident memory of the process, the wall time, the iterations and the
+//! exploitability reached.
 //!
 //! The library builds a [`SolveRecord`] and appends it, as one line of JSON, to a file the
 //! caller names ([`append_record`]); it never writes a file on its own. The example program
@@ -37,6 +38,9 @@ pub struct SolveRecord {
     pub hands: [usize; 2],
     pub betting_nodes: usize,
     pub public_nodes: usize,
+    /// How the solver stored its regrets and strategy sums: `f32`, or `16-bit` with
+    /// [`SolveOptions::compressed_storage`].
+    pub storage: &'static str,
     /// The estimate the solve was checked against, item by item.
     pub estimate: MemoryEstimate,
     /// The most memory the process has held resident, in bytes, if the operating system says.
@@ -86,6 +90,11 @@ impl SolveRecord {
             hands: [Player::Oop, Player::Ip].map(|player| solution.hands(player).len()),
             betting_nodes: solution.tree().nodes().len(),
             public_nodes: solution.game().num_nodes(),
+            storage: if options.compressed_storage {
+                "16-bit"
+            } else {
+                "f32"
+            },
             estimate: estimate.clone(),
             peak_resident_bytes,
             wall_seconds: solution.elapsed().as_secs_f64(),
@@ -213,8 +222,21 @@ mod tests {
         assert_eq!(value["public_nodes"], 9);
         assert_eq!(value["peak_resident_bytes"], 12345);
         assert_eq!(value["stop"], "target");
+        assert_eq!(value["storage"], "f32");
         assert_eq!(value["estimate"]["total"], estimate.total);
+        assert_eq!(value["estimate"]["compressed"], false);
         assert!(value["exploitability_percent"].as_f64().unwrap() <= 0.3);
+        // A solve with compressed storage says so.
+        let compressed = SolveOptions {
+            compressed_storage: true,
+            ..options
+        };
+        let half = solve(&spot, &compressed, |_| {}).unwrap();
+        let half_estimate = estimate_memory(&spot, &compressed).unwrap();
+        let half_record = SolveRecord::new(&spot, &compressed, &half, &half_estimate, None);
+        let value: serde_json::Value = serde_json::from_str(&half_record.to_json()).unwrap();
+        assert_eq!(value["storage"], "16-bit");
+        assert_eq!(value["estimate"]["compressed"], true);
 
         let directory = std::env::temp_dir().join(format!(
             "pk-postflop-log-{}-{}",

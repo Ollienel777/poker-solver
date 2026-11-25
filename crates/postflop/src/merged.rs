@@ -123,7 +123,7 @@
 //! no chance node, as on the river. The solve then iterates on the full game, as it does with
 //! merging off.
 
-use pk_cfr::{PublicGame, PublicNode, PublicProfile, VectorCfr};
+use pk_cfr::{PublicGame, PublicNode, PublicProfile, Storage, VectorCfr};
 use pk_core::{
     Card, CardSet, DealtBoard, NUM_SUIT_PERMUTATIONS, NextCards, Range, SuitGroup, SuitPermutation,
 };
@@ -638,17 +638,13 @@ impl<'a> MergedGame<'a> {
         profile
     }
 
-    /// The average strategy of `solver`, a solver of a merged game, on the full public tree: see
-    /// [`MergedGame::expand`]. At a node on a path of representatives it is the solver's own,
-    /// bit for bit.
-    pub fn average_strategy(solver: &VectorCfr<MergedGame<'_>>) -> PublicProfile {
-        let game = solver.game();
-        game.expand(|node, out| {
-            let sums = solver
-                .strategy_sum(node)
-                .expect("every merged player node has a row");
-            pk_cfr::average_strategy(sums, out.len() / game.num_actions(node), out);
-        })
+    /// The average strategy of `solver`, a solver of a merged game under either storage, on the
+    /// full public tree: see [`MergedGame::expand`]. At a node on a path of representatives it
+    /// is the solver's own, bit for bit.
+    pub fn average_strategy<S: Storage>(solver: &VectorCfr<MergedGame<'_>, S>) -> PublicProfile {
+        solver
+            .game()
+            .expand(|node, out| solver.write_average_strategy(node, out))
     }
 
     /// A profile on the merged tree, such as a solver's current strategy, expanded onto the full
@@ -662,13 +658,6 @@ impl<'a> MergedGame<'a> {
                 .unwrap_or_else(|| panic!("the profile has no strategy at merged node {node}"));
             out.copy_from_slice(strategy);
         })
-    }
-
-    fn num_actions(&self, node: usize) -> usize {
-        match &self.nodes[node].kind {
-            MergedKind::Player { children, .. } => children.len(),
-            _ => panic!("node {node} is not a player node"),
-        }
     }
 }
 

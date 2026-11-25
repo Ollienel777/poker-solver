@@ -4,7 +4,7 @@
 //! compare the two outputs line for line.
 //!
 //! ```text
-//! cargo run --release -p pk-postflop --example fingerprint -- <spot file> <iterations> [--threads <n>] [--merged]
+//! cargo run --release -p pk-postflop --example fingerprint -- <spot file> <iterations> [--threads <n>] [--merged] [--compressed]
 //! cargo run --release -p pk-postflop --example fingerprint -- crates/postflop/tests/data/turn_small.toml 30
 //! cargo run --release -p pk-postflop --example fingerprint -- crates/postflop/tests/data/turn_small.toml 30 --threads 8
 //! ```
@@ -38,16 +38,23 @@
 //! full tree, measured on the full game, as the solve measures it. On a spot with nothing to
 //! merge the output is the one without `--merged`. Outputs with `--merged` compare with each
 //! other across thread counts and builds, not with those without it.
+//!
+//! With `--compressed`, the solver stores its regrets and strategy sums in 16 bits
+//! ([`pk_cfr::CompressedStorage`]), as a solve with `SolveOptions::compressed_storage` does: the
+//! first line says so, and the first hash is of every node's regret codes and their scale, then
+//! its strategy-sum codes and theirs. It combines with `--merged`, and its outputs compare with
+//! each other, across thread counts and builds.
 
 use std::process::ExitCode;
 
 use pk_cfr::{
-    Dcfr, PublicGame, PublicProfile, Schedule, VectorCfr, vector_best_response,
-    vector_expected_value,
+    CompressedStorage, Dcfr, F32Storage, PublicGame, PublicProfile, Schedule, Storage, VectorCfr,
+    vector_best_response, vector_expected_value,
 };
 use pk_postflop::{MergedGame, PostflopGame, Spot, exploitability, node_values};
 
-const USAGE: &str = "usage: fingerprint <spot file> <iterations> [--threads <n>] [--merged]";
+const USAGE: &str =
+    "usage: fingerprint <spot file> <iterations> [--threads <n>] [--merged] [--compressed]";
 
 fn main() -> ExitCode {
     match run() {
@@ -62,7 +69,8 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let merged = args.iter().any(|arg| arg == "--merged");
-    args.retain(|arg| arg != "--merged");
+    let compressed = args.iter().any(|arg| arg == "--compressed");
+    args.retain(|arg| arg != "--merged" && arg != "--compressed");
     let (path, iterations, threads) = match args.as_slice() {
         [path, iterations] => (path, iterations, None),
         [path, iterations, flag, threads] if flag == "--threads" => {
@@ -84,30 +92,40 @@ fn run() -> Result<(), String> {
                 .num_threads(threads)
                 .build()
                 .map_err(|e| e.to_string())?;
-            pool.install(|| fingerprint(path, iterations, merged))
+            pool.install(|| match compressed {
+                false => fingerprint::<F32Storage>(path, iterations, merged),
+                true => fingerprint::<CompressedStorage>(path, iterations, merged),
+            })
         }
-        None => fingerprint(path, iterations, merged),
+        None => match compressed {
+            false => fingerprint::<F32Storage>(path, iterations, merged),
+            true => fingerprint::<CompressedStorage>(path, iterations, merged),
+        },
     }
 }
 
 /// Runs `iterations` iterations on the spot at `path`, on its merged game if `merged` and it has
-/// one, and prints the fingerprint.
-fn fingerprint(path: &str, iterations: u64, merged: bool) -> Result<(), String> {
+/// one, with the storage `S`, and prints the fingerprint.
+fn fingerprint<S: Hashed>(path: &str, iterations: u64, merged: bool) -> Result<(), String> {
     let spot = Spot::load(path).map_err(|e| e.to_string())?;
     let game = PostflopGame::from_spot(&spot).map_err(|e| e.to_string())?;
     let schedule = Schedule::Discounted(Dcfr::default());
     let merged_game = if merged { MergedGame::new(&game) } else { None };
+    let storage = S::NAME.map_or(String::new(), |name| format!(", {name}"));
     let (stored, average) = match merged_game {
         Some(merged_game) => {
-            let mut solver = VectorCfr::new(merged_game, schedule);
+            let mut solver = VectorCfr::<_, S>::with_storage(merged_game, schedule);
             solver.run(iterations, |_| {});
-            println!("{} after {iterations} iterations, merged", spot.name);
+            println!(
+                "{} after {iterations} iterations, merged{storage}",
+                spot.name
+            );
             (stored(&solver), MergedGame::average_strategy(&solver))
         }
         None => {
-            let mut solver = VectorCfr::new(game.clone(), schedule);
+            let mut solver = VectorCfr::<_, S>::with_storage(game.clone(), schedule);
             solver.run(iterations, |_| {});
-            println!("{} after {iterations} iterations", spot.name);
+            println!("{} after {iterations} iterations{storage}", spot.name);
             (stored(&solver), solver.average_strategy())
         }
     };
@@ -155,16 +173,63 @@ fn fingerprint(path: &str, iterations: u64, merged: bool) -> Result<(), String> 
     Ok(())
 }
 
+/// A storage whose stored values the fingerprint hashes.
+trait Hashed: Storage {
+    /// What the first line calls the storage: nothing for `f32`, as before it had a name.
+    const NAME: Option<&'static str>;
+
+    /// Hashes the stored values of `node`, if it has a row, and says whether it has one.
+    fn hash<G: PublicGame>(solver: &VectorCfr<G, Self>, node: usize, hash: &mut Fnv) -> bool;
+}
+
+impl Hashed for F32Storage {
+    const NAME: Option<&'static str> = None;
+
+    /// Its regrets, then its strategy sums.
+    fn hash<G: PublicGame>(solver: &VectorCfr<G>, node: usize, hash: &mut Fnv) -> bool {
+        let (Some(regrets), Some(sums)) = (solver.regrets(node), solver.strategy_sum(node)) else {
+            return false;
+        };
+        hash.index(node);
+        hash.f32s(regrets);
+        hash.f32s(sums);
+        true
+    }
+}
+
+impl Hashed for CompressedStorage {
+    const NAME: Option<&'static str> = Some("16-bit");
+
+    /// Its regret codes and their scale, then its strategy-sum codes and theirs.
+    fn hash<G: PublicGame>(
+        solver: &VectorCfr<G, CompressedStorage>,
+        node: usize,
+        hash: &mut Fnv,
+    ) -> bool {
+        let (Some((regrets, regret_scale)), Some((sums, sum_scale))) =
+            (solver.regret_codes(node), solver.strategy_sum_codes(node))
+        else {
+            return false;
+        };
+        hash.index(node);
+        for code in regrets {
+            hash.bytes(&code.to_le_bytes());
+        }
+        hash.f32s(&[regret_scale]);
+        for code in sums {
+            hash.bytes(&code.to_le_bytes());
+        }
+        hash.f32s(&[sum_scale]);
+        true
+    }
+}
+
 /// The hash of a solver's stored values: each node that has a row, with its regrets and
 /// strategy sums.
-fn stored<G: PublicGame>(solver: &VectorCfr<G>) -> Fnv {
+fn stored<G: PublicGame, S: Hashed>(solver: &VectorCfr<G, S>) -> Fnv {
     let mut stored = Fnv::new();
     for node in 0..solver.game().num_nodes() {
-        if let (Some(regrets), Some(sums)) = (solver.regrets(node), solver.strategy_sum(node)) {
-            stored.index(node);
-            stored.f32s(regrets);
-            stored.f32s(sums);
-        }
+        S::hash(solver, node, &mut stored);
     }
     stored
 }

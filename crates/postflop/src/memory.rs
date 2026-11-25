@@ -15,10 +15,13 @@
 //! - **Regrets and strategy sums**: one `f32` of each per action and hand of the acting player
 //!   at every player node of the tree the solver iterates on: the public tree, or the merged
 //!   tree when the solve merges (see [A merged solve](#a-merged-solve)). The hands are all of the
-//!   player's hands on the spot's board, on every street (DECISIONS P25).
+//!   player's hands on the spot's board, on every street (DECISIONS P25). With
+//!   [`SolveOptions::compressed_storage`], an `i16` and a `u16` in place of the two `f32`s, half
+//!   the bytes.
 //! - **Solver bookkeeping**: `pk_cfr::VectorCfr`'s index from every node of that tree to its
 //!   row, 16 bytes a node, the row headers, and a `bool` per hand at each player node saying
-//!   whether the hand is possible there.
+//!   whether the hand is possible there. A row header is 80 bytes, and 88 with compressed
+//!   storage, which keeps the two scales in it.
 //! - **Public tree**: a record for every node, and the children and cards of each player and
 //!   chance node, each its own allocation.
 //! - **Hands on each board**: a `BoardHands` for every board the tree reaches, with each
@@ -28,15 +31,12 @@
 //! - **Betting tree, payoffs and deal**: the betting tree, a payoff per betting node, and the
 //!   deal vectors.
 //! - **Average strategy**: the `PublicProfile` each exploitability measurement builds, with an
-//!   entry for every public node and an `f32` per action and hand at each player node. The solve
-//!   keeps the last measurement's profile while it makes the next, so it holds two at once
-//!   whenever it can measure twice, which is whenever `max_iterations` is more than
-//!   `check_every`. When it stops after an iteration it did not measure, at an iteration cap
-//!   that is not a multiple of `check_every` or at a time cap, it measures once more and keeps
-//!   the old profile until it returns, so it finishes with two as well.
-//! - **Best response**: the pure strategy a best-response walk builds and then drops, with an
-//!   entry for every public node and an `f32` per action and hand at the responder's nodes, for
-//!   the larger of the two players.
+//!   entry for every public node and an `f32` per action and hand at each player node, on the
+//!   full tree under either storage. The solve keeps the last measurement's profile while it
+//!   iterates, and drops it before it makes the next, so it holds one at a time
+//!   ([what is held](mod@crate::solve#what-is-held)).
+//! - **Best response**: a best-response walk's working memory and its values at the root, for
+//!   the larger of the two players. A measurement's best responses keep no strategy.
 //! - **Traversal buffers**: a walk's working memory, as `pk_cfr::vector` describes it: a frame
 //!   of vectors for each depth of the tree, each vector as large as the most a node at that
 //!   depth needs, and the vectors kept once, the game's room at a terminal among them. The CFR
@@ -47,10 +47,11 @@
 //!   node holds the values of all its outcomes (see [On several threads](#on-several-threads)).
 //! - **Thread pool**: on more than one thread, the solve's rayon pool, [`POOL_BYTES`] and
 //!   [`POOL_THREAD_BYTES`] a thread.
-//! - **Copy of the game in the solution**: [`Solution`](crate::Solution) holds a copy of the
-//!   game, made while the solver still holds the original.
 //! - **Invariant check**: in a build with debug assertions, the check of the solution that the
 //!   solve makes before it returns ([`crate::invariants`]). Zero in a release build.
+//!
+//! The [`Solution`](crate::Solution) holds the game itself, moved into it once the solver is
+//! dropped, and the last profile, so it adds nothing to these.
 //!
 //! # A merged solve
 //!
@@ -79,13 +80,15 @@
 //! - **Building**: the game, then the solver's rows, with the transient copies their growth
 //!   makes and the solver's check of the tree.
 //! - **Iterating**: the game, the solver with its walk's working memory, the thread pool on
-//!   several threads, and the profile kept from the last measurement.
-//! - **Measuring**: the same with the new profile, and a best response or an exploitability
-//!   walk's working memory.
-//! - **Finishing**: the game, the solver with its walk's working memory, the profiles, and the
-//!   solution's copy of the game, with the invariant check in a build with debug assertions.
+//!   several threads, and the profile kept from the last measurement, when the solve can
+//!   iterate after one, which is whenever `max_iterations` is more than `check_every`.
+//! - **Measuring**: the same with the new profile in place of the old one, and a best
+//!   response's or an exploitability walk's working memory.
+//! - **Finishing**: once the solver is dropped, the game, the profile and the thread pool, with
+//!   the invariant check in a build with debug assertions.
 //!
-//! On the test and benchmark spots the measurement or the finish holds the most.
+//! On the test and benchmark spots the measurement holds the most, in a test build as in a
+//! release one.
 //!
 //! # Past the bytes the solver asks for
 //!
@@ -130,9 +133,9 @@
 //! # What it depends on
 //!
 //! The figures follow the solver's code, not a model of a solver, so a change to what the solver
-//! allocates must change this module too. Six layouts are private to `pk_cfr`, the solver's
-//! row, a profile's entry, and the frames and the workspaces of the two kinds of walk, and are
-//! mirrored here by structs with the same fields. A `Vec` filled by pushes is taken to grow as the standard
+//! allocates must change this module too. Seven layouts are private to `pk_cfr`, the solver's
+//! row under each storage, a profile's entry, and the frames and the workspaces of the two kinds
+//! of walk, and are mirrored here by structs with the same fields. A `Vec` filled by pushes is taken to grow as the standard
 //! library grows it, doubling from four elements, and a walk's buffer to grow to exactly what
 //! it is asked to hold. The test against a counting allocator catches a change to any of these.
 
@@ -169,14 +172,26 @@ pub const POOL_BYTES: u64 = 12 << 10;
 /// about 4.9 kB a thread, and 9 kB more at most, once its threads had run jobs.
 pub const POOL_THREAD_BYTES: u64 = 6 << 10;
 
-/// The layout of the row `pk_cfr::VectorCfr` keeps for each player node, which is private to
-/// `pk_cfr`: the acting player, whether each hand is possible, the regrets and the strategy sums.
+/// The layout of the row `pk_cfr::VectorCfr` keeps for each player node under `f32` storage,
+/// which is private to `pk_cfr`: the acting player, whether each hand is possible, the regrets
+/// and the strategy sums.
 #[allow(dead_code)]
 struct NodeRowLayout {
     player: usize,
     possible: Vec<bool>,
     regrets: Vec<f32>,
     strategy_sum: Vec<f32>,
+}
+
+/// The layout of the row under compressed storage: the same with the codes and their scales.
+#[allow(dead_code)]
+struct CompressedNodeRowLayout {
+    player: usize,
+    possible: Vec<bool>,
+    regrets: Vec<i16>,
+    regret_scale: f32,
+    strategy_sum: Vec<u16>,
+    sum_scale: f32,
 }
 
 /// The layout of a node's entry in a `pk_cfr::PublicProfile`, which is private to `pk_cfr`.
@@ -235,6 +250,7 @@ const FRAME_ENTRY_BYTES: [u64; 6] = [4, 8, 8, 8, 1, size_of::<usize>() as u64];
 type FrameNeeds = [u64; 6];
 
 const ROW_BYTES: u64 = size_of::<NodeRowLayout>() as u64;
+const COMPRESSED_ROW_BYTES: u64 = size_of::<CompressedNodeRowLayout>() as u64;
 const CFR_FRAME_BYTES: u64 = size_of::<CfrFrameLayout>() as u64;
 const RESPONSE_FRAME_BYTES: u64 = size_of::<ResponseFrameLayout>() as u64;
 const CFR_WORKSPACE_BYTES: u64 = size_of::<CfrWorkspaceLayout>() as u64;
@@ -303,11 +319,15 @@ pub struct MemoryEstimate {
     /// The nodes of the merged tree, and its player nodes: 0 when the solve does not merge.
     pub merged_nodes: u64,
     pub merged_player_nodes: u64,
+    /// Whether the solver stores its regrets and strategy sums in 16 bits
+    /// ([`SolveOptions::compressed_storage`]) rather than as `f32`.
+    pub compressed: bool,
     /// The values in each of the solver's two arrays: actions times the acting player's hands,
     /// summed over the player nodes of the tree the solver iterates on, the merged one when the
     /// solve merges.
     pub stored_values: u64,
 
+    /// The two arrays: 8 bytes a stored value as `f32`, 4 compressed.
     pub regrets_and_sums: u64,
     /// The solver's index of rows, its row headers and its possible-hand flags.
     pub solver_bookkeeping: u64,
@@ -321,10 +341,9 @@ pub struct MemoryEstimate {
     pub merged_game: u64,
     /// One average-strategy profile.
     pub average_strategy: u64,
-    /// The most average-strategy profiles the solve holds at once: 2 when it can measure
-    /// twice, and 1 otherwise.
+    /// The most average-strategy profiles the solve holds at once: 1.
     pub profiles_held: u64,
-    /// The larger player's best response, with its walk's buffers.
+    /// The larger player's best-response walk: its buffers and its values at the root.
     pub best_response: u64,
     /// The larger of a CFR walk's buffers and an exploitability walk's: their working memory,
     /// which for the CFR walk the solver keeps from its first iteration on, with, on more than
@@ -336,8 +355,6 @@ pub struct MemoryEstimate {
     /// The solve's rayon pool, on more than one thread: [`POOL_BYTES`] and [`POOL_THREAD_BYTES`]
     /// a thread.
     pub thread_pool: u64,
-    /// The copy of the game that the solution holds.
-    pub solution_game: u64,
     /// The invariant check of a build with debug assertions; 0 in a release build.
     pub invariant_check: u64,
 
@@ -487,11 +504,11 @@ impl PlayerHands {
     }
 }
 
-/// One player's lists on a board where it has `n` hands. The game's own lists are filled by
-/// pushes, as `HandList::new` fills them, and its copy's hold exactly `n`. A river board ranks
-/// its hands, and a board other than the spot's indexes them back to the spot's lists.
-fn board_lists(n: u64, copy: bool, river: bool, later: bool) -> Heap {
-    let slots = if copy { n } else { grown(n, 8) };
+/// One player's lists on a board where it has `n` hands, filled by pushes, as `HandList::new`
+/// fills them. A river board ranks its hands, and a board other than the spot's indexes them
+/// back to the spot's lists.
+fn board_lists(n: u64, river: bool, later: bool) -> Heap {
+    let slots = grown(n, 8);
     let mut heap = Heap::one(slots * COMBO) + Heap::one(slots * 8) + Heap::one(n * SAME);
     if river {
         heap += Heap::one(n * RANKED);
@@ -509,8 +526,6 @@ struct Census {
     player_nodes: u64,
     chance_nodes: u64,
     terminal_nodes: u64,
-    /// Each player's public player nodes.
-    player_nodes_of: [u64; 2],
     /// Σ actions over the public player nodes.
     actions: u64,
     /// Σ actions × the actor's hands over each player's public player nodes.
@@ -551,7 +566,6 @@ fn census(tree: &PostflopTree, hands: [u64; 2]) -> Census {
             } => {
                 let (player, a) = (actor.index(), children.len() as u64);
                 census.player_nodes += m;
-                census.player_nodes_of[player] += m;
                 census.actions += m * a;
                 census.stored[player] += m * a * hands[player];
                 census.flags += m * hands[player];
@@ -904,7 +918,7 @@ fn workspace(
 
 /// Estimates what solving `spot` with `options` will need, as the [module documentation](self)
 /// describes, without building the game. Of the options, `max_nodes`, `max_iterations`,
-/// `check_every`, `threads` and whether there is a `max_time` matter.
+/// `check_every`, `threads`, `merge_isomorphic` and `compressed_storage` matter.
 ///
 /// Fails as [`PostflopGame::with_node_limit`](crate::PostflopGame::with_node_limit) does with
 /// `options.max_nodes`: on a spot that fails [`Spot::validate`], a betting tree over the limit,
@@ -945,15 +959,12 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
     let players = lists.each_ref().map(|list| PlayerHands::new(list));
     let river_spot = spot.board.len() == 5;
     let mut boards = Heap::default();
-    let mut boards_copy = Heap::default();
     for n in hands {
-        boards += board_lists(n, false, river_spot, false);
-        boards_copy += board_lists(n, true, river_spot, false);
+        boards += board_lists(n, river_spot, false);
     }
     // The spot's hands that hold each card, a list per player.
     for n in hands {
         boards += Heap::one(8 * n);
-        boards_copy += Heap::one(8 * n);
     }
     let mut num_boards = 1u64;
     // The most hands, both players' together, on a later board with a terminal: the room a
@@ -965,8 +976,7 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         for player in &players {
             let n = player.missing(cards);
             both += n;
-            boards += board_lists(n, false, river, true);
-            boards_copy += board_lists(n, true, river, true);
+            boards += board_lists(n, river, true);
         }
         let terminals = if river {
             census.river_terminals
@@ -1005,13 +1015,10 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         grown(num_boards, BOARD)
     };
     let board_hands = boards + Heap::one(slots * BOARD);
-    let board_hands_copy = boards_copy + Heap::one(num_boards * BOARD);
 
-    // The betting tree, its payoffs and the deal. The tree's nodes are pushed as it is built,
-    // and a copy holds exactly as many.
+    // The betting tree, its payoffs and the deal. The tree's nodes are pushed as it is built.
     let betting_nodes = tree.nodes().len() as u64;
     let mut betting = Heap::one(grown(betting_nodes, BETTING_NODE) * BETTING_NODE);
-    let mut betting_copy = Heap::one(betting_nodes * BETTING_NODE);
     let mut inner = Heap::default();
     for node in tree.nodes() {
         if let Node::Player { actions, .. } = node {
@@ -1026,7 +1033,6 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
     }
     inner += Heap::one(betting_nodes * PAYOFF) + Heap::one(8 * n0) + Heap::one(8 * n1);
     betting += inner;
-    betting_copy += inner;
 
     // The public tree: a record per node, and the children and cards of each node.
     let public_tree = Heap::one(census.public_nodes * PUBLIC_NODE)
@@ -1034,7 +1040,6 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         + Heap::spread(5 * census.outcomes, 2 * census.chance_nodes);
 
     let game = betting + public_tree + board_hands;
-    let game_copy = betting_copy + public_tree + board_hands_copy;
 
     // The tree the solver iterates on, the merged one when the solve merges: its nodes, player
     // nodes, stored values and flags.
@@ -1052,11 +1057,18 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
             census.flags,
         ),
     };
-    // The solver: its index of rows, the rows, and each row's flags, regrets and sums.
-    let rows = grown(solver_player_nodes, ROW_BYTES);
-    let regrets_and_sums = Heap::spread(8 * stored, 2 * solver_player_nodes);
+    // The solver: its index of rows, the rows, and each row's flags, regrets and sums, two
+    // `f32`s a stored value or, compressed, an `i16` and a `u16`.
+    let compressed = options.compressed_storage;
+    let (row_bytes, value_bytes) = if compressed {
+        (COMPRESSED_ROW_BYTES, 2 + 2)
+    } else {
+        (ROW_BYTES, 4 + 4)
+    };
+    let rows = grown(solver_player_nodes, row_bytes);
+    let regrets_and_sums = Heap::spread(value_bytes * stored, 2 * solver_player_nodes);
     let bookkeeping = Heap::one(solver_nodes * ROW_INDEX_BYTES)
-        + Heap::one(rows * ROW_BYTES)
+        + Heap::one(rows * row_bytes)
         + Heap::spread(flags, solver_player_nodes);
     let solver = regrets_and_sums + bookkeeping;
 
@@ -1099,30 +1111,18 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
     let full_stored = census.stored[0] + census.stored[1];
     let profile = Heap::one(census.public_nodes * PROFILE_ENTRY_BYTES)
         + Heap::spread(4 * full_stored, census.player_nodes);
-    // The last measurement's profile is held while the next is made, and, when the solve can
-    // stop after an iteration it did not measure, while it measures once more and returns.
-    let measures_twice = options.max_iterations > options.check_every;
-    let profiles_held = if measures_twice { 2 } else { 1 };
-    let unmeasured_stop = !options
-        .max_iterations
-        .is_multiple_of(options.check_every.max(1))
-        || options.max_time.is_some();
-    let profiles_at_finish = if measures_twice && unmeasured_stop {
-        2
-    } else {
-        1
-    };
+    // The last measurement's profile is held while the solve iterates after it, when it can,
+    // and dropped before the next is made.
+    let iterates_after_measuring = options.max_iterations > options.check_every;
 
-    // The measurement's largest transient: a best response, an entry per node and a strategy
-    // per node of the responder, with its walk's workspace, its possible hands at the root and
-    // its values; an expected value's walk, the same without the strategy; or the check of the
-    // tree's shape before each walk, a flag per node, both players' possible hands at the root
-    // and a frame of them for each chance node on a line.
+    // The measurement's largest transient: a best response's walk, with its workspace, its
+    // possible hands at the root and its values; an expected value's walk, the same with a
+    // workspace of its own; or the check of the tree's shape before each walk, a flag per node,
+    // both players' possible hands at the root and a frame of them for each chance node on a
+    // line.
     let best_response = [0, 1]
         .map(|p| {
-            Heap::one(census.public_nodes * PROFILE_ENTRY_BYTES)
-                + Heap::spread(4 * census.stored[p], census.player_nodes_of[p])
-                + Heap::one(8 * hands[p])
+            Heap::one(8 * hands[p])
                 + Heap::one(hands[p])
                 + workspace(
                     &tree,
@@ -1205,13 +1205,18 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
 
     // The phases. Building ends with the solver's rows, while its check of the tree holds a
     // flag per node and its vector of rows has just doubled. From the first iteration on, the
-    // solver holds its walk's workspace too, and the solve its pool.
+    // solver holds its walk's workspace too, and the solve its pool. The finish comes once the
+    // solver is dropped, with the game and the last profile moved into the solution.
     let building =
-        game + merged_game + solver + solver_shape_check + Heap::one(rows / 2 * ROW_BYTES);
+        game + merged_game + solver + solver_shape_check + Heap::one(rows / 2 * row_bytes);
     let held = game + merged_game + solver + cfr_walk + thread_pool;
-    let iterating = held + profile * (profiles_held - 1);
-    let measuring = held + profile * profiles_held + measuring_extra;
-    let finishing = held + profile * profiles_at_finish + game_copy + check;
+    let iterating = if iterates_after_measuring {
+        held + profile
+    } else {
+        held
+    };
+    let measuring = held + profile + measuring_extra;
+    let finishing = game + profile + thread_pool + check;
     let (peak_phase, peak) = [
         (Phase::Iterating, iterating),
         (Phase::Measuring, measuring),
@@ -1240,6 +1245,7 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         merged: merged.is_some(),
         merged_nodes: merged.as_ref().map_or(0, |merged| merged.public_nodes),
         merged_player_nodes: merged.as_ref().map_or(0, |merged| merged.player_nodes),
+        compressed,
         stored_values: stored,
         regrets_and_sums: regrets_and_sums.bytes,
         solver_bookkeeping: bookkeeping.bytes,
@@ -1248,12 +1254,11 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         betting_tree: betting.bytes,
         merged_game: merged_game.bytes,
         average_strategy: profile.bytes,
-        profiles_held,
+        profiles_held: 1,
         best_response: best_response.bytes,
         traversal: cfr_walk.max(follow).bytes,
         threads,
         thread_pool: thread_pool.bytes,
-        solution_game: game_copy.bytes,
         invariant_check: check.bytes,
         building: building.bytes,
         iterating: iterating.bytes,
@@ -1333,13 +1338,18 @@ impl fmt::Display for MemoryEstimate {
                 self.merged_nodes, self.merged_player_nodes
             )?;
         }
+        let stored = if self.compressed {
+            "regrets and strategy sums, 16-bit"
+        } else {
+            "regrets and strategy sums, f32"
+        };
         let profiles = format!("average strategy, {} held at once", self.profiles_held);
         let pool = match self.threads {
             1 => "thread pool, none on one thread".to_string(),
             threads => format!("thread pool, {threads} threads"),
         };
         let items = [
-            ("regrets and strategy sums", self.regrets_and_sums),
+            (stored, self.regrets_and_sums),
             ("solver bookkeeping", self.solver_bookkeeping),
             ("public tree", self.public_tree),
             ("hands on each board", self.board_hands),
@@ -1349,10 +1359,9 @@ impl fmt::Display for MemoryEstimate {
                 profiles.as_str(),
                 self.average_strategy * self.profiles_held,
             ),
-            ("best response", self.best_response),
+            ("best response's walk", self.best_response),
             ("traversal buffers", self.traversal),
             (pool.as_str(), self.thread_pool),
-            ("copy of the game in the solution", self.solution_game),
             ("invariant check (debug builds)", self.invariant_check),
         ];
         for (name, bytes) in items {
@@ -1567,10 +1576,12 @@ mod tests {
     fn the_default_limit_refuses_a_full_range_flop_solve_with_a_raise_a_street() {
         use crate::solve::{SolveError, solve};
 
-        // Every combo on both sides of the benchmark flop, with a bet and a raise on every
-        // street: under the node limit, and many times the memory limit, refused from the
-        // counts alone.
+        // Every combo on both sides of the benchmark spot on an unpaired rainbow flop, which no
+        // relabelling of the suits keeps, with a bet and a raise on every street: under the node
+        // limit, and over the memory limit, refused from the counts alone. (On the benchmark's
+        // own flop, which merges, the solve fits since #41, at 9.87 GB by the estimate.)
         let mut spot = load("benches/data/flop_srp");
+        spot.board = "Ks7d2c".parse().unwrap();
         spot.oop_range = pk_core::Range::full();
         spot.ip_range = pk_core::Range::full();
         for sizing in [

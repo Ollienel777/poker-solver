@@ -8,7 +8,7 @@
 //! allow, the stored values after a few iterations to the full solver's, node by node and hand by
 //! hand, and the solves to the full game's exploitability and values.
 
-use pk_cfr::{Dcfr, PublicGame, PublicNode, PublicProfile, Schedule, VectorCfr};
+use pk_cfr::{CompressedStorage, Dcfr, PublicGame, PublicNode, PublicProfile, Schedule, VectorCfr};
 use pk_core::{Card, CardSet, SuitPermutation};
 use pk_game::Player;
 use pk_postflop::{MergedGame, PostflopGame, Solution, SolveOptions, Spot, exploitability, solve};
@@ -780,7 +780,30 @@ fn a_merged_average_strategy_is_the_merged_solvers_own_on_paths_of_representativ
 /// The stored values of the merged solver that are not the same bit for bit for hand `h` and
 /// hand `σ(h)` at a merged player node, for `σ` in the node's stabilizer.
 fn unlike_values(solver: &VectorCfr<MergedGame<'_>>) -> usize {
-    let merged = solver.game();
+    let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect();
+    unlike(solver.game(), |node| {
+        [
+            bits(solver.regrets(node).unwrap()),
+            bits(solver.strategy_sum(node).unwrap()),
+        ]
+    })
+}
+
+/// The same for a merged solver with compressed storage: the codes that are not the same.
+fn unlike_codes(solver: &VectorCfr<MergedGame<'_>, CompressedStorage>) -> usize {
+    unlike(solver.game(), |node| {
+        let (regrets, _) = solver.regret_codes(node).unwrap();
+        let (sums, _) = solver.strategy_sum_codes(node).unwrap();
+        [
+            regrets.iter().map(|&c| c as u16 as u32).collect(),
+            sums.iter().map(|&c| u32::from(c)).collect(),
+        ]
+    })
+}
+
+/// The entries of `stored(node)`, a merged player node's regrets and strategy sums as words,
+/// that are not the same for hand `h` and hand `σ(h)`, for `σ` in the node's stabilizer.
+fn unlike(merged: &MergedGame<'_>, stored: impl Fn(usize) -> [Vec<u32>; 2]) -> usize {
     // Each member's relabelling of each player's hands, made once.
     let relabellings: Vec<(SuitPermutation, [Vec<usize>; 2])> = merged
         .group()
@@ -800,12 +823,11 @@ fn unlike_values(solver: &VectorCfr<MergedGame<'_>>) -> usize {
         for (_, hands) in relabellings.iter().filter(|(s, _)| stabilizer.contains(*s)) {
             let relabelled = &hands[player];
             let num_hands = relabelled.len();
-            for values in [solver.regrets(node), solver.strategy_sum(node)] {
-                let values = values.unwrap();
+            for values in stored(node) {
                 for (index, &value) in values.iter().enumerate() {
                     let (action, hand) = (index / num_hands, index % num_hands);
                     let other = values[action * num_hands + relabelled[hand]];
-                    unlike += usize::from(value.to_bits() != other.to_bits());
+                    unlike += usize::from(value != other);
                 }
             }
         }
@@ -864,6 +886,51 @@ fn the_merged_solver_keeps_the_hands_a_node_makes_alike_alike_bit_for_bit() {
             assert!(
                 stored_bits(&pooled) == stored_bits(&alone),
                 "{name}, {schedule:?}: four threads store other values than one"
+            );
+        }
+    }
+}
+
+#[test]
+fn under_compressed_storage_the_merged_solver_keeps_the_hands_a_node_makes_alike_alike() {
+    // The test above, on the codes of a solver with compressed storage: hand h and hand σ(h)
+    // hold the same regret and strategy-sum codes at every merged node, under every schedule, on
+    // one thread and on four, and the scales are the same on both. The scale of a node is the
+    // largest of its values, which is the same whatever the order of its hands, and the codes
+    // are rounded entry by entry with one offset for the node.
+    let schedules = [
+        Schedule::Vanilla,
+        Schedule::CfrPlus,
+        Schedule::Linear,
+        dcfr(),
+    ];
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    let spots = std::iter::once("flop_monotone_wide").chain(SYMMETRIC);
+    for name in spots {
+        let game = PostflopGame::from_spot(&load(name)).unwrap();
+        let iterations = 8;
+        for schedule in schedules {
+            let merged = MergedGame::new(&game).unwrap();
+            let mut alone = VectorCfr::<_, CompressedStorage>::with_storage(merged, schedule);
+            alone.run(iterations, |_| {});
+            let unlike = unlike_codes(&alone);
+            assert_eq!(
+                unlike, 0,
+                "{name}, {schedule:?}: {unlike} codes are not alike"
+            );
+            let merged = MergedGame::new(&game).unwrap();
+            let mut pooled = VectorCfr::<_, CompressedStorage>::with_storage(merged, schedule);
+            pool.install(|| pooled.run(iterations, |_| {}));
+            let same = (0..alone.game().num_nodes()).all(|node| {
+                (alone.regret_codes(node), alone.strategy_sum_codes(node))
+                    == (pooled.regret_codes(node), pooled.strategy_sum_codes(node))
+            });
+            assert!(
+                same,
+                "{name}, {schedule:?}: four threads store other codes than one"
             );
         }
     }

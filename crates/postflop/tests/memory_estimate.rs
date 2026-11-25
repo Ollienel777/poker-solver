@@ -20,7 +20,7 @@ use std::cell::Cell;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
-use pk_cfr::{Dcfr, Schedule, VectorCfr};
+use pk_cfr::{CompressedStorage, Dcfr, Schedule, VectorCfr};
 use pk_postflop::memory::POOL_THREAD_BYTES;
 use pk_postflop::{MemoryEstimate, PostflopGame, SolveOptions, Spot, estimate_memory, solve};
 use rayon::ThreadPoolBuilder;
@@ -312,6 +312,104 @@ fn after_the_first_iteration_the_walks_on_several_threads_ask_for_no_memory() {
             );
         });
     }
+}
+
+#[test]
+fn under_compressed_storage_after_the_first_iteration_an_iteration_asks_for_no_memory() {
+    // The test above, for a solver with compressed storage, whose updates work in the walk's
+    // buffers and in the rows.
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for path in ["tests/data/turn_small", "tests/data/flop_small"] {
+        let game = PostflopGame::from_spot(&load(path)).unwrap();
+        let schedule = Schedule::Discounted(Dcfr::default());
+        let mut solver = VectorCfr::<_, CompressedStorage>::with_storage(game, schedule);
+        solver.iterate();
+        let before = mine();
+        for _ in 0..3 {
+            solver.iterate();
+        }
+        assert_eq!(mine(), before, "{path}");
+    }
+}
+
+/// `capped(iterations)` with compressed storage.
+fn compressed(iterations: u64) -> SolveOptions {
+    SolveOptions {
+        compressed_storage: true,
+        ..capped(iterations)
+    }
+}
+
+#[test]
+fn under_compressed_storage_the_estimate_covers_what_a_solve_allocates_and_is_within_five_percent()
+{
+    // The spots of the tests above on one thread, unmerged and merged, with compressed storage:
+    // the same bounds, and regrets and strategy sums in half the bytes.
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let spots = [
+        (
+            "river deep_high_spr",
+            "../../reference/spots/river/deep_high_spr",
+            25,
+        ),
+        ("turn_small", "tests/data/turn_small", 25),
+        ("turn_srp", "benches/data/turn_srp", 12),
+        ("flop_small", "tests/data/flop_small", 12),
+        ("flop_monotone", "tests/data/flop_monotone", 12),
+        ("turn_four_flush", "tests/data/turn_four_flush", 25),
+    ];
+    for (name, path, iterations) in spots {
+        let spot = load(path);
+        let full = estimate_memory(&spot, &capped(iterations)).unwrap();
+        let half = estimate_memory(&spot, &compressed(iterations)).unwrap();
+        assert!(half.compressed && !full.compressed, "{name}");
+        assert_eq!(2 * half.regrets_and_sums, full.regrets_and_sums, "{name}");
+        check(
+            &format!("{name}, compressed"),
+            &spot,
+            &compressed(iterations),
+        );
+    }
+}
+
+#[test]
+fn under_compressed_storage_on_several_threads_the_estimate_covers_what_a_solve_allocates() {
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for threads in [2, 16] {
+        for (name, path, iterations) in [
+            ("turn_small", "tests/data/turn_small", 25),
+            ("flop_small", "tests/data/flop_small", 12),
+            ("flop_monotone", "tests/data/flop_monotone", 12),
+        ] {
+            let options = SolveOptions {
+                threads,
+                ..compressed(iterations)
+            };
+            let name = format!("{name}, compressed, {threads} threads");
+            check_threads(&name, &load(path), &options);
+        }
+    }
+}
+
+#[test]
+#[ignore = "slow"]
+fn under_compressed_storage_the_estimate_covers_what_the_flop_benchmark_spot_allocates() {
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let spot = load("benches/data/flop_srp");
+    check("flop_srp, compressed", &spot, &compressed(12));
+    let options = SolveOptions {
+        threads: 16,
+        ..compressed(12)
+    };
+    check_threads("flop_srp, compressed, 16 threads", &spot, &options);
 }
 
 #[test]

@@ -84,6 +84,20 @@
 //! specifies, and updates them with its functions. The entries of a hand ruled out at the node
 //! are kept too, and stay at zero (see below).
 //!
+//! How the slices are held is the solver's second type parameter, a [`Storage`].
+//! [`F32Storage`], the default, holds them as `f32`, and everything below describes it.
+//! [`CompressedStorage`](crate::compressed::CompressedStorage) holds them as 16-bit codes with
+//! one scale per slice, as [`crate::compressed`] specifies: a node's strategy is
+//! [`current_strategy_16`](crate::compressed::current_strategy_16) of its regret codes, its
+//! average strategy [`average_strategy_16`](crate::compressed::average_strategy_16) of its sum
+//! codes, and its update one [`update_regrets_16`](crate::compressed::update_regrets_16) then
+//! one [`accumulate_strategy_16`](crate::compressed::accumulate_strategy_16), with the arguments
+//! the `f32` functions get and the rounding offsets of [`offsets`](crate::compressed::offsets)
+//! for the node and the iteration, which the walk passes. Everything else, the walks, the values
+//! and the order of every sum, is the same under both, and so are the properties of the sections
+//! below: a ruled-out hand's codes stay at zero, alike hands stay alike, and no result depends
+//! on the thread count.
+//!
 //! # One iteration
 //!
 //! [`VectorCfr`] computes the iteration that [`crate::tabular`] specifies for [`Cfr`],
@@ -214,6 +228,105 @@ use std::ops::Range;
 use crate::regret::{
     Discount, Schedule, accumulate_strategy, average_strategy, current_strategy, update_regrets,
 };
+
+/// How a [`VectorCfr`] holds each player node's regrets and strategy sums: [`F32Storage`], the
+/// default, or [`CompressedStorage`](crate::compressed::CompressedStorage). See the
+/// [module documentation](self#storage). It is implemented by those two types only.
+pub trait Storage: sealed::Storage {}
+
+/// What a [`Storage`] does, out of reach of other crates, so that no other type can be one.
+pub(crate) mod sealed {
+    use std::fmt::Debug;
+
+    use crate::regret::Discount;
+
+    pub trait Storage: Debug + Clone + Copy + Default + Send + Sync + 'static {
+        /// One player node's stored state.
+        type Row: Debug + Clone + Send + Sync;
+
+        /// The state of a node with `len` entries in each slice, every one zero.
+        fn zeros(len: usize) -> Self::Row;
+
+        /// The entries in each slice, `[actions × hands]`.
+        fn len(row: &Self::Row) -> usize;
+
+        /// Writes the strategy regret matching gives on the stored regrets.
+        fn current_strategy(row: &Self::Row, num_hands: usize, strategy: &mut [f32]);
+
+        /// Writes the average strategy of the stored strategy sums.
+        fn average_strategy(row: &Self::Row, num_hands: usize, average: &mut [f32]);
+
+        /// The update of the player node `node` on iteration `iteration`: the instantaneous
+        /// regrets `instantaneous`, which it may overwrite, then the strategy played `strategy`
+        /// weighted by the reach `reach`, each with the iteration's `discount`.
+        fn update(
+            row: &mut Self::Row,
+            instantaneous: &mut [f32],
+            strategy: &[f32],
+            reach: &[f32],
+            discount: Discount,
+            node: usize,
+            iteration: u64,
+        );
+
+        /// The stored regrets and strategy sums as `f32`, decoded.
+        fn decoded(row: &Self::Row) -> (Vec<f32>, Vec<f32>);
+    }
+}
+
+/// Holds each player node's regrets and strategy sums as `f32` and updates them with
+/// [`update_regrets`] and [`accumulate_strategy`]: the default [`Storage`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct F32Storage;
+
+/// The stored state of one player node under [`F32Storage`]: `[actions × hands]` each.
+#[derive(Debug, Clone)]
+pub struct F32Row {
+    regrets: Vec<f32>,
+    strategy_sum: Vec<f32>,
+}
+
+impl Storage for F32Storage {}
+
+impl sealed::Storage for F32Storage {
+    type Row = F32Row;
+
+    fn zeros(len: usize) -> F32Row {
+        F32Row {
+            regrets: vec![0.0; len],
+            strategy_sum: vec![0.0; len],
+        }
+    }
+
+    fn len(row: &F32Row) -> usize {
+        row.regrets.len()
+    }
+
+    fn current_strategy(row: &F32Row, num_hands: usize, strategy: &mut [f32]) {
+        current_strategy(&row.regrets, num_hands, strategy);
+    }
+
+    fn average_strategy(row: &F32Row, num_hands: usize, average: &mut [f32]) {
+        average_strategy(&row.strategy_sum, num_hands, average);
+    }
+
+    fn update(
+        row: &mut F32Row,
+        instantaneous: &mut [f32],
+        strategy: &[f32],
+        reach: &[f32],
+        discount: Discount,
+        _node: usize,
+        _iteration: u64,
+    ) {
+        update_regrets(&mut row.regrets, instantaneous, discount);
+        accumulate_strategy(&mut row.strategy_sum, strategy, reach, discount);
+    }
+
+    fn decoded(row: &F32Row) -> (Vec<f32>, Vec<f32>) {
+        (row.regrets.clone(), row.strategy_sum.clone())
+    }
+}
 
 /// What happens at a node of a public tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -459,20 +572,21 @@ impl PublicProfile {
 }
 
 /// Vector-form counterfactual regret minimization over the public tree of a [`PublicGame`],
-/// with the regret and averaging schedule of a [`Schedule`]. One iteration is specified in the
+/// with the regret and averaging schedule of a [`Schedule`], holding its regrets and strategy
+/// sums in the [`Storage`] `S`. One iteration is specified in the
 /// [module documentation](self).
 ///
-/// [`VectorCfr::new`] walks the tree once to check its shape and to find, for each player node,
-/// which of the acting player's hands are possible there.
+/// [`VectorCfr::new`] and [`VectorCfr::with_storage`] walk the tree once to check its shape and
+/// to find, for each player node, which of the acting player's hands are possible there.
 #[derive(Debug, Clone)]
-pub struct VectorCfr<G: PublicGame> {
+pub struct VectorCfr<G: PublicGame, S: Storage = F32Storage> {
     game: G,
     schedule: Schedule,
     iterations: u64,
     /// For each node, its position in `rows` if it is a player node reachable from the root.
     row_of: Vec<Option<usize>>,
     /// One row per player node, in the order the walk first reaches them.
-    rows: Vec<NodeRow>,
+    rows: Vec<NodeRow<S::Row>>,
     /// The walk's working memory, kept from one iteration to the next.
     workspace: Workspace,
     /// The working memory of the walks of a split chance node's children, one per outcome,
@@ -481,20 +595,18 @@ pub struct VectorCfr<G: PublicGame> {
     branches: Vec<Workspace>,
 }
 
-/// The stored state of one player node.
+/// The stored state of one player node, its regrets and strategy sum held as `R`.
 #[derive(Debug, Clone)]
-struct NodeRow {
+struct NodeRow<R> {
     player: usize,
     /// Whether each hand of the acting player is possible at the node.
     possible: Vec<bool>,
-    /// `[actions × hands]`.
-    regrets: Vec<f32>,
-    /// `[actions × hands]`.
-    strategy_sum: Vec<f32>,
+    /// The regrets and the strategy sum, `[actions × hands]` each.
+    stored: R,
 }
 
 impl<G: PublicGame> VectorCfr<G> {
-    /// A solver for `game` with every regret and strategy sum at zero.
+    /// A solver for `game` with every regret and strategy sum at zero, stored as `f32`.
     ///
     /// Panics if the game is malformed: a player with no hands or a deal vector of the wrong
     /// length or with an entry that is negative or not finite, a node out of range or reached
@@ -503,72 +615,17 @@ impl<G: PublicGame> VectorCfr<G> {
     /// an image whose permutation has the wrong length or a hand out of range, or a player node
     /// with no actions or an acting player other than 0 or 1.
     pub fn new(game: G, schedule: Schedule) -> VectorCfr<G> {
-        let mut row_of = vec![None; game.num_nodes()];
-        let mut rows = Vec::new();
-        check_game(&game, |node, player, num_actions, possible| {
-            row_of[node] = Some(rows.len());
-            let len = num_actions * possible.len();
-            rows.push(NodeRow {
-                player,
-                possible: possible.to_vec(),
-                regrets: vec![0.0; len],
-                strategy_sum: vec![0.0; len],
-            });
-        });
-        VectorCfr {
-            game,
-            schedule,
-            iterations: 0,
-            row_of,
-            rows,
-            workspace: Workspace::default(),
-            branches: Vec::new(),
-        }
-    }
-
-    /// The game being solved.
-    pub fn game(&self) -> &G {
-        &self.game
-    }
-
-    /// The schedule the solver runs.
-    pub fn schedule(&self) -> Schedule {
-        self.schedule
-    }
-
-    /// The number of iterations completed.
-    pub fn iterations(&self) -> u64 {
-        self.iterations
-    }
-
-    /// The average strategy at every player node, which is the strategy CFR converges to. A
-    /// hand that is ruled out at a node, or that its player never reached there, plays
-    /// uniformly.
-    pub fn average_strategy(&self) -> PublicProfile {
-        self.profile(|row, out| average_strategy(&row.strategy_sum, row.possible.len(), out))
-    }
-
-    /// The strategy the next iteration will play at every player node: regret matching on the
-    /// stored regrets.
-    pub fn current_strategy(&self) -> PublicProfile {
-        self.profile(|row, out| current_strategy(&row.regrets, row.possible.len(), out))
+        VectorCfr::with_storage(game, schedule)
     }
 
     /// The stored regrets of a player node, laid out `[actions × hands]`.
     pub fn regrets(&self, node: usize) -> Option<&[f32]> {
-        Some(&self.row(node)?.regrets)
+        Some(&self.row(node)?.stored.regrets)
     }
 
     /// The stored strategy sum of a player node, laid out `[actions × hands]`.
     pub fn strategy_sum(&self, node: usize) -> Option<&[f32]> {
-        Some(&self.row(node)?.strategy_sum)
-    }
-
-    /// Whether each hand of the acting player is possible at a player node, that is, not ruled
-    /// out by a chance outcome on the way there. The pairs of a player node and a possible hand
-    /// are the game's information sets.
-    pub fn possible_hands(&self, node: usize) -> Option<&[bool]> {
-        Some(&self.row(node)?.possible)
+        Some(&self.row(node)?.stored.strategy_sum)
     }
 
     /// Replaces the stored regrets and strategy sum of a player node, each laid out
@@ -588,11 +645,12 @@ impl<G: PublicGame> VectorCfr<G> {
             self.row_of.get(node).copied().flatten().unwrap_or_else(|| {
                 panic!("node {node} is not a player node reachable from the root")
             });
-        let row = &mut self.rows[position];
+        let stored = &mut self.rows[position].stored;
         assert!(
-            regrets.len() == row.regrets.len() && strategy_sum.len() == row.strategy_sum.len(),
+            regrets.len() == stored.regrets.len()
+                && strategy_sum.len() == stored.strategy_sum.len(),
             "node {node} stores {} values in each slice",
-            row.regrets.len()
+            stored.regrets.len()
         );
         assert!(
             regrets.iter().all(|r| r.is_finite()),
@@ -602,29 +660,132 @@ impl<G: PublicGame> VectorCfr<G> {
             strategy_sum.iter().all(|&s| s.is_finite() && s >= 0.0),
             "a strategy-sum entry set at node {node} is negative or not finite"
         );
-        row.regrets.copy_from_slice(regrets);
-        row.strategy_sum.copy_from_slice(strategy_sum);
-    }
-
-    fn row(&self, node: usize) -> Option<&NodeRow> {
-        let position = (*self.row_of.get(node)?)?;
-        Some(&self.rows[position])
+        stored.regrets.copy_from_slice(regrets);
+        stored.strategy_sum.copy_from_slice(strategy_sum);
     }
 
     /// The stored regrets and strategy sum of a player node, for tests that set them.
     #[cfg(test)]
     pub(crate) fn stored_mut(&mut self, node: usize) -> Option<(&mut [f32], &mut [f32])> {
         let position = (*self.row_of.get(node)?)?;
-        let row = &mut self.rows[position];
-        Some((&mut row.regrets, &mut row.strategy_sum))
+        let stored = &mut self.rows[position].stored;
+        Some((&mut stored.regrets, &mut stored.strategy_sum))
+    }
+}
+
+impl<G: PublicGame> VectorCfr<G, crate::compressed::CompressedStorage> {
+    /// The stored regret codes of a player node, laid out `[actions × hands]`, and their scale:
+    /// the regrets are the codes times the scale (see [`crate::compressed`]).
+    pub fn regret_codes(&self, node: usize) -> Option<(&[i16], f32)> {
+        let stored = &self.row(node)?.stored;
+        Some((&stored.regrets, stored.regret_scale))
     }
 
-    fn profile(&self, strategy: impl Fn(&NodeRow, &mut [f32])) -> PublicProfile {
+    /// The stored strategy-sum codes of a player node, laid out `[actions × hands]`, and their
+    /// scale: the sums are the codes times the scale (see [`crate::compressed`]).
+    pub fn strategy_sum_codes(&self, node: usize) -> Option<(&[u16], f32)> {
+        let stored = &self.row(node)?.stored;
+        Some((&stored.strategy_sum, stored.sum_scale))
+    }
+}
+
+impl<G: PublicGame, S: Storage> VectorCfr<G, S> {
+    /// A solver for `game` with every regret and strategy sum at zero, held in the storage `S`,
+    /// as `VectorCfr::<_, S>::with_storage(game, schedule)`. It panics as [`VectorCfr::new`]
+    /// does.
+    pub fn with_storage(game: G, schedule: Schedule) -> VectorCfr<G, S> {
+        let mut row_of = vec![None; game.num_nodes()];
+        let mut rows = Vec::new();
+        check_game(&game, |node, player, num_actions, possible| {
+            row_of[node] = Some(rows.len());
+            let len = num_actions * possible.len();
+            rows.push(NodeRow {
+                player,
+                possible: possible.to_vec(),
+                stored: S::zeros(len),
+            });
+        });
+        VectorCfr {
+            game,
+            schedule,
+            iterations: 0,
+            row_of,
+            rows,
+            workspace: Workspace::default(),
+            branches: Vec::new(),
+        }
+    }
+
+    /// The game being solved.
+    pub fn game(&self) -> &G {
+        &self.game
+    }
+
+    /// The game, the solver dropped.
+    pub fn into_game(self) -> G {
+        self.game
+    }
+
+    /// The schedule the solver runs.
+    pub fn schedule(&self) -> Schedule {
+        self.schedule
+    }
+
+    /// The number of iterations completed.
+    pub fn iterations(&self) -> u64 {
+        self.iterations
+    }
+
+    /// The average strategy at every player node, which is the strategy CFR converges to. A
+    /// hand that is ruled out at a node, or that its player never reached there, plays
+    /// uniformly.
+    pub fn average_strategy(&self) -> PublicProfile {
+        self.profile(|row, out| S::average_strategy(&row.stored, row.possible.len(), out))
+    }
+
+    /// The average strategy at the player node `node`, laid out `[actions × hands]`, written
+    /// into `average`: the node's strategy in [`VectorCfr::average_strategy`].
+    ///
+    /// Panics if `node` is not a player node reachable from the root, or if `average` does not
+    /// have one entry per action and hand.
+    pub fn write_average_strategy(&self, node: usize, average: &mut [f32]) {
+        let row = self
+            .row(node)
+            .unwrap_or_else(|| panic!("node {node} is not a player node reachable from the root"));
+        S::average_strategy(&row.stored, row.possible.len(), average);
+    }
+
+    /// The strategy the next iteration will play at every player node: regret matching on the
+    /// stored regrets.
+    pub fn current_strategy(&self) -> PublicProfile {
+        self.profile(|row, out| S::current_strategy(&row.stored, row.possible.len(), out))
+    }
+
+    /// The stored regrets and strategy sum of a player node, decoded to `f32` and laid out
+    /// `[actions × hands]`: under [`F32Storage`] a copy of [`VectorCfr::regrets`] and
+    /// [`VectorCfr::strategy_sum`].
+    pub fn decoded(&self, node: usize) -> Option<(Vec<f32>, Vec<f32>)> {
+        Some(S::decoded(&self.row(node)?.stored))
+    }
+
+    /// Whether each hand of the acting player is possible at a player node, that is, not ruled
+    /// out by a chance outcome on the way there. The pairs of a player node and a possible hand
+    /// are the game's information sets.
+    pub fn possible_hands(&self, node: usize) -> Option<&[bool]> {
+        Some(&self.row(node)?.possible)
+    }
+
+    fn row(&self, node: usize) -> Option<&NodeRow<S::Row>> {
+        let position = (*self.row_of.get(node)?)?;
+        Some(&self.rows[position])
+    }
+
+    fn profile(&self, strategy: impl Fn(&NodeRow<S::Row>, &mut [f32])) -> PublicProfile {
         let mut profile = PublicProfile::empty(self.game.num_nodes());
         for (node, position) in self.row_of.iter().enumerate() {
             if let Some(position) = *position {
                 let row = &self.rows[position];
-                let mut out = vec![0.0; row.regrets.len()];
+                let mut out = vec![0.0; S::len(&row.stored)];
                 strategy(row, &mut out);
                 profile.set(node, row.possible.len(), out);
             }
@@ -633,7 +794,7 @@ impl<G: PublicGame> VectorCfr<G> {
     }
 }
 
-impl<G: PublicGame + Sync> VectorCfr<G> {
+impl<G: PublicGame + Sync, S: Storage> VectorCfr<G, S> {
     /// Runs one iteration, as the [module documentation](self) specifies: on the threads of the
     /// rayon pool it is called on, if it has more than one (see
     /// [the parallel walk](self#the-parallel-walk)), and otherwise on the calling thread, with
@@ -650,7 +811,7 @@ impl<G: PublicGame + Sync> VectorCfr<G> {
             refill(&mut root.own_reach, iter::repeat_n(1.0, num_hands));
             refill(&mut root.possible, iter::repeat_n(true, num_hands));
             let values = resized(&mut root.values, num_hands, 0.0);
-            let mut walk = Walk {
+            let mut walk: Walk<'_, G, S> = Walk {
                 game: &self.game,
                 row_of: &self.row_of,
                 rows: &mut self.rows,
@@ -658,6 +819,7 @@ impl<G: PublicGame + Sync> VectorCfr<G> {
                 traverser,
                 deal: self.game.deal(traverser),
                 discount,
+                iteration: t,
                 workspace: &mut self.workspace,
                 branches: parallel.then_some(&mut self.branches),
             };
@@ -675,7 +837,7 @@ impl<G: PublicGame + Sync> VectorCfr<G> {
 
     /// Runs `iterations` iterations, calling `on_iteration` after each one with the solver as
     /// it stands.
-    pub fn run(&mut self, iterations: u64, mut on_iteration: impl FnMut(&VectorCfr<G>)) {
+    pub fn run(&mut self, iterations: u64, mut on_iteration: impl FnMut(&VectorCfr<G, S>)) {
         for _ in 0..iterations {
             self.iterate();
             on_iteration(self);
@@ -956,24 +1118,26 @@ impl Frame {
 }
 
 /// The working state of one player's walk on one iteration, or of the walk of one child of a
-/// split chance node.
-struct Walk<'a, G> {
+/// split chance node, for a solver that holds its rows in the storage `S`.
+struct Walk<'a, G, S: Storage> {
     game: &'a G,
     row_of: &'a [Option<usize>],
     /// The rows of the subtree walked, and maybe others: those from position `first_row` on.
-    rows: &'a mut [NodeRow],
+    rows: &'a mut [NodeRow<S::Row>],
     first_row: usize,
     traverser: usize,
     /// `deal(traverser)`.
     deal: &'a [f64],
     discount: Discount,
+    /// The iteration being run, counted from 1.
+    iteration: u64,
     workspace: &'a mut Workspace,
     /// The workspaces of the children of a chance node, if the walk splits the chance nodes it
     /// reaches: see the [module documentation](self#the-parallel-walk).
     branches: Option<&'a mut Vec<Workspace>>,
 }
 
-impl<G: PublicGame + Sync> Walk<'_, G> {
+impl<G: PublicGame + Sync, S: Storage> Walk<'_, G, S> {
     /// Walks the tree below `node`, writing `q(node, h)` for each hand `h` of the traverser
     /// into `values`. `own_reach` is `π`, `opponent_reach` is `ρ`, and `possible` says which of
     /// the traverser's hands are possible at `node`.
@@ -1042,7 +1206,7 @@ impl<G: PublicGame + Sync> Walk<'_, G> {
                 let position = self.row_of[node].expect("every reachable player node has a row");
                 let row = &self.rows[position - self.first_row];
                 assert!(
-                    row.player == player && row.regrets.len() == num_actions * row.possible.len(),
+                    row.player == player && S::len(&row.stored) == num_actions * row.possible.len(),
                     "node {node} changed its acting player or number of actions"
                 );
                 if player == self.traverser {
@@ -1083,12 +1247,13 @@ impl<G: PublicGame + Sync> Walk<'_, G> {
             traverser: self.traverser,
             deal: self.deal,
             discount: self.discount,
+            iteration: self.iteration,
             node,
             own_reach,
             opponent_reach,
             possible,
         };
-        split.walk(
+        split.walk::<S>(
             0..num_outcomes,
             &mut *self.rows,
             self.first_row,
@@ -1114,8 +1279,8 @@ impl<G: PublicGame + Sync> Walk<'_, G> {
     /// regrets, written into `strategy`.
     fn strategy<'s>(&self, position: usize, strategy: &'s mut Vec<f32>) -> &'s [f32] {
         let row = &self.rows[position - self.first_row];
-        let strategy = resized(strategy, row.regrets.len(), 0.0);
-        current_strategy(&row.regrets, row.possible.len(), strategy);
+        let strategy = resized(strategy, S::len(&row.stored), 0.0);
+        S::current_strategy(&row.stored, row.possible.len(), strategy);
         strategy
     }
 
@@ -1177,8 +1342,16 @@ impl<G: PublicGame + Sync> Walk<'_, G> {
             own_reach.iter().map(|&r| r as f32),
         );
         let row = &mut self.rows[position - self.first_row];
-        update_regrets(&mut row.regrets, instantaneous, self.discount);
-        accumulate_strategy(&mut row.strategy_sum, strategy, reach, self.discount);
+        let (discount, iteration) = (self.discount, self.iteration);
+        S::update(
+            &mut row.stored,
+            instantaneous,
+            strategy,
+            reach,
+            discount,
+            node,
+            iteration,
+        );
         self.workspace.frames.give(frame);
     }
 
@@ -1222,6 +1395,7 @@ struct Split<'a, G> {
     traverser: usize,
     deal: &'a [f64],
     discount: Discount,
+    iteration: u64,
     node: usize,
     own_reach: &'a [f64],
     opponent_reach: &'a [f64],
@@ -1234,16 +1408,16 @@ impl<G: PublicGame + Sync> Split<'_, G> {
     /// child. `rows` are the rows from position `first_row` on, and hold every row of the
     /// children's subtrees. Halves the outcomes, and the rows at the first row of the second
     /// half's subtrees, and walks the halves as two rayon tasks, down to one child a task.
-    fn walk(
+    fn walk<S: Storage>(
         &self,
         outcomes: Range<usize>,
-        rows: &mut [NodeRow],
+        rows: &mut [NodeRow<S::Row>],
         first_row: usize,
         workspaces: &mut [Workspace],
         values: &mut [f64],
     ) {
         if outcomes.len() == 1 {
-            self.walk_child(outcomes.start, rows, first_row, &mut workspaces[0], values);
+            self.walk_child::<S>(outcomes.start, rows, first_row, &mut workspaces[0], values);
             return;
         }
         let half = outcomes.len() / 2;
@@ -1258,7 +1432,7 @@ impl<G: PublicGame + Sync> Split<'_, G> {
         rayon::join(
             || {
                 let outcomes = outcomes.start..middle;
-                self.walk(
+                self.walk::<S>(
                     outcomes,
                     first_rows,
                     first_row,
@@ -1268,7 +1442,7 @@ impl<G: PublicGame + Sync> Split<'_, G> {
             },
             || {
                 let outcomes = middle..outcomes.end;
-                self.walk(
+                self.walk::<S>(
                     outcomes,
                     second_rows,
                     middle_row,
@@ -1281,10 +1455,10 @@ impl<G: PublicGame + Sync> Split<'_, G> {
 
     /// Walks the child after `outcome` on this thread, from its inputs, which it computes into a
     /// frame of `workspace`, writing its values into `values`.
-    fn walk_child(
+    fn walk_child<S: Storage>(
         &self,
         outcome: usize,
-        rows: &mut [NodeRow],
+        rows: &mut [NodeRow<S::Row>],
         first_row: usize,
         workspace: &mut Workspace,
         values: &mut [f64],
@@ -1299,7 +1473,7 @@ impl<G: PublicGame + Sync> Split<'_, G> {
             self.own_reach,
             self.opponent_reach,
         );
-        let mut walk = Walk {
+        let mut walk: Walk<'_, G, S> = Walk {
             game: self.game,
             row_of: self.row_of,
             rows,
@@ -1307,6 +1481,7 @@ impl<G: PublicGame + Sync> Split<'_, G> {
             traverser: self.traverser,
             deal: self.deal,
             discount: self.discount,
+            iteration: self.iteration,
             workspace: &mut *workspace,
             branches: None,
         };
@@ -1328,6 +1503,7 @@ mod tests {
     use rand_chacha::rand_core::{Rng, SeedableRng};
 
     use super::*;
+    use crate::compressed::CompressedStorage;
     use crate::public_leduc::PublicLeduc;
     use crate::public_leduc::merged::{MergedLeduc, SWAP};
     use crate::regret::Dcfr;
@@ -1342,14 +1518,30 @@ mod tests {
     }
 
     /// Every player node of `solver`'s game, with its row's hands.
-    fn player_nodes<G: PublicGame>(solver: &VectorCfr<G>) -> Vec<usize> {
+    fn player_nodes<G: PublicGame, S: Storage>(solver: &VectorCfr<G, S>) -> Vec<usize> {
         (0..solver.game().num_nodes())
             .filter(|&node| solver.possible_hands(node).is_some())
             .collect()
     }
 
+    /// Every regret code and strategy-sum code of a solver with compressed storage, with the
+    /// bits of their scales, node by node.
+    type Codes = Vec<(Vec<i16>, u32, Vec<u16>, u32)>;
+
+    fn codes<G: PublicGame>(solver: &VectorCfr<G, CompressedStorage>) -> Codes {
+        player_nodes(solver)
+            .into_iter()
+            .map(|node| {
+                let (regrets, regret_scale) = solver.regret_codes(node).unwrap();
+                let (sums, sum_scale) = solver.strategy_sum_codes(node).unwrap();
+                let (regrets, sums) = (regrets.to_vec(), sums.to_vec());
+                (regrets, regret_scale.to_bits(), sums, sum_scale.to_bits())
+            })
+            .collect()
+    }
+
     /// The `(node, hand)` pairs whose hand is ruled out at the node.
-    fn ruled_out<G: PublicGame>(solver: &VectorCfr<G>) -> Vec<(usize, usize)> {
+    fn ruled_out<G: PublicGame, S: Storage>(solver: &VectorCfr<G, S>) -> Vec<(usize, usize)> {
         let mut pairs = Vec::new();
         for node in player_nodes(solver) {
             let possible = solver.possible_hands(node).unwrap();
@@ -1793,6 +1985,115 @@ mod tests {
                             assert_eq!(value.to_bits(), other.to_bits(), "{schedule:?}, {node}");
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn under_compressed_storage_an_iteration_on_several_threads_is_the_one_on_one_thread() {
+        // As with f32 storage, on Leduc and on Leduc with its images: every code and scale, and
+        // the average strategy, are those of the walk on the calling thread, bit for bit, under
+        // every schedule. The rounding offsets of the sums depend on the node and the iteration
+        // alone.
+        fn alone_and_pooled<G: PublicGame + Sync + Send>(game: impl Fn() -> G, splits: usize) {
+            for schedule in schedules() {
+                let mut alone = VectorCfr::<_, CompressedStorage>::with_storage(game(), schedule);
+                alone.run(40, |_| {});
+                for threads in [2, 5, 16] {
+                    let pool = rayon::ThreadPoolBuilder::new()
+                        .num_threads(threads)
+                        .build()
+                        .unwrap();
+                    let mut pooled =
+                        VectorCfr::<_, CompressedStorage>::with_storage(game(), schedule);
+                    pool.install(|| pooled.run(40, |_| {}));
+                    assert_eq!(pooled.branches.len(), splits, "{threads} threads");
+                    assert!(
+                        codes(&pooled) == codes(&alone),
+                        "{schedule:?}, {threads} threads"
+                    );
+                    assert_eq!(
+                        profile_bits(&pooled.average_strategy()),
+                        profile_bits(&alone.average_strategy()),
+                        "{schedule:?}, {threads} threads"
+                    );
+                }
+            }
+        }
+        alone_and_pooled(PublicLeduc::new, 6);
+        alone_and_pooled(MergedLeduc::new, 3);
+    }
+
+    #[test]
+    fn under_compressed_storage_the_hands_a_game_names_alike_stay_alike() {
+        // The first-round test of the merged Leduc above, on the codes: the two cards of a rank
+        // hold the same regret and strategy-sum codes at every first-round node, after 40
+        // iterations under every schedule, on one thread and on four.
+        for schedule in schedules() {
+            for threads in [1, 4] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let game = MergedLeduc::new();
+                let mut solver = VectorCfr::<_, CompressedStorage>::with_storage(game, schedule);
+                pool.install(|| solver.run(40, |_| {}));
+                for node in player_nodes(&solver) {
+                    if solver.game().full().public_card(node).is_some() {
+                        continue;
+                    }
+                    let (regrets, _) = solver.regret_codes(node).unwrap();
+                    let (sums, _) = solver.strategy_sum_codes(node).unwrap();
+                    for index in 0..regrets.len() {
+                        assert_eq!(regrets[index], regrets[index ^ 1], "{schedule:?}, {node}");
+                        assert_eq!(sums[index], sums[index ^ 1], "{schedule:?}, {node}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_decoded_values_are_what_each_storage_stores() {
+        // Under f32 storage, the stored values themselves; under compressed storage, each code
+        // times its node's scale.
+        let schedule = Schedule::Discounted(Dcfr::default());
+        let mut full = VectorCfr::new(PublicLeduc::new(), schedule);
+        let game = PublicLeduc::new();
+        let mut half = VectorCfr::<_, CompressedStorage>::with_storage(game, schedule);
+        full.run(10, |_| {});
+        half.run(10, |_| {});
+        for node in player_nodes(&full) {
+            let (regrets, sums) = full.decoded(node).unwrap();
+            assert_eq!(regrets, full.regrets(node).unwrap());
+            assert_eq!(sums, full.strategy_sum(node).unwrap());
+            let (regrets, sums) = half.decoded(node).unwrap();
+            let (codes, scale) = half.regret_codes(node).unwrap();
+            let expected: Vec<f32> = codes.iter().map(|&c| f32::from(c) * scale).collect();
+            assert_eq!(regrets, expected);
+            let (codes, scale) = half.strategy_sum_codes(node).unwrap();
+            let expected: Vec<f32> = codes.iter().map(|&c| f32::from(c) * scale).collect();
+            assert_eq!(sums, expected);
+        }
+        assert_eq!(half.decoded(full.game().num_nodes()), None);
+    }
+
+    #[test]
+    fn under_compressed_storage_ruled_out_hands_stay_at_zero_and_play_uniformly() {
+        for schedule in schedules() {
+            let game = PublicLeduc::new();
+            let mut solver = VectorCfr::<_, CompressedStorage>::with_storage(game, schedule);
+            solver.run(30, |_| {});
+            let (average, current) = (solver.average_strategy(), solver.current_strategy());
+            for (node, hand) in ruled_out(&solver) {
+                let (regrets, _) = solver.regret_codes(node).unwrap();
+                let (sums, _) = solver.strategy_sum_codes(node).unwrap();
+                assert!(regrets.iter().skip(hand).step_by(6).all(|&c| c == 0));
+                assert!(sums.iter().skip(hand).step_by(6).all(|&c| c == 0));
+                for profile in [&average, &current] {
+                    let row = profile.hand(node, hand).unwrap();
+                    assert!(row.iter().all(|&p| p == 1.0 / row.len() as f32));
                 }
             }
         }

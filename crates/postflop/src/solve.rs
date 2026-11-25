@@ -6,11 +6,13 @@
 //! [`solve`] builds the spot's [`PostflopGame`], on the flop, the turn or the river, and runs
 //! [`VectorCfr`] on it under [`SolveOptions::schedule`], DCFR(1.5, 0, 2) by default. Each
 //! iteration updates OOP, then IP against OOP's updated strategy (alternating updates), as
-//! [`pk_cfr::vector`] specifies. Regrets and strategy sums are stored as `f32`, one entry per
-//! action and in-range combo of the acting player at each player node of the public tree, and
-//! the strategy the solve reports is the average strategy. The public tree is refused before
-//! anything is allocated for it if it has more than [`SolveOptions::max_nodes`] nodes, and so
-//! is a solve whose [memory estimate](crate::memory) is over [`SolveOptions::max_memory`].
+//! [`pk_cfr::vector`] specifies. Regrets and strategy sums are stored as `f32` by default, one
+//! entry per action and in-range combo of the acting player at each player node of the public
+//! tree, or in 16 bits with a scale per node with [`SolveOptions::compressed_storage`] (see
+//! [Storage](#storage)), and the strategy the solve reports is the average strategy. The public
+//! tree is refused before anything is allocated for it if it has more than
+//! [`SolveOptions::max_nodes`] nodes, and so is a solve whose [memory estimate](crate::memory)
+//! is over [`SolveOptions::max_memory`].
 //!
 //! After every [`check_every`](SolveOptions::check_every) iterations, the solve measures the
 //! [exploitability](mod@crate::exploitability) of the average strategy and calls the progress
@@ -32,6 +34,16 @@
 //!
 //! In a build with debug assertions, which the tests are, the solve then checks the solution
 //! against its [invariants](crate::invariants) and panics with the report if it breaks any.
+//!
+//! # What is held
+//!
+//! A measurement builds the average strategy on the full public tree, a profile as large as the
+//! regrets, and the solve keeps it, since the [`Solution`] needs the strategy of its last
+//! measurement when the solve stops there. It drops it before the next measurement builds the
+//! next, so that it never holds two. The best responses of a measurement give their values
+//! only and keep no strategy ([`pk_cfr::vector_best_response_value`]). Once the solve stops,
+//! the solver is dropped and the game moved into the [`Solution`], not copied. None of this
+//! changes a number.
 //!
 //! # Threads
 //!
@@ -59,6 +71,19 @@
 //! suits, ranges that name single combos) or that has no chance node, the solve iterates on the
 //! full game, exactly as without the option.
 //!
+//! # Storage
+//!
+//! With [`SolveOptions::compressed_storage`], off by default, the solver stores each player
+//! node's regrets as `i16` codes and its strategy sums as `u16` codes, each slice with one `f32`
+//! scale, as [`pk_cfr::compressed`] specifies ([`pk_cfr::CompressedStorage`]), merged or not.
+//! That holds the regrets and strategy sums in half the memory, and changes the numbers: every
+//! update rounds what it stores to a step of the node's scale, with offsets that make the
+//! rounding errors cancel over the iterations, so the iterations part from those of `f32`
+//! storage by more than rounding, and a solve stops improving at a few thousandths of a percent
+//! of the pot where an `f32` solve goes on. The measurements, the profile and the [`Solution`]
+//! are as with `f32` storage, all `f32` on the full tree, and a solve with the option is the
+//! same on any number of threads.
+//!
 //! # Progress
 //!
 //! The callback is called once per measurement, in iteration order, with a [`Progress`]: every
@@ -75,7 +100,8 @@
 //! threads (DECISIONS P5), so the strategy and every measurement are the same whatever
 //! `threads` is too, merged or not. A time cap makes the number of iterations depend on the
 //! machine, but not the strategy reached at any given number. A merged solve and the solve with
-//! merging off part within rounding, so they are the same solve only at a tolerance.
+//! merging off part within rounding, so they are the same solve only at a tolerance, and a
+//! solve with compressed storage parts from one with `f32` storage by more.
 //!
 //! # References
 //!
@@ -89,7 +115,7 @@ use std::num::NonZero;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pk_cfr::{Dcfr, PublicProfile, Schedule, VectorCfr};
+use pk_cfr::{CompressedStorage, Dcfr, F32Storage, PublicProfile, Schedule, Storage, VectorCfr};
 use pk_game::{Player, PostflopTree, TreeError};
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use thiserror::Error;
@@ -175,6 +201,9 @@ pub struct SolveOptions {
     /// (see [the module documentation](self#merging)). Defaults to true. Off, or on a spot with
     /// no symmetry to use, the solve iterates on the full game.
     pub merge_isomorphic: bool,
+    /// Store the regrets as `i16` and the strategy sums as `u16`, with a scale per node, in
+    /// place of `f32` (see [the module documentation](self#storage)). Defaults to false.
+    pub compressed_storage: bool,
 }
 
 impl Default for SolveOptions {
@@ -189,6 +218,7 @@ impl Default for SolveOptions {
             max_memory: SolveOptions::DEFAULT_MAX_MEMORY,
             threads: SolveOptions::default_threads(),
             merge_isomorphic: true,
+            compressed_storage: false,
         }
     }
 }
@@ -416,18 +446,53 @@ pub fn solve(
     } else {
         None
     };
-    match merged {
-        Some(merged) => {
-            let mut solver = VectorCfr::new(merged, options.schedule);
-            let pool = solve_pool(options, estimate.threads)?;
-            Ok(run(&mut solver, options, pool.as_ref(), start, progress))
+    let threads = estimate.threads;
+    let (game, finished) = match (merged, options.compressed_storage) {
+        (Some(merged), false) => {
+            let solver = VectorCfr::<_, F32Storage>::with_storage(merged, options.schedule);
+            let finished = iterate(solver, options, threads, start, progress)?.1;
+            (game, finished)
         }
-        None => {
-            let mut solver = VectorCfr::new(game, options.schedule);
-            let pool = solve_pool(options, estimate.threads)?;
-            Ok(run(&mut solver, options, pool.as_ref(), start, progress))
+        (Some(merged), true) => {
+            let solver = VectorCfr::<_, CompressedStorage>::with_storage(merged, options.schedule);
+            let finished = iterate(solver, options, threads, start, progress)?.1;
+            (game, finished)
         }
-    }
+        (None, false) => {
+            let solver = VectorCfr::<_, F32Storage>::with_storage(game, options.schedule);
+            iterate(solver, options, threads, start, progress)?
+        }
+        (None, true) => {
+            let solver = VectorCfr::<_, CompressedStorage>::with_storage(game, options.schedule);
+            iterate(solver, options, threads, start, progress)?
+        }
+    };
+    let solution = Solution {
+        game,
+        strategy: finished.strategy,
+        stop: finished.stop,
+        iterations: finished.measured.iterations,
+        elapsed: start.elapsed(),
+        exploitability: finished.measured.exploitability,
+    };
+    // A debug assertion, which the elapsed time does not count.
+    debug_assert_valid(&solution);
+    Ok(solution)
+}
+
+/// Runs the solve loop on `solver`, just built, in the solve's pool if it has `threads` to
+/// share out, then drops the solver and the pool, and gives back what the solver owned of the
+/// game and what the loop found.
+fn iterate<I: Iterated>(
+    mut solver: I,
+    options: &SolveOptions,
+    threads: u64,
+    start: Instant,
+    progress: impl FnMut(&Progress),
+) -> Result<(I::Owned, Finished), SolveError> {
+    let pool = solve_pool(options, threads)?;
+    let finished = run(&mut solver, options, pool.as_ref(), start, progress);
+    Ok((solver.into_owned(), finished))
 }
 
 /// The solve's own pool, when it has threads to share out and chance nodes to split: when the
@@ -446,18 +511,25 @@ fn solve_pool(options: &SolveOptions, threads: u64) -> Result<Option<ThreadPool>
     Ok(Some(pool))
 }
 
-/// What the solve loop iterates: a solver, of the full game or of the merged one, with its
-/// average strategy on the full game's public tree.
+/// What the solve loop iterates: a solver, of the full game or of the merged one, under either
+/// storage, with its average strategy on the full game's public tree.
 trait Iterated: Sync + Send {
+    /// What the solver owns of the game, given back when it is dropped: the full game, or
+    /// nothing for a merged solver, which borrows it.
+    type Owned;
     fn iterate(&mut self);
     fn iterations(&self) -> u64;
     /// The game the solve measures and returns, the full game.
     fn full_game(&self) -> &PostflopGame;
     /// The average strategy on the full game's public tree.
     fn full_average_strategy(&self) -> PublicProfile;
+    /// Drops the solver and gives back what it owned of the game.
+    fn into_owned(self) -> Self::Owned;
 }
 
-impl Iterated for VectorCfr<PostflopGame> {
+impl<S: Storage> Iterated for VectorCfr<PostflopGame, S> {
+    type Owned = PostflopGame;
+
     fn iterate(&mut self) {
         VectorCfr::iterate(self);
     }
@@ -473,9 +545,15 @@ impl Iterated for VectorCfr<PostflopGame> {
     fn full_average_strategy(&self) -> PublicProfile {
         self.average_strategy()
     }
+
+    fn into_owned(self) -> PostflopGame {
+        self.into_game()
+    }
 }
 
-impl Iterated for VectorCfr<MergedGame<'_>> {
+impl<S: Storage> Iterated for VectorCfr<MergedGame<'_>, S> {
+    type Owned = ();
+
     fn iterate(&mut self) {
         VectorCfr::iterate(self);
     }
@@ -492,18 +570,29 @@ impl Iterated for VectorCfr<MergedGame<'_>> {
     fn full_average_strategy(&self) -> PublicProfile {
         MergedGame::average_strategy(self)
     }
+
+    fn into_owned(self) {}
+}
+
+/// How the solve loop ended: the rule that stopped it, its last measurement and the strategy
+/// measured.
+struct Finished {
+    stop: StopReason,
+    measured: Progress,
+    strategy: PublicProfile,
 }
 
 /// The solve loop of the [module documentation](self#the-loop) on `solver`, just built:
-/// iterating, measuring and stopping, then the solution.
-fn run(
-    solver: &mut impl Iterated,
+/// iterating, measuring and stopping, holding one profile at a time (see
+/// [what is held](self#what-is-held)).
+fn run<I: Iterated>(
+    solver: &mut I,
     options: &SolveOptions,
     pool: Option<&ThreadPool>,
     start: Instant,
     mut progress: impl FnMut(&Progress),
-) -> Solution {
-    let mut measure = |solver: &dyn Iterated| -> (Progress, PublicProfile) {
+) -> Finished {
+    let mut measure = |solver: &I| -> (Progress, PublicProfile) {
         let (strategy, exploitability) = on_pool(pool, || {
             let strategy = solver.full_average_strategy();
             let exploitability = exploitability(solver.full_game(), &strategy);
@@ -517,6 +606,7 @@ fn run(
         progress(&measured);
         (measured, strategy)
     };
+    // The last measurement and its strategy, which the solution takes if the solve stops there.
     let mut last: Option<(Progress, PublicProfile)> = None;
     let stop = loop {
         if solver.iterations() >= options.max_iterations {
@@ -527,6 +617,9 @@ fn run(
         }
         on_pool(pool, || solver.iterate());
         if solver.iterations().is_multiple_of(options.check_every) {
+            // The solve does not stop at the last measurement, so its profile goes before the
+            // next is built.
+            drop(last.take());
             let measured = measure(&*solver);
             let reached = options
                 .target
@@ -537,23 +630,17 @@ fn run(
             }
         }
     };
+    // A last measurement of an earlier iteration is dropped before the final one is made.
+    let last = last.filter(|(measured, _)| measured.iterations == solver.iterations());
     let (measured, strategy) = match last {
-        Some((measured, strategy)) if measured.iterations == solver.iterations() => {
-            (measured, strategy)
-        }
-        _ => measure(&*solver),
+        Some(last) => last,
+        None => measure(&*solver),
     };
-    let solution = Solution {
-        game: solver.full_game().clone(),
-        strategy,
+    Finished {
         stop,
-        iterations: measured.iterations,
-        elapsed: start.elapsed(),
-        exploitability: measured.exploitability,
-    };
-    // A debug assertion, which the elapsed time does not count.
-    debug_assert_valid(&solution);
-    solution
+        measured,
+        strategy,
+    }
 }
 
 /// Runs `walk` on the solve's pool, if it has one, and otherwise on the calling thread.

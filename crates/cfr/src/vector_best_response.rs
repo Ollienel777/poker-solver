@@ -51,6 +51,11 @@
 //!
 //! Every quantity is `f64`, and the `f32` probabilities of `σ` are widened exactly.
 //!
+//! [`vector_best_response_value`] makes the same walk and keeps no strategy: it gives `BR_i(σ)`
+//! and `q*(root, h)` alone, bit for bit those of [`vector_best_response`], since a choice is
+//! made from the values below a node and nothing below it reads the choice. It is what a
+//! measurement of exploitability needs, which never looks at the response itself.
+//!
 //! # Expected values
 //!
 //! Player `i`'s expected value `v_i(σ)`, when both players play `σ`, comes from the same walk
@@ -78,8 +83,9 @@
 //! children holds the vectors it passes down and the values they return in a frame from the
 //! walk's stack of frames, so that the walk allocates its working memory at each depth once,
 //! not at each node. The only allocation per node left is the best response's own strategy,
-//! one vector at each node of the responder, which the walk returns. The working memory is the
-//! walk's own and is dropped with it.
+//! one vector at each node of the responder, which [`vector_best_response`] returns and
+//! [`vector_best_response_value`] does not make. The working memory is the walk's own and is
+//! dropped with it.
 //!
 //! # The parallel walk
 //!
@@ -94,14 +100,15 @@
 //! threads. A best response's choice at a node depends only on the values below it, and each
 //! node of the responder is set once, by the walk of the child that holds it, so its strategy is
 //! the same too. The children's walks set their choices in the one strategy the walk returns,
-//! through a lock.
+//! through a lock; a walk that keeps no strategy has none to share.
 //!
 //! # Exploitability
 //!
 //! For a two-player zero-sum game, `(BR_0(σ) + BR_1(σ)) / 2`, which is zero exactly at a Nash
 //! equilibrium (see [`best_response`](mod@crate::best_response)). The [`PublicGame`] trait
 //! does not expose the payoffs, so [`vector_exploitability`] cannot check that the game is
-//! zero-sum: the caller must know it is.
+//! zero-sum: the caller must know it is. It takes the two values from
+//! [`vector_best_response_value`], so it holds no strategy.
 //!
 //! # References
 //!
@@ -147,17 +154,64 @@ pub fn vector_best_response<G: PublicGame + Sync>(
     profile: &PublicProfile,
     player: usize,
 ) -> VectorBestResponse {
+    let mut strategy = PublicProfile::empty(game.num_nodes());
+    let (value, hand_values) = respond(game, profile, player, Choices::Own(&mut strategy));
+    VectorBestResponse {
+        player,
+        value,
+        hand_values,
+        strategy,
+    }
+}
+
+/// The value of a best response of one player to the other's strategy, from
+/// [`vector_best_response_value`]: a [`VectorBestResponse`] without its strategy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorBestResponseValue {
+    /// The player who responds.
+    pub player: usize,
+    /// `BR_i(σ)`, as [`VectorBestResponse::value`].
+    pub value: f64,
+    /// `q*(root, h)` for each hand `h` of the responder, as [`VectorBestResponse::hand_values`].
+    pub hand_values: Vec<f64>,
+}
+
+/// The value of player `player`'s best response to the other player's strategy in `profile`,
+/// and its values by hand, bit for bit those of [`vector_best_response`], by the same walk with
+/// no strategy kept (see the [module documentation](self#best-response)).
+///
+/// Panics for any reason [`vector_best_response`] panics.
+pub fn vector_best_response_value<G: PublicGame + Sync>(
+    game: &G,
+    profile: &PublicProfile,
+    player: usize,
+) -> VectorBestResponseValue {
+    let (value, hand_values) = respond(game, profile, player, Choices::Dropped);
+    VectorBestResponseValue {
+        player,
+        value,
+        hand_values,
+    }
+}
+
+/// The best-response walk from the root for `player`, setting its choices in `strategy`:
+/// `BR_i(σ)` and `q*(root, h)` for each hand.
+fn respond<G: PublicGame + Sync>(
+    game: &G,
+    profile: &PublicProfile,
+    player: usize,
+    strategy: Choices<'_>,
+) -> (f64, Vec<f64>) {
     assert!(player < 2, "player {player} is not 0 or 1");
     check_game(game, |_, _, _, _| {});
     let num_hands = game.num_hands(player);
-    let mut strategy = PublicProfile::empty(game.num_nodes());
     let mut workspace = Workspace::default();
     let mut branches = Vec::new();
     let mut walk = Respond {
         game,
         profile,
         player,
-        strategy: Choices::Own(&mut strategy),
+        strategy,
         workspace: &mut workspace,
         branches: splits_chance_nodes().then_some(&mut branches),
     };
@@ -173,12 +227,7 @@ pub fn vector_best_response<G: PublicGame + Sync>(
     for (&deal, &hand_value) in game.deal(player).iter().zip(&hand_values) {
         value += deal * hand_value;
     }
-    VectorBestResponse {
-        player,
-        value,
-        hand_values,
-        strategy,
-    }
+    (value, hand_values)
 }
 
 /// `(BR_0(σ) + BR_1(σ)) / 2` for a two-player zero-sum game, as the
@@ -186,8 +235,8 @@ pub fn vector_best_response<G: PublicGame + Sync>(
 ///
 /// Panics for any reason [`vector_best_response`] panics.
 pub fn vector_exploitability<G: PublicGame + Sync>(game: &G, profile: &PublicProfile) -> f64 {
-    let first = vector_best_response(game, profile, 0).value;
-    let second = vector_best_response(game, profile, 1).value;
+    let first = vector_best_response_value(game, profile, 0).value;
+    let second = vector_best_response_value(game, profile, 1).value;
     (first + second) / 2.0
 }
 
@@ -585,9 +634,16 @@ enum Choices<'a> {
     Own(&'a mut PublicProfile),
     /// The same, shared with the walks of the other children of a split chance node.
     Shared(&'a Mutex<PublicProfile>),
+    /// Nowhere: the walk gives the values only.
+    Dropped,
 }
 
 impl Choices<'_> {
+    /// Whether the walk keeps its choices.
+    fn kept(&self) -> bool {
+        !matches!(self, Choices::Dropped)
+    }
+
     /// Sets the strategy at `node`, laid out `[actions × hands]` over `num_hands` hands.
     fn set(&mut self, node: usize, num_hands: usize, probabilities: Vec<f32>) {
         match self {
@@ -596,6 +652,7 @@ impl Choices<'_> {
                 let mut strategy = strategy.lock().unwrap_or_else(PoisonError::into_inner);
                 strategy.set(node, num_hands, probabilities);
             }
+            Choices::Dropped => {}
         }
     }
 }
@@ -639,11 +696,17 @@ impl<G: PublicGame + Sync> Respond<'_, G> {
                     .branches
                     .as_deref_mut()
                     .expect("a walk that splits has the children's workspaces");
-                let Choices::Own(strategy) = &mut self.strategy else {
-                    unreachable!("only the walk from the root splits, and it owns its strategy");
+                // Moved, not copied, into the lock and back, if the walk keeps its choices.
+                let shared = match &mut self.strategy {
+                    Choices::Own(strategy) => Some(Mutex::new(mem::replace(
+                        &mut **strategy,
+                        PublicProfile::empty(0),
+                    ))),
+                    Choices::Dropped => None,
+                    Choices::Shared(_) => {
+                        unreachable!("only the walk from the root splits, and it owns its strategy")
+                    }
                 };
-                // Moved, not copied, into the lock and back.
-                let shared = Mutex::new(mem::replace(&mut **strategy, PublicProfile::empty(0)));
                 let split = Split {
                     game,
                     node,
@@ -660,14 +723,16 @@ impl<G: PublicGame + Sync> Respond<'_, G> {
                         game,
                         profile,
                         player,
-                        strategy: Choices::Shared(&shared),
+                        strategy: shared.as_ref().map_or(Choices::Dropped, Choices::Shared),
                         workspace,
                         branches: None,
                     };
                     walk.visit(child, opponent_reach, possible, values);
                 };
                 split.walk(self.workspace, branches, num_outcomes, values, &walk_child);
-                **strategy = shared.into_inner().unwrap_or_else(PoisonError::into_inner);
+                if let (Choices::Own(strategy), Some(shared)) = (&mut self.strategy, shared) {
+                    **strategy = shared.into_inner().unwrap_or_else(PoisonError::into_inner);
+                }
             }
             PublicNode::Chance { num_outcomes } => {
                 let mut frame = self.workspace.frames.take();
@@ -700,11 +765,13 @@ impl<G: PublicGame + Sync> Respond<'_, G> {
                         }
                     }
                 }
-                let mut pure = vec![0.0; num_actions * num_hands];
-                for (hand, &action) in frame.choices.iter().enumerate() {
-                    pure[action * num_hands + hand] = 1.0;
+                if self.strategy.kept() {
+                    let mut pure = vec![0.0; num_actions * num_hands];
+                    for (hand, &action) in frame.choices.iter().enumerate() {
+                        pure[action * num_hands + hand] = 1.0;
+                    }
+                    self.strategy.set(node, num_hands, pure);
                 }
-                self.strategy.set(node, num_hands, pure);
                 self.workspace.frames.give(frame);
             }
             PublicNode::Player {
@@ -889,6 +956,45 @@ mod tests {
                 "{name}: {vector} against {scalar}"
             );
             assert!(scalar > 1e-3, "{name} is close to an equilibrium: {scalar}");
+        }
+    }
+
+    #[test]
+    fn the_value_without_the_strategy_is_the_best_responses_bit_for_bit() {
+        // On Leduc and on Leduc with its images, on one thread and on several, where the walk
+        // keeping no strategy splits without a lock: the same value and hand values, bit for bit.
+        let bits = |values: &[f64]| -> Vec<u64> { values.iter().map(|v| v.to_bits()).collect() };
+        let game = PublicLeduc::new();
+        let merged = MergedLeduc::new();
+        let mut cases: Vec<PublicProfile> = profiles()
+            .iter()
+            .map(|(_, profile)| game.public_profile(profile))
+            .collect();
+        cases.extend((0..3).map(|seed| symmetric_profile(&merged, seed)));
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(5)
+            .build()
+            .unwrap();
+        for (index, public) in cases.iter().enumerate() {
+            for player in 0..2 {
+                let at = format!("profile {index}, player {player}");
+                let full = vector_best_response(&game, public, player);
+                for value in [
+                    vector_best_response_value(&game, public, player),
+                    pool.install(|| vector_best_response_value(&game, public, player)),
+                ] {
+                    assert_eq!(value.player, player);
+                    assert_eq!(value.value.to_bits(), full.value.to_bits(), "{at}");
+                    assert_eq!(bits(&value.hand_values), bits(&full.hand_values), "{at}");
+                }
+                let full = vector_best_response(&merged, public, player);
+                let value = pool.install(|| vector_best_response_value(&merged, public, player));
+                assert_eq!(
+                    bits(&value.hand_values),
+                    bits(&full.hand_values),
+                    "merged, {at}"
+                );
+            }
         }
     }
 
