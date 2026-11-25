@@ -369,7 +369,7 @@ Every figure of the first part is the solve of before #41 without its second pro
 
 ## 16-bit storage (#41)
 
-`SolveOptions::compressed_storage`, off by default, stores the regrets as `i16` codes and the strategy sums as `u16` codes, each node's slice with one `f32` scale, rounded with a Weyl sequence of offsets (`pk_cfr::compressed`; DECISIONS P65, P66). What it costs and saves, measured on 2026-11-25 on the code of #41, against `f32` storage on the same code. The margin it must keep is for the user to agree, and it stays off until then.
+`SolveOptions::compressed_storage`, off by default, stores the regrets as `i16` codes and the strategy sums as `u16` codes, each node's slice with one `f32` scale, rounded with a Weyl sequence of offsets (`pk_cfr::compressed`; DECISIONS P65, P66). What it costs and saves, measured on 2026-11-25 on the code of #41, against `f32` storage on the same code. On these measurements the user decided at the M4 gate to leave it off by default (DECISIONS D23).
 
 ### Exploitability
 

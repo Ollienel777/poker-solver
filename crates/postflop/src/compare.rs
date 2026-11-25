@@ -101,8 +101,9 @@
 //! The gate sets no limit for EVs. [`Tolerances::ev`] defaults to 5% of the pot and
 //! [`Tolerances::reported_ev`] to 0.1%, from the measurements of the slow test
 //! `honest_solvers_table` in `tests/compare.rs`. [`Tolerances::frequency_below_deals`], which a
-//! river spot never uses, defaults to the measurements of the slow test
-//! `honest_solvers_table_by_street` in `tests/compare_streets.rs`: see its documentation.
+//! river spot never uses, defaults to the limits of the M4 gate (DECISIONS D21), which were
+//! set from the measurements of the slow test `honest_solvers_table_by_street` in
+//! `tests/compare_streets.rs`: see its documentation.
 //!
 //! Single combos are not compared: where several equilibria exist, two correct solvers can
 //! split a mixed strategy differently among equivalent hands.
@@ -122,8 +123,8 @@ use crate::node_values::NodeValues;
 use crate::spot::Spot;
 
 /// The limits of a comparison's verdict. [`Tolerances::default`] gives those of the M3 gate,
-/// and for the nodes below a deal, which a river spot does not have, those proposed from the
-/// honest solvers' measurements: see the [module documentation](self#the-verdict).
+/// and for the nodes below a deal, which a river spot does not have, those of the M4 gate,
+/// set from the honest solvers' measurements: see the [module documentation](self#the-verdict).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tolerances {
     /// The most exploitable either strategy may be, in percent of the pot. Defaults to 0.3.
@@ -147,9 +148,9 @@ pub struct Tolerances {
     /// How far apart an action's frequencies may be at a checked node below one deal (`[0]`:
     /// the turn of a flop spot, the river of a turn spot) and below two (`[1]`: the river of a
     /// flop spot), as a probability. Not part of the M3 gate, and never used on a river spot.
-    /// Defaults to 0.10 and 0.25, 10 and 25 points: a proposal, measured between two honest
-    /// solves at 0.03% of the pot by the slow test `honest_solvers_table_by_street`, which the
-    /// M4 gate's owner sets (DECISIONS P36).
+    /// Defaults to 0.10 and 0.25, 10 and 25 points: proposed from what two honest solves at
+    /// 0.03% of the pot differ by, as the slow test `honest_solvers_table_by_street` measures
+    /// it (DECISIONS P36), and confirmed at the M4 gate (D21).
     pub frequency_below_deals: [f64; 2],
 }
 
