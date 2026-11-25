@@ -1,11 +1,15 @@
-//! The memory a solve needs, estimated from the spot before anything is allocated.
+//! The memory a solve needs, and the memory saving its solution needs, estimated from the spot
+//! before anything is allocated.
 //!
 //! [`estimate_memory`] counts the public tree from the betting tree, as the game's node limit
 //! does, and the hands each player holds on every board the tree reaches, without building the
 //! game. From those counts it adds up what [`solve`](crate::solve()) allocates, item by item,
 //! as the code stands: the overheads that a tidier implementation would not have are counted,
 //! not left out. [`solve`](crate::solve()) refuses a spot whose [`MemoryEstimate::total`] is over
-//! [`SolveOptions::max_memory`].
+//! [`SolveOptions::max_memory`]. [`estimate_save_memory`] counts, from the same counts, what
+//! [`save`](crate::save()) holds when it writes the solution to a solution file
+//! ([the save](#the-save)), so that a caller that solves and then saves can refuse a spot whose
+//! save would not fit either.
 //!
 //! # What is counted
 //!
@@ -130,10 +134,51 @@
 //! next solve look smaller. `tests/memory_estimate.rs` holds the estimate on several threads to
 //! at most 5%, 16 KiB a thread and 64 KiB above the measured peak.
 //!
+//! # The save
+//!
+//! [`estimate_save_memory`] counts what the process holds while [`save`](crate::save()) writes a
+//! solution of the spot to a [solution file](crate::solution_file), the solution included, as
+//! the save's code stands. The save runs on the calling thread, and holds, beside the solution
+//! it is given (its game, its strategy and its copy of the spot, which the solve's finish holds
+//! too):
+//!
+//! - **The quantized strategy**: a profile as large as the solution's, from the first node
+//!   quantized until the EVs are worked out, and the room in which a node's codes are made.
+//! - **The encoders**: while the strategy is quantized, a zstd encoder for each street the file
+//!   holds, to which each node's codes are written as they are made. zstd allocates its working
+//!   memory through Rust's allocator, as `pk-postflop` builds it (`with-rust-allocator`), and an
+//!   encoder is counted as zstd's own estimate of a stream with the parameters it chooses for
+//!   the section's size (`ZSTD_estimateCStreamSize`), with the stream writer's buffer,
+//!   [`ZSTD_WRITER_BYTES`].
+//! - **The compressed sections**: each in the room zstd's bound gives its raw bytes, taken when
+//!   its encoder starts, and shrunk to its length once its frame is done. What a section
+//!   compresses to depends on the numbers in it, so every section is counted at its room, and
+//!   its shrinking as the room and the bytes at once: a bound, above what is held by what the
+//!   compression saves.
+//! - **The exploitability's walks**, on the quantized strategy, counted as a solve's
+//!   measurement walks are, on one thread.
+//! - **The EVs**: a place for each node's EVs in its section, 8 bytes a node of the tree; the
+//!   raw EV sections of the streets the file holds, at their exact sizes, 4 bytes a hand at
+//!   each of their player nodes, which the walk writes each node's EVs into as it finds them;
+//!   and a bound on the walk's working memory, a few vectors of the hands for each node on a
+//!   line.
+//! - **The header**: its text, its copy of the spot and the list of the sections.
+//!
+//! It holds the most in one of five phases: quantizing, with every encoder open and as each is
+//! finished; measuring the exploitability; working out the EVs, which holds the raw EV sections
+//! and the quantized strategy at once; compressing the EVs, once the quantized strategy is
+//! dropped, one street at a time, each street's raw section dropped once it is compressed; and
+//! writing the file. [`SaveMemoryEstimate::heap_bytes`] adds the margin of the solve's estimate
+//! to the largest, and [`SaveMemoryEstimate::total`] its allowances, so that it is what the
+//! process holds at the save's peak and compares with a limit as [`MemoryEstimate::total`] does.
+//! `tests/memory_estimate.rs` holds the heap to never below a counting allocator's peak of the
+//! solution and the save together, and to 25% above it at most.
+//!
 //! # What it depends on
 //!
 //! The figures follow the solver's code, not a model of a solver, so a change to what the solver
-//! allocates must change this module too. Seven layouts are private to `pk_cfr`, the solver's
+//! allocates must change this module too, and so must a change to what `save` holds, or to the
+//! version of zstd, whose estimate of a stream the save's figures take. Seven layouts are private to `pk_cfr`, the solver's
 //! row under each storage, a profile's entry, and the frames and the workspaces of the two kinds
 //! of walk, and are mirrored here by structs with the same fields. A `Vec` filled by pushes is taken to grow as the standard
 //! library grows it, doubling from four elements, and a walk's buffer to grow to exactly what
@@ -154,8 +199,10 @@ use crate::merged::{
     merging_group,
 };
 use crate::payoff::Payoff;
+use crate::solution_file::{SaveOptions, SectionEncoder};
 use crate::solve::{SolveError, SolveOptions};
 use crate::spot::Spot;
+use crate::terminal::BoardHands;
 
 /// What [`MemoryEstimate::process_bytes`] allows for the process apart from the solve: its code,
 /// its stacks and the standard library's buffers. 16 MiB, about three times what the example
@@ -543,6 +590,13 @@ struct Census {
     depth: u64,
     /// The most reaches waiting at once on the invariant check's stack.
     waiting: u64,
+    /// By street: Σ actions × the actor's hands, and Σ the actor's hands, over the public player
+    /// nodes of the street.
+    street_stored: [u64; 3],
+    street_hands: [u64; 3],
+    /// The most actions × the actor's hands at one player node, and the most actions.
+    largest: u64,
+    max_actions: u64,
 }
 
 /// The public tree's counts, with each betting node standing for as many public nodes as the
@@ -562,13 +616,20 @@ fn census(tree: &PostflopTree, hands: [u64; 2]) -> Census {
         census.public_nodes += m;
         let (fanout, below) = match node {
             Node::Player {
-                actor, children, ..
+                street,
+                actor,
+                children,
+                ..
             } => {
                 let (player, a) = (actor.index(), children.len() as u64);
                 census.player_nodes += m;
                 census.actions += m * a;
                 census.stored[player] += m * a * hands[player];
                 census.flags += m * hands[player];
+                census.street_stored[*street as usize] += m * a * hands[player];
+                census.street_hands[*street as usize] += m * hands[player];
+                census.largest = census.largest.max(a * hands[player]);
+                census.max_actions = census.max_actions.max(a);
                 (a, m)
             }
             Node::Chance { street, .. } => {
@@ -916,6 +977,195 @@ fn workspace(
         + Heap::one(branches * workspace_bytes)
 }
 
+/// What both estimates count first, from the spot alone: the betting tree, each player's hands,
+/// the public tree's census, and the heap of the game with the room a walk keeps at a terminal.
+struct GameCounts {
+    tree: PostflopTree,
+    root: BoardHands,
+    hands: [u64; 2],
+    census: Census,
+    num_boards: u64,
+    terminal_room: u64,
+    board_hands: Heap,
+    betting: Heap,
+    public_tree: Heap,
+}
+
+impl GameCounts {
+    /// The counts of `spot`'s game under `options.max_nodes`, failing as
+    /// [`PostflopGame::with_node_limit`](crate::PostflopGame::with_node_limit) does.
+    fn new(spot: &Spot, options: &SolveOptions) -> Result<GameCounts, SolveError> {
+        spot.validate()?;
+
+        let limit = options.max_nodes.min(u64::from(u32::MAX));
+        let mut spec = spot.tree_spec();
+        spec.max_nodes = u32::try_from(limit).expect("the limit is at most u32::MAX");
+        let tree = PostflopTree::build(spec)?;
+        let root = spot.board_hands();
+        let lists = [Player::Oop, Player::Ip].map(|player| root.hands(player).combos().to_vec());
+        let hands = lists.each_ref().map(|list| list.len() as u64);
+        let census = census(&tree, hands);
+        if census.public_nodes > limit {
+            return Err(SolveError::PublicTreeTooLarge {
+                nodes: census.public_nodes,
+                limit,
+            });
+        }
+        let [n0, n1] = hands;
+        // The boards: the spot's, then each turn and each river the tree reaches.
+        let players = lists.each_ref().map(|list| PlayerHands::new(list));
+        let river_spot = spot.board.len() == 5;
+        let mut boards = Heap::default();
+        for n in hands {
+            boards += board_lists(n, river_spot, false);
+        }
+        // The spot's hands that hold each card, a list per player.
+        for n in hands {
+            boards += Heap::one(8 * n);
+        }
+        let mut num_boards = 1u64;
+        // The most hands, both players' together, on a later board with a terminal: the room a
+        // walk keeps for gathering the reach into a board's order and its values in that order.
+        let mut terminal_room = 0;
+        let mut later = |cards: &[usize], river: bool| {
+            num_boards += 1;
+            let mut both = 0;
+            for player in &players {
+                let n = player.missing(cards);
+                both += n;
+                boards += board_lists(n, river, true);
+            }
+            let terminals = if river {
+                census.river_terminals
+            } else {
+                census.turn_terminals
+            };
+            if terminals {
+                terminal_room = terminal_room.max(both);
+            }
+        };
+        let off: Vec<usize> = (CardSet::FULL - spot.board)
+            .iter()
+            .map(|card| card.index())
+            .collect();
+        if spot.board.len() == 3 && census.turn_chance {
+            for &turn in &off {
+                later(&[turn], false);
+            }
+        }
+        if spot.board.len() == 3 && census.river_chance {
+            for (i, &turn) in off.iter().enumerate() {
+                for &river in &off[i + 1..] {
+                    later(&[turn, river], true);
+                }
+            }
+        }
+        if spot.board.len() == 4 && census.river_chance {
+            for &river in &off {
+                later(&[river], true);
+            }
+        }
+        // The vector of boards starts with the spot's alone and grows by pushes.
+        let slots = if num_boards == 1 {
+            1
+        } else {
+            grown(num_boards, BOARD)
+        };
+        let board_hands = boards + Heap::one(slots * BOARD);
+
+        // The betting tree, its payoffs and the deal. The tree's nodes are pushed as it is built.
+        let betting_nodes = tree.nodes().len() as u64;
+        let mut betting = Heap::one(grown(betting_nodes, BETTING_NODE) * BETTING_NODE);
+        let mut inner = Heap::default();
+        for node in tree.nodes() {
+            if let Node::Player { actions, .. } = node {
+                let a = actions.len() as u64;
+                inner += Heap::one(a * ACTION) + Heap::one(a * 4);
+            }
+        }
+        for street in [Street::Flop, Street::Turn, Street::River] {
+            let sizing = tree.spec().sizing.street(street);
+            inner +=
+                Heap::one(sizing.bets.len() as u64 * 8) + Heap::one(sizing.raises.len() as u64 * 8);
+        }
+        inner += Heap::one(betting_nodes * PAYOFF) + Heap::one(8 * n0) + Heap::one(8 * n1);
+        betting += inner;
+
+        // The public tree: a record per node, and the children and cards of each node.
+        let public_tree = Heap::one(census.public_nodes * PUBLIC_NODE)
+            + Heap::spread(4 * census.actions, census.player_nodes)
+            + Heap::spread(5 * census.outcomes, 2 * census.chance_nodes);
+
+        Ok(GameCounts {
+            tree,
+            root,
+            hands,
+            census,
+            num_boards,
+            terminal_room,
+            board_hands,
+            betting,
+            public_tree,
+        })
+    }
+
+    /// The game's heap: the betting tree, the public tree and the hands on each board.
+    fn game(&self) -> Heap {
+        self.betting + self.public_tree + self.board_hands
+    }
+
+    /// One average-strategy profile: an entry per node of the full tree, and a strategy per
+    /// player node.
+    fn profile(&self) -> Heap {
+        let census = &self.census;
+        let full_stored = census.stored[0] + census.stored[1];
+        Heap::one(census.public_nodes * PROFILE_ENTRY_BYTES)
+            + Heap::spread(4 * full_stored, census.player_nodes)
+    }
+
+    /// The working memory of a measurement's walks, on several threads with `split`: the larger
+    /// player's best-response walk, with its workspace, its possible hands at the root and its
+    /// values; its expected-value walk, the same with a workspace of its own; and the check of
+    /// the tree's shape before each walk, a flag per node, both players' possible hands at the
+    /// root and a frame of them for each chance node on a line.
+    fn measurement(&self, split: bool) -> Measurement {
+        let (tree, hands, census) = (&self.tree, self.hands, &self.census);
+        let [n0, n1] = hands;
+        let walk = |walk: fn(usize) -> Walk| {
+            [0, 1]
+                .map(|p| {
+                    Heap::one(8 * hands[p])
+                        + Heap::one(hands[p])
+                        + workspace(tree, hands, walk(p), self.terminal_room, split, outcomes)
+                })
+                .into_iter()
+                .fold(Heap::default(), Heap::max)
+        };
+        let best_response = walk(Walk::Respond);
+        let follow = walk(Walk::Follow);
+        let chance_levels = u64::from(census.turn_chance) + u64::from(census.river_chance);
+        let mut check_frames = Heap::one(n0)
+            + Heap::one(n1)
+            + Heap::spread(chance_levels * (n0 + n1), 2 * chance_levels);
+        if chance_levels > 0 {
+            check_frames += Heap::one(grown(chance_levels, CHECK_FRAME_BYTES) * CHECK_FRAME_BYTES);
+        }
+        Measurement {
+            best_response,
+            follow,
+            check_frames,
+        }
+    }
+}
+
+/// The working memory of a measurement's walks: see [`GameCounts::measurement`].
+struct Measurement {
+    best_response: Heap,
+    follow: Heap,
+    /// The frames of the check of a tree's shape, without its flag per node.
+    check_frames: Heap,
+}
+
 /// Estimates what solving `spot` with `options` will need, as the [module documentation](self)
 /// describes, without building the game. Of the options, `max_nodes`, `max_iterations`,
 /// `check_every`, `threads`, `merge_isomorphic` and `compressed_storage` matter.
@@ -924,29 +1174,28 @@ fn workspace(
 /// `options.max_nodes`: on a spot that fails [`Spot::validate`], a betting tree over the limit,
 /// or a public tree over it. It builds the betting tree, which is small next to the solve.
 pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEstimate, SolveError> {
-    spot.validate()?;
-    let limit = options.max_nodes.min(u64::from(u32::MAX));
-    let mut spec = spot.tree_spec();
-    spec.max_nodes = u32::try_from(limit).expect("the limit is at most u32::MAX");
-    let tree = PostflopTree::build(spec)?;
-    let root = spot.board_hands();
-    let lists = [Player::Oop, Player::Ip].map(|player| root.hands(player).combos().to_vec());
-    let hands = lists.each_ref().map(|list| list.len() as u64);
-    let census = census(&tree, hands);
-    if census.public_nodes > limit {
-        return Err(SolveError::PublicTreeTooLarge {
-            nodes: census.public_nodes,
-            limit,
-        });
-    }
-    let [n0, n1] = hands;
+    let counts = GameCounts::new(spot, options)?;
+    let GameCounts {
+        tree,
+        root,
+        hands,
+        census,
+        num_boards,
+        terminal_room,
+        board_hands,
+        betting,
+        public_tree,
+    } = &counts;
+    let (hands, num_boards, terminal_room) = (*hands, *num_boards, *terminal_room);
+    let (board_hands, betting, public_tree) = (*board_hands, *betting, *public_tree);
+    let betting_nodes = tree.nodes().len() as u64;
     // Whether the solve iterates on the merged game, as `MergedGame::new` decides it.
     let group = merging_group(
         spot.board,
         [root.hands(Player::Oop), root.hands(Player::Ip)],
     );
     let merged = (options.merge_isomorphic && census.chance_nodes > 0 && !group.is_trivial())
-        .then(|| merged_census(&tree, hands, spot.board, group));
+        .then(|| merged_census(tree, hands, spot.board, group));
     // The threads the walks run on: a spot with no chance node runs on the calling thread.
     let threads = if census.chance_nodes > 0 {
         (options.threads as u64).max(1)
@@ -955,91 +1204,7 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
     };
     let split = threads > 1;
 
-    // The boards: the spot's, then each turn and each river the tree reaches.
-    let players = lists.each_ref().map(|list| PlayerHands::new(list));
-    let river_spot = spot.board.len() == 5;
-    let mut boards = Heap::default();
-    for n in hands {
-        boards += board_lists(n, river_spot, false);
-    }
-    // The spot's hands that hold each card, a list per player.
-    for n in hands {
-        boards += Heap::one(8 * n);
-    }
-    let mut num_boards = 1u64;
-    // The most hands, both players' together, on a later board with a terminal: the room a
-    // walk keeps for gathering the reach into a board's order and its values in that order.
-    let mut terminal_room = 0;
-    let mut later = |cards: &[usize], river: bool| {
-        num_boards += 1;
-        let mut both = 0;
-        for player in &players {
-            let n = player.missing(cards);
-            both += n;
-            boards += board_lists(n, river, true);
-        }
-        let terminals = if river {
-            census.river_terminals
-        } else {
-            census.turn_terminals
-        };
-        if terminals {
-            terminal_room = terminal_room.max(both);
-        }
-    };
-    let off: Vec<usize> = (CardSet::FULL - spot.board)
-        .iter()
-        .map(|card| card.index())
-        .collect();
-    if spot.board.len() == 3 && census.turn_chance {
-        for &turn in &off {
-            later(&[turn], false);
-        }
-    }
-    if spot.board.len() == 3 && census.river_chance {
-        for (i, &turn) in off.iter().enumerate() {
-            for &river in &off[i + 1..] {
-                later(&[turn, river], true);
-            }
-        }
-    }
-    if spot.board.len() == 4 && census.river_chance {
-        for &river in &off {
-            later(&[river], true);
-        }
-    }
-    // The vector of boards starts with the spot's alone and grows by pushes.
-    let slots = if num_boards == 1 {
-        1
-    } else {
-        grown(num_boards, BOARD)
-    };
-    let board_hands = boards + Heap::one(slots * BOARD);
-
-    // The betting tree, its payoffs and the deal. The tree's nodes are pushed as it is built.
-    let betting_nodes = tree.nodes().len() as u64;
-    let mut betting = Heap::one(grown(betting_nodes, BETTING_NODE) * BETTING_NODE);
-    let mut inner = Heap::default();
-    for node in tree.nodes() {
-        if let Node::Player { actions, .. } = node {
-            let a = actions.len() as u64;
-            inner += Heap::one(a * ACTION) + Heap::one(a * 4);
-        }
-    }
-    for street in [Street::Flop, Street::Turn, Street::River] {
-        let sizing = tree.spec().sizing.street(street);
-        inner +=
-            Heap::one(sizing.bets.len() as u64 * 8) + Heap::one(sizing.raises.len() as u64 * 8);
-    }
-    inner += Heap::one(betting_nodes * PAYOFF) + Heap::one(8 * n0) + Heap::one(8 * n1);
-    betting += inner;
-
-    // The public tree: a record per node, and the children and cards of each node.
-    let public_tree = Heap::one(census.public_nodes * PUBLIC_NODE)
-        + Heap::spread(4 * census.actions, census.player_nodes)
-        + Heap::spread(5 * census.outcomes, 2 * census.chance_nodes);
-
-    let game = betting + public_tree + board_hands;
+    let game = counts.game();
 
     // The tree the solver iterates on, the merged one when the solve merges: its nodes, player
     // nodes, stored values and flags.
@@ -1108,54 +1273,18 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
 
     // A profile: an entry per node, and a strategy per player node, on the full tree whether
     // the solve merges or not.
-    let full_stored = census.stored[0] + census.stored[1];
-    let profile = Heap::one(census.public_nodes * PROFILE_ENTRY_BYTES)
-        + Heap::spread(4 * full_stored, census.player_nodes);
+    let profile = counts.profile();
     // The last measurement's profile is held while the solve iterates after it, when it can,
     // and dropped before the next is made.
     let iterates_after_measuring = options.max_iterations > options.check_every;
 
-    // The measurement's largest transient: a best response's walk, with its workspace, its
-    // possible hands at the root and its values; an expected value's walk, the same with a
-    // workspace of its own; or the check of the tree's shape before each walk, a flag per node,
-    // both players' possible hands at the root and a frame of them for each chance node on a
-    // line.
-    let best_response = [0, 1]
-        .map(|p| {
-            Heap::one(8 * hands[p])
-                + Heap::one(hands[p])
-                + workspace(
-                    &tree,
-                    hands,
-                    Walk::Respond(p),
-                    terminal_room,
-                    split,
-                    outcomes,
-                )
-        })
-        .into_iter()
-        .fold(Heap::default(), Heap::max);
-    let follow = [0, 1]
-        .map(|p| {
-            Heap::one(8 * hands[p])
-                + Heap::one(hands[p])
-                + workspace(
-                    &tree,
-                    hands,
-                    Walk::Follow(p),
-                    terminal_room,
-                    split,
-                    outcomes,
-                )
-        })
-        .into_iter()
-        .fold(Heap::default(), Heap::max);
-    let chance_levels = u64::from(census.turn_chance) + u64::from(census.river_chance);
-    let mut check_frames =
-        Heap::one(n0) + Heap::one(n1) + Heap::spread(chance_levels * (n0 + n1), 2 * chance_levels);
-    if chance_levels > 0 {
-        check_frames += Heap::one(grown(chance_levels, CHECK_FRAME_BYTES) * CHECK_FRAME_BYTES);
-    }
+    // The measurement's largest transient: a best response's walk, an expected value's walk,
+    // or the check of the tree's shape before each walk.
+    let Measurement {
+        best_response,
+        follow,
+        check_frames,
+    } = counts.measurement(split);
     // The check of the full tree before each walk of a measurement, and the check of the
     // solver's tree when the solver is built.
     let shape_check = Heap::one(census.public_nodes) + check_frames;
@@ -1185,9 +1314,9 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         Some(merged) => {
             let split_outcomes = merged.split_outcomes;
             let classes = |street: Street| split_outcomes[street as usize];
-            workspace(&tree, hands, Walk::Cfr, terminal_room, split, classes)
+            workspace(tree, hands, Walk::Cfr, terminal_room, split, classes)
         }
-        None => workspace(&tree, hands, Walk::Cfr, terminal_room, split, outcomes),
+        None => workspace(tree, hands, Walk::Cfr, terminal_room, split, outcomes),
     };
     // The solve's own pool, made once the solver is built and dropped when the solve returns.
     let thread_pool = if split {
@@ -1198,7 +1327,7 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
 
     // The invariant check, in a build with debug assertions only.
     let check = if cfg!(debug_assertions) {
-        invariant_check(&census, hands)
+        invariant_check(census, hands)
     } else {
         Heap::default()
     };
@@ -1216,7 +1345,7 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         held
     };
     let measuring = held + profile + measuring_extra;
-    let finishing = game + profile + thread_pool + check;
+    let finishing = game + profile + spot_heap(spot) + thread_pool + check;
     let (peak_phase, peak) = [
         (Phase::Iterating, iterating),
         (Phase::Measuring, measuring),
@@ -1271,6 +1400,349 @@ pub fn estimate_memory(spot: &Spot, options: &SolveOptions) -> Result<MemoryEsti
         process_bytes: PROCESS_BYTES,
         total: heap_bytes + allocator_overhead + PROCESS_BYTES,
     })
+}
+
+/// What a spot holds on the heap: its name, its description and its sizes, which a
+/// [`Solution`](crate::Solution) keeps a copy of. Its ranges and board are held in place.
+fn spot_heap(spot: &Spot) -> Heap {
+    let mut heap = Heap::one(spot.name.len() as u64) + Heap::one(spot.description.len() as u64);
+    for street in Street::ALL {
+        if let Some(sizing) = spot.tree.street(street) {
+            heap +=
+                Heap::one(8 * sizing.bets.len() as u64) + Heap::one(8 * sizing.raises.len() as u64);
+        }
+    }
+    heap
+}
+
+/// The phase of a save that holds the most memory: see [the save](self#the-save).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavePhase {
+    Quantizing,
+    Measuring,
+    Evaluating,
+    Compressing,
+    Writing,
+}
+
+impl fmt::Display for SavePhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            SavePhase::Quantizing => "while quantizing the strategy",
+            SavePhase::Measuring => "while measuring the exploitability",
+            SavePhase::Evaluating => "while working out the EVs",
+            SavePhase::Compressing => "while compressing the EVs",
+            SavePhase::Writing => "while writing the file",
+        })
+    }
+}
+
+/// What saving a solution of a spot to a [solution file](crate::solution_file) will need, as
+/// [the save](self#the-save) describes. Every size is in bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SaveMemoryEstimate {
+    /// The last street the file holds.
+    pub last_street: Street,
+    /// The raw strategy codes and the raw EVs of the streets the file holds: what its sections
+    /// hold before they are compressed.
+    pub raw_strategies: u64,
+    pub raw_evs: u64,
+
+    /// The solution the save is given, which it holds throughout: its game, its strategy and
+    /// its copy of the spot, as [`MemoryEstimate`] counts them.
+    pub solution: u64,
+    /// The quantized strategy, as large as the solution's.
+    pub quantized_strategy: u64,
+    /// The room in which each node's codes are made and written.
+    pub quantizing: u64,
+    /// The zstd encoders open at once while the strategy is quantized, one for each street the
+    /// file holds: zstd's working memory and the writer's buffer.
+    pub encoders: u64,
+    /// The compressed strategy sections and EV sections, each counted as the room it is
+    /// compressed into, zstd's bound for its raw bytes: a bound, since what a section
+    /// compresses to depends on the numbers in it.
+    pub strategy_sections: u64,
+    pub ev_sections: u64,
+    /// The place of each node's EVs in its street's section.
+    pub ev_places: u64,
+    /// The largest of the exploitability's walks and their checks of the tree, on the calling
+    /// thread.
+    pub exploitability_walk: u64,
+    /// A bound on the working memory of the EVs' walk.
+    pub ev_walk: u64,
+    /// The header, its text and its copy of the spot, and the list of the sections.
+    pub header: u64,
+
+    /// The heap the process holds at most in each phase, the solution included.
+    pub quantizing_phase: u64,
+    pub measuring_phase: u64,
+    pub evaluating_phase: u64,
+    pub compressing_phase: u64,
+    pub writing_phase: u64,
+    /// The phase that holds the most.
+    pub peak_phase: SavePhase,
+    /// A margin for the allocations too small to follow one by one: 1/256 of the largest
+    /// phase and 4 KiB.
+    pub margin: u64,
+    /// What the process asks the allocator for at the save's peak: the largest phase and the
+    /// margin.
+    pub heap_bytes: u64,
+    /// The allowance for the allocator's headers and rounding at the peak.
+    pub allocator_overhead: u64,
+    /// The allowance for the process itself, [`PROCESS_BYTES`].
+    pub process_bytes: u64,
+    /// `heap_bytes + allocator_overhead + process_bytes`: what the process holds at the save's
+    /// peak, the solution and its game included, to be compared with a memory limit as
+    /// [`MemoryEstimate::total`] is.
+    pub total: u64,
+}
+
+/// The buffer zstd's stream writer keeps between the encoder and what it writes to: 32 KiB.
+pub const ZSTD_WRITER_BYTES: u64 = 32 << 10;
+
+/// The working memory of a zstd encoder of a section of `raw_length` raw bytes at the files'
+/// level, which zstd allocates through Rust's allocator: zstd's own estimate of a compression
+/// stream with the parameters it chooses for that many bytes (`ZSTD_estimateCStreamSize`,
+/// what a stream allocated once in advance would need), the stream writer's buffer of
+/// [`ZSTD_WRITER_BYTES`], and 1 KiB for the headers of zstd's allocations. An empty section is
+/// counted as one of unknown size, which zstd gives its largest window.
+fn encoder_heap(raw_length: u64) -> Heap {
+    use zstd::zstd_safe::zstd_sys;
+    // SAFETY: both functions compute sizes from their arguments and touch no memory.
+    let stream = unsafe {
+        let parameters = zstd_sys::ZSTD_getCParams(crate::solution_file::LEVEL, raw_length, 0);
+        zstd_sys::ZSTD_estimateCStreamSize_usingCParams(parameters)
+    } as u64;
+    Heap::spread(stream + ZSTD_WRITER_BYTES + 1024, 4)
+}
+
+/// Estimates what saving a solution of `spot`, solved with `options`, to a solution file with
+/// `save` will need, as [the save](self#the-save) describes, without building the game. Of the
+/// options, `max_nodes` matters. `total` is what the process holds at the save's peak, the
+/// solution included, so a caller that solves and then saves compares the larger of this
+/// total and [`estimate_memory`]'s with its limit.
+///
+/// Fails as [`estimate_memory`] does, and with [`SolveError::Options`] if `save.last_street`
+/// is before the spot's first street.
+pub fn estimate_save_memory(
+    spot: &Spot,
+    options: &SolveOptions,
+    save: &SaveOptions,
+) -> Result<SaveMemoryEstimate, SolveError> {
+    let counts = GameCounts::new(spot, options)?;
+    let first = spot.street();
+    if save.last_street < first {
+        return Err(SolveError::Options {
+            field: "last_street",
+            reason: format!(
+                "is the {}, but the spot starts on the {first}; a solution file holds at least \
+                 the spot's first street",
+                save.last_street
+            ),
+        });
+    }
+    let census = &counts.census;
+    let streets: Vec<Street> = Street::ALL
+        .into_iter()
+        .filter(|&street| first <= street && street <= save.last_street)
+        .collect();
+    let strategy_raw: Vec<u64> = streets
+        .iter()
+        .map(|&street| 2 * census.street_stored[street as usize])
+        .collect();
+    let ev_raw: Vec<u64> = streets
+        .iter()
+        .map(|&street| 4 * census.street_hands[street as usize])
+        .collect();
+    let room = |raw: u64| Heap::one(crate::solution_file::section_room(raw));
+    let total = |heaps: &[Heap]| heaps.iter().fold(Heap::default(), |sum, &heap| sum + heap);
+
+    let solution = counts.game() + counts.profile() + spot_heap(spot);
+    let quantized = counts.profile();
+    // A node's codes, in room that grows exactly to the largest node's, and their bytes, each
+    // holding the old block while it grows; and the node's rows of probabilities and codes.
+    let largest = census.largest;
+    let quantizing = Heap::spread(2 * 2 * largest + 2 * 2 * largest, 4)
+        + Heap::spread(6 * census.max_actions, 2);
+    let encoder_list = Heap::one(streets.len() as u64 * size_of::<SectionEncoder>() as u64);
+    let section_list = Heap::one(24 * streets.len() as u64);
+    let strategy_rooms: Vec<Heap> = strategy_raw.iter().map(|&raw| room(raw)).collect();
+    let strategy_encoders: Vec<Heap> = strategy_raw.iter().map(|&raw| encoder_heap(raw)).collect();
+    let strategy_sections = total(&strategy_rooms);
+    let encoders = total(&strategy_encoders);
+
+    // Quantizing: every street's encoder open, each with its room taken from the start. Then
+    // each is finished in turn, its context freed and its bytes shrunk, which holds the room
+    // and the bytes at once, while the later ones are still open.
+    let mut quantizing_phase =
+        solution + quantized + quantizing + encoder_list + encoders + strategy_sections;
+    for index in 0..streets.len() {
+        let finishing = solution
+            + quantized
+            + encoder_list
+            + section_list
+            + total(&strategy_encoders[index + 1..])
+            + strategy_sections
+            + strategy_rooms[index];
+        quantizing_phase = quantizing_phase.max(finishing);
+    }
+
+    // Measuring, on the calling thread: the exploitability's walks one after another, each
+    // after a check of the tree's shape.
+    let measurement = counts.measurement(false);
+    let shape_check = Heap::one(census.public_nodes) + measurement.check_frames;
+    let exploitability_walk = measurement
+        .best_response
+        .max(measurement.follow)
+        .max(shape_check);
+    let measuring_phase =
+        solution + quantized + section_list + strategy_sections + exploitability_walk;
+
+    // Evaluating: each node's place in its section, the raw EV sections at their exact sizes,
+    // and the EVs' walk.
+    let ev_places = Heap::one(8 * census.public_nodes) + Heap::one(8 * streets.len() as u64);
+    let raw_ev_heaps: Vec<Heap> = ev_raw.iter().map(|&raw| Heap::one(raw)).collect();
+    let raw_evs = total(&raw_ev_heaps);
+    let ev_walk = ev_walk(census, counts.hands);
+    let evaluating_phase =
+        solution + quantized + section_list + strategy_sections + ev_places + raw_evs + ev_walk;
+
+    // Compressing the EVs, the quantized strategy dropped: each street's raw section is
+    // compressed into its room, then dropped, and the bytes shrunk.
+    let ev_rooms: Vec<Heap> = ev_raw.iter().map(|&raw| room(raw)).collect();
+    let ev_sections = total(&ev_rooms);
+    let mut compressing_phase = Heap::default();
+    for (index, &raw) in ev_raw.iter().enumerate() {
+        let base = solution
+            + section_list * 2
+            + strategy_sections
+            + total(&ev_rooms[..index])
+            + total(&raw_ev_heaps[index + 1..]);
+        let writing = base + Heap::one(raw) + ev_rooms[index] + encoder_heap(raw);
+        let shrinking = base + ev_rooms[index] * 2;
+        compressing_phase = compressing_phase.max(writing).max(shrinking);
+    }
+
+    // Writing: every section, and the header with its text, its copy of the spot and the list
+    // of the sections by name.
+    let text = spot.to_toml().len() as u64;
+    let header = Heap::spread(2 * text + 8192, 16)
+        + spot_heap(spot)
+        + Heap::one(grown(2 * streets.len() as u64, 48) * 48);
+    let writing_phase = solution + strategy_sections + ev_sections + section_list * 2 + header;
+
+    let (peak_phase, peak) = [
+        (SavePhase::Measuring, measuring_phase),
+        (SavePhase::Evaluating, evaluating_phase),
+        (SavePhase::Compressing, compressing_phase),
+        (SavePhase::Writing, writing_phase),
+    ]
+    .into_iter()
+    .fold((SavePhase::Quantizing, quantizing_phase), |most, phase| {
+        if phase.1.bytes > most.1.bytes {
+            phase
+        } else {
+            most
+        }
+    });
+    let margin = peak.bytes / 256 + 4096;
+    let heap_bytes = peak.bytes + margin;
+    let allocator_overhead = peak.overhead();
+    Ok(SaveMemoryEstimate {
+        last_street: save.last_street,
+        raw_strategies: strategy_raw.iter().sum(),
+        raw_evs: raw_evs.bytes,
+        solution: solution.bytes,
+        quantized_strategy: quantized.bytes,
+        quantizing: quantizing.bytes,
+        encoders: encoders.bytes,
+        strategy_sections: strategy_sections.bytes,
+        ev_sections: ev_sections.bytes,
+        ev_places: ev_places.bytes,
+        exploitability_walk: exploitability_walk.bytes,
+        ev_walk: ev_walk.bytes,
+        header: header.bytes,
+        quantizing_phase: quantizing_phase.bytes,
+        measuring_phase: measuring_phase.bytes,
+        evaluating_phase: evaluating_phase.bytes,
+        compressing_phase: compressing_phase.bytes,
+        writing_phase: writing_phase.bytes,
+        peak_phase,
+        margin,
+        heap_bytes,
+        allocator_overhead,
+        process_bytes: PROCESS_BYTES,
+        total: heap_bytes + allocator_overhead + PROCESS_BYTES,
+    })
+}
+
+/// A bound on the working memory of the walk of [`node_values`](crate::node_values), the
+/// larger player's: at every node on the way from the root, the node's values, the opponent's
+/// reach after an action or a card, the possible hands after a card and a child's values; at
+/// the walk's own node the reach it meets and its EVs; and at a terminal its values and its
+/// room on a later board.
+fn ev_walk(census: &Census, hands: [u64; 2]) -> Heap {
+    let n = hands[0].max(hands[1]);
+    let per_node = 8 * n + 8 * n + n + 8 * n;
+    Heap::spread(
+        census.depth * per_node + 8 * n + 16 * n + 8 * n + 8 * (hands[0] + hands[1]) + n,
+        4 * census.depth + 6,
+    )
+}
+
+/// The sizes, the items, the allowances and the total, one per line.
+impl fmt::Display for SaveMemoryEstimate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "A file up to the {}, of {} of raw codes and {} of raw EVs",
+            self.last_street,
+            format_bytes(self.raw_strategies),
+            format_bytes(self.raw_evs)
+        )?;
+        let items = [
+            ("the solution given", self.solution),
+            ("quantized strategy", self.quantized_strategy),
+            ("a node's codes", self.quantizing),
+            ("zstd encoders, open at once", self.encoders),
+            ("strategy sections, zstd's bound", self.strategy_sections),
+            ("EV sections, zstd's bound", self.ev_sections),
+            ("raw EV sections", self.raw_evs),
+            ("places of the EVs", self.ev_places),
+            ("exploitability's walk", self.exploitability_walk),
+            ("EVs' walk, bound", self.ev_walk),
+            ("header", self.header),
+        ];
+        for (name, bytes) in items {
+            writeln!(f, "  {name:<36} {:>10}", format_bytes(bytes))?;
+        }
+        writeln!(
+            f,
+            "  {:<36} {:>10}",
+            "margin for small allocations",
+            format_bytes(self.margin)
+        )?;
+        writeln!(
+            f,
+            "  {:<36} {:>10}  {}",
+            "heap at the peak",
+            format_bytes(self.heap_bytes),
+            self.peak_phase
+        )?;
+        writeln!(
+            f,
+            "  {:<36} {:>10}",
+            "allocator overhead",
+            format_bytes(self.allocator_overhead)
+        )?;
+        writeln!(
+            f,
+            "  {:<36} {:>10}",
+            "the process itself",
+            format_bytes(self.process_bytes)
+        )?;
+        write!(f, "  {:<36} {:>10}", "total", format_bytes(self.total))
+    }
 }
 
 /// The invariant check's heap, the larger of its two walks: the reach check, with its stack of

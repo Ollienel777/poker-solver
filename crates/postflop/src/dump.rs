@@ -589,12 +589,15 @@ impl SolutionDump {
     /// The dump of one of our solutions, complete: its spot, its hands, every decision node of
     /// its public tree with the average strategy, the EVs of
     /// [`node_values`](mod@crate::node_values), each player's value, and the iterations and
-    /// exploitability of the solve. The spot's name is left out, since a solution does not
-    /// hold it. A river solution gives a version 1 dump, and a flop or turn solution a version
-    /// 2 dump, in which the nodes after a card that cannot fall are left out.
+    /// exploitability of the solve. The spot's name is left out. A river solution gives a
+    /// version 1 dump, and a flop or turn solution a version 2 dump, in which the nodes after a
+    /// card that cannot fall are left out.
     ///
     /// The complete dump of a flop solution with real ranges runs to gigabytes: use
     /// [`SolutionDump::from_solution_streets`] for the first streets only.
+    ///
+    /// Panics if the solution does not hold every street ([`Solution::is_complete`]), as one
+    /// loaded from a solution file without its river does: the EVs need the whole strategy.
     pub fn from_solution(solution: &Solution) -> SolutionDump {
         let streets = streets_from(solution.game().board(0).len());
         SolutionDump::from_solution_streets(solution, streets)
@@ -606,8 +609,14 @@ impl SolutionDump {
     /// [`SolutionDump::from_solution`].
     ///
     /// Panics if `streets` is 0 or more than the spot plays: 3 from the flop, 2 from the turn
-    /// and 1 on the river.
+    /// and 1 on the river, and if the solution does not hold every street.
     pub fn from_solution_streets(solution: &Solution, streets: usize) -> SolutionDump {
+        assert!(
+            solution.is_complete(),
+            "a dump is made from a solution that holds every street, and this one holds the \
+             strategy up to the {} only: its EVs need the whole strategy",
+            solution.last_street()
+        );
         let solver = SolverInfo {
             name: SOLVER_NAME.to_string(),
             iterations: Some(solution.iterations()),
@@ -862,7 +871,9 @@ fn dump_action(action: Action, mine: Chips, theirs: Chips) -> DumpAction {
 // ---------------------------------------------------------------------------------------------
 // JSON values, read strictly
 
-mod json {
+/// JSON values read strictly, for the dump and for the header of a
+/// [solution file](crate::solution_file).
+pub(crate) mod json {
     use std::collections::HashSet;
     use std::fmt;
 
@@ -870,7 +881,7 @@ mod json {
 
     /// A JSON value whose objects keep their keys in order and may not repeat one.
     #[derive(Debug, Clone, PartialEq)]
-    pub(super) enum Json {
+    pub(crate) enum Json {
         Null,
         Bool(bool),
         /// A number written without a fraction or exponent.

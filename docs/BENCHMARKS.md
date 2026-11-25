@@ -520,3 +520,72 @@ Every test spot solved by `solve_spot` on the code the gate was run on (`9c81bc5
 | `flop_srp` | 191,844 | 318, 295 | 80, 15.1 s | | 613 MB | 577 MB | 1.06 |
 
 The estimate was at or above the peak resident memory of every solve: 5% to 12% above on the flops, 3% to 44% on the turn spots, and more than double on the rivers, where a solve holds a few hundred kB and the estimate's 16 MiB for the process is nearly all of it. `dry_rainbow` is the largest and the slowest because nothing merges on an unpaired rainbow flop. On a solve of under 100 MB the resident peak moves by several MB from run to run, and in one run of `turn_srp` with 16-bit storage it came out 1.4% above the estimate ([Time](#time), above).
+
+## Solution files (#45)
+
+What a [solution file](ARCHITECTURE.md#solution-file) takes on disk, with and without its river, how long it takes to save and to load, the most memory each holds, and what quantizing the strategy costs in exploitability, for every spot under `reference/spots` and the two benchmark spots. The example `solution_file_sizes` prints the table's rows, and with `--compression` the rows of the comparison below it, for the spots it is given:
+
+```bash
+cargo run --release -p pk-postflop --example solution_file_sizes
+cargo run --release -p pk-postflop --example solution_file_sizes -- --compression crates/postflop/benches/data/flop_srp.toml
+```
+
+Each spot is solved with the default options, to 0.3% of the pot on 16 threads, then saved with every street and without the river, and loaded back, whole and up to the turn. The sizes are exact, and the same on every run. The times were taken on 2026-11-25 while the command line was being built and tested on the same machine, so they are rough; saving and loading run on one thread. The heap is counted by an allocator that keeps the most held at once: the solve's peak from nothing held, then what the solution it returns holds, then the save's peak above that solution, and the load's peak from nothing held, zstd's working memory included. Beside them is what the process holds at the save's peak, the solution and the save together, and what `estimate_save_memory` gives for it, its heap before the allowances. Raw sizes are the sections' before compression, at zstd level 3.
+
+| Spot | Public nodes | Strategies, raw | EVs, raw | File | File without the river | Save | Load | Load to the turn | Heap: solve's peak; solution; save's peak above it; load's peak | Save's peak in all: measured, estimated | Exploitability: solved, stored |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `deep_high_spr` | 87 | 52.1 kB | 36.4 kB | 72.1 kB | | 0.03 s | 1.8 ms | | 532 kB; 155 kB; 969 kB; 319 kB | 1.12 MB, 1.23 MB | 0.294742%, 0.294697% |
+| `double_paired_ties` | 21 | 10.8 kB | 8.6 kB | 13.8 kB | | 0.03 s | 1.0 ms | | 183 kB; 52 kB; 365 kB; 163 kB | 417 kB, 465 kB | 0.281495%, 0.281447% |
+| `dry_ip_polarized` | 27 | 5.4 kB | 4.2 kB | 9.2 kB | | 0.02 s | 0.8 ms | | 84 kB; 27 kB; 213 kB; 132 kB | 239 kB, 265 kB | 0.205192%, 0.205163% |
+| `dry_wide_single_bet` | 9 | 4.3 kB | 4.3 kB | 8.5 kB | | 0.02 s | 1.0 ms | | 113 kB; 36 kB; 202 kB; 141 kB | 238 kB, 273 kB | 0.215164%, 0.215083% |
+| `four_flush` | 21 | 7.0 kB | 5.6 kB | 7.5 kB | | 0.02 s | 1.0 ms | | 132 kB; 36 kB; 228 kB; 141 kB | 264 kB, 281 kB | 0.208264%, 0.208251% |
+| `paired_low_spr` | 21 | 3.1 kB | 2.5 kB | 5.4 kB | | 0.02 s | 0.7 ms | | 59 kB; 20 kB; 141 kB; 121 kB | 160 kB, 173 kB | 0.273452%, 0.273346% |
+| `toy_polarized` | 9 | 272 B | 272 B | 2.0 kB | | 0.02 s | 0.7 ms | | 11 kB; 6 kB; 68 kB; 103 kB | 74 kB, 84 kB | 0.285749%, 0.285670% |
+| `wet_oop_polarized` | 15 | 2.5 kB | 2.1 kB | 4.5 kB | | 0.02 s | 1.1 ms | | 50 kB; 17 kB; 134 kB; 117 kB | 151 kB, 169 kB | 0.245552%, 0.245518% |
+| `wet_wide_two_bets` | 27 | 11.6 kB | 9.0 kB | 19.9 kB | | 0.02 s | 1.2 ms | | 170 kB; 49 kB; 373 kB; 163 kB | 423 kB, 464 kB | 0.226775%, 0.226817% |
+| turn `called_flop_raise_allin` | 2,379 | 1.5 MB | 1.5 MB | 2.2 MB | 28.8 kB | 0.16 s | 0.02 s | 9.5 ms | 16.6 MB; 4.6 MB; 8.2 MB; 7.5 MB | 12.8 MB, 13.5 MB | 0.294897%, 0.294860% |
+| turn `checked_flop_two_bets` | 3,615 | 2.9 MB | 2.5 MB | 3.5 MB | 17.6 kB | 0.26 s | 0.04 s | 0.01 s | 22.1 MB; 7.6 MB; 12.8 MB; 12.5 MB | 20.4 MB, 20.5 MB | 0.247625%, 0.247560% |
+| turn `three_bet_low_spr` | 3,237 | 722 kB | 578 kB | 722 kB | 8.2 kB | 0.11 s | 0.01 s | 6.0 ms | 7.0 MB; 2.2 MB; 4.8 MB; 3.4 MB | 7.0 MB, 7.4 MB | 0.268129%, 0.268104% |
+| `turn_srp` | 16,317 | 9.4 MB | 7.0 MB | 10.4 MB | 29.1 kB | 1.07 s | 0.11 s | 0.01 s | 57.4 MB; 21.6 MB; 34.9 MB; 35.8 MB | 56.6 MB, 60.1 MB | 0.277797%, 0.277813% |
+| flop `dry_rainbow` | 191,844 | 149.0 MB | 149.0 MB | 224.5 MB | 1.8 MB | 18.3 s | 2.11 s | 0.34 s | 1.01 GB; 350 MB; 558 MB; 650 MB | 908 MB, 958 MB | 0.266161%, 0.266110% |
+| flop `monotone_pot` | 191,844 | 150.2 MB | 150.2 MB | 144.7 MB | 945 kB | 15.5 s | 2.15 s | 0.31 s | 553 MB; 352 MB; 528 MB; 655 MB | 881 MB, 966 MB | 0.255236%, 0.255203% |
+| flop `paired_raise` | 319,740 | 71.9 MB | 71.9 MB | 86.4 MB | 741 kB | 8.05 s | 1.13 s | 0.13 s | 410 MB; 185 MB; 273 MB; 335 MB | 458 MB, 488 MB | 0.245676%, 0.245647% |
+| flop `two_tone_raked` | 191,844 | 146.7 MB | 146.7 MB | 193.4 MB | 1.4 MB | 17.2 s | 2.20 s | 0.30 s | 749 MB; 345 MB; 536 MB; 641 MB | 881 MB, 943 MB | 0.229457%, 0.229436% |
+| `flop_srp` | 191,844 | 104.5 MB | 104.5 MB | 138.7 MB | 978 kB | 13.2 s | 1.63 s | 0.25 s | 547 MB; 255 MB; 386 MB; 467 MB | 641 MB, 684 MB | 0.252977%, 0.252942% |
+
+A river spot's file has no river to leave out. A flop tree whose player nodes all have two actions has as many raw bytes of codes, two an action and hand, as of EVs, four a hand.
+
+- **The river is nearly all of a file.** Without it a flop file keeps 0.65% to 0.86% of its bytes, 0.7 to 1.8 MB against 86 to 225 MB, and a turn file 0.28% to 1.3%. Loading a flop file's first two streets takes 0.15 to 0.36 s, against 0.94 to 2.43 s for the whole file, and most of it is building the game.
+- **The EVs are about half of every file**: 40% to 54% of the turn and flop files, the most on `two_tone_raked` and `dry_rainbow`, and 30% to 44% of the river files but `toy_polarized`'s, which is mostly its header. They compress less than the codes: at level 3 `dry_rainbow`'s river codes take 69% of their raw size and its river EVs 81%.
+- **Quantizing** changed the exploitability by −0.000106 to +0.000042 points of the pot, and lowered it on 16 of the 18 spots: at most 0.4% of the 0.03% the gates compare at.
+- **Saving** a flop takes 8 to 18 s on one thread, from half the time its solve took on 16 threads to about as long. Measured apart on `dry_rainbow`, quantizing takes 1.9 s, the exploitability 4.3 s and the EVs 3.6 s, and compressing the sections about 5 s at level 3 (below); the rest is writing 225 MB and flushing it to disk. The exploitability's walks give the same bits on any number of threads, and the sections could be compressed side by side, so a save could use the solve's threads; nothing has been sped up yet.
+- **The memory of a save.** A save holds the solution it is given; a quantized copy of its strategy, which the exploitability and the EVs are measured on; the compressed strategy sections; and, while it works out the EVs, the raw EV sections of the streets it keeps, 4 bytes for each hand at each of their player nodes. Each node's codes go to their street's zstd encoder as they are made, the EVs go from their walk to their sections, the quantized strategy is dropped before the EV sections are compressed, and each raw EV section once it is. Until this change it also held each street's raw codes, and the `Option<f64>` for each hand at every player node that `node_values` gives, 601 MB on `dry_rainbow`; the file it writes is the same, byte for byte, on every spot of the table. What the process holds at the save's peak, the solution and the save together, before the change (measured on 2026-11-25 as the table above was at `cd1a19d`) and after, beside the solve's peak, and what `estimate_save_memory` gives, its heap and its total with the allowances:
+
+  | Spot | Solve's peak | Save's peak, before | Save's peak, after | Estimated heap | Estimated total |
+  | --- | --- | --- | --- | --- | --- |
+  | flop `dry_rainbow` | 1.01 GB | 1.54 GB | 908 MB | 958 MB | 1.04 GB |
+  | flop `monotone_pot` | 553 MB | 1.55 GB | 881 MB | 966 MB | 1.05 GB |
+  | flop `paired_raise` | 410 MB | 774 MB | 458 MB | 488 MB | 549 MB |
+  | flop `two_tone_raked` | 749 MB | 1.51 GB | 881 MB | 943 MB | 1.03 GB |
+  | `flop_srp` | 547 MB | 1.06 GB | 641 MB | 684 MB | 752 MB |
+  | `turn_srp` | 57.4 MB | 84.6 MB | 56.6 MB | 60.1 MB | 81.2 MB |
+
+  On the flops the save's peak fell by 40% to 43%, and on `turn_srp` by 33%, and is now while it works out the EVs. It is 0.9 times the solve's peak where nothing merges (`dry_rainbow`) and 1.1 to 1.6 times where the solve merges, since the strategy is on the full tree; most of what is left is the quantized copy, as large as the solution's strategy, which a save that takes `&Solution` needs. The estimated heap is never below the measured peak: 5.5% to 9.6% above it on the flops, 0.3% to 6.2% on the turn spots and 6% to 14% on the river spots, whose saves are of less than 1.2 MB. It is above by the most where the sections compress the most, since it counts each section as the room zstd's bound gives it. The heap now includes zstd's working memory, which zstd took from the C allocator before this change, unseen by the counting allocator, and now takes from Rust's: a few MB on a flop, and most of a river spot's save, whose row in the table is higher than before for that reason alone.
+
+**Compression.** The sections of a few spots at other zstd levels, and with each number's bytes written apart, the low bytes of every code and then the high bytes, or an EV's four bytes in four planes, from `solution_file_sizes --compression`; times are for one section on one thread:
+
+| Spot | Section | Raw | Level 1 | Level 3 | Level 9 | Level 19 | Level 3, bytes apart | Level 19, bytes apart | Time at levels 1, 3, 9 and 19 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `deep_high_spr` | `strategy.river` | 52.1 kB | 41.2 kB | 40.6 kB | 40.0 kB | 39.3 kB | 38.8 kB | 36.0 kB | 0.5 ms, 0.8 ms, 2.2 ms, 0.02 s |
+| `deep_high_spr` | `ev.river` | 36.4 kB | 29.9 kB | 29.8 kB | 29.5 kB | 28.6 kB | 25.5 kB | 23.5 kB | 0.3 ms, 0.4 ms, 1.0 ms, 8.5 ms |
+| `called_flop_raise_allin` | `strategy.river` | 1.5 MB | 1.0 MB | 1.0 MB | 1.0 MB | 968 kB | 951 kB | 872 kB | 9.1 ms, 0.02 s, 0.06 s, 0.63 s |
+| `called_flop_raise_allin` | `ev.river` | 1.5 MB | 1.2 MB | 1.2 MB | 1.2 MB | 1.1 MB | 955 kB | 893 kB | 9.3 ms, 0.02 s, 0.06 s, 0.47 s |
+| `turn_srp` | `strategy.river` | 9.4 MB | 6.4 MB | 6.2 MB | 6.1 MB | 5.7 MB | 6.3 MB | 5.9 MB | 0.07 s, 0.15 s, 0.49 s, 5.35 s |
+| `turn_srp` | `ev.river` | 7.0 MB | 4.6 MB | 4.2 MB | 4.1 MB | 3.8 MB | 4.3 MB | 4.0 MB | 0.06 s, 0.13 s, 0.34 s, 3.03 s |
+| `flop_srp` | `strategy.turn` | 721 kB | 503 kB | 488 kB | 484 kB | 451 kB | 497 kB | 463 kB | 4.9 ms, 0.01 s, 0.03 s, 0.26 s |
+| `flop_srp` | `strategy.river` | 103.8 MB | 66.2 MB | 64.4 MB | 58.0 MB | 52.5 MB | 64.0 MB | 54.4 MB | 0.71 s, 1.64 s, 4.78 s, 74.3 s |
+| `flop_srp` | `ev.river` | 103.8 MB | 77.0 MB | 73.3 MB | 60.9 MB | 54.8 MB | 65.0 MB | 57.1 MB | 0.79 s, 1.92 s, 4.72 s, 69.9 s |
+| `dry_rainbow` | `strategy.river` | 148.0 MB | 103.9 MB | 102.6 MB | 102.0 MB | 98.3 MB | 101.5 MB | 94.0 MB | 1.00 s, 2.53 s, 7.69 s, 97.6 s |
+| `dry_rainbow` | `ev.river` | 148.0 MB | 122.9 MB | 120.0 MB | 119.6 MB | 118.9 MB | 102.8 MB | 96.6 MB | 0.95 s, 2.75 s, 7.85 s, 88.1 s |
+
+On the river sections of the two large flops, which are nearly all of their files, level 9 is 0.3% to 17% smaller than level 3 for about three times its time, level 19 0.9% to 25% smaller for 40 to 45 times, and level 1 1% to 5% larger in 0.4 of the time. The gain depends on the spot: `flop_srp`'s sections shrink with the level and `dry_rainbow`'s hardly do. Level 3, zstd's default, is the simplest choice, and the files use it (DECISIONS P68). Writing the codes' bytes apart changed the strategy sections by −5% to +4%, and by −1% on the large flops, so the codes are written whole. Written apart, the EVs are 11% to 20% smaller on the large rivers, `dry_rainbow`'s 120.0 MB becoming 102.8 MB, and 2% larger on `turn_srp`'s river (6% on a small flop test spot). They are written whole, as `f32`, by the owner's decision: the planes help complete flop files only, while a viewer reads the flop and the turn, under 2 MB, and they can come with a format version of their own if complete flop files need to be smaller (DECISIONS P68).

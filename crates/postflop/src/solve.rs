@@ -115,8 +115,10 @@ use std::num::NonZero;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pk_cfr::{CompressedStorage, Dcfr, F32Storage, PublicProfile, Schedule, Storage, VectorCfr};
-use pk_game::{Player, PostflopTree, TreeError};
+use pk_cfr::{
+    CompressedStorage, Dcfr, F32Storage, PublicGame, PublicProfile, Schedule, Storage, VectorCfr,
+};
+use pk_game::{Player, PostflopTree, Street, TreeError};
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use thiserror::Error;
 
@@ -296,25 +298,117 @@ pub struct Progress {
 }
 
 /// The result of a solve: how it ended, and the average strategy with read access for later
-/// code. It is held in memory; the solution file comes in a later milestone.
+/// code. [`crate::solution_file`] saves one to a file and loads it back.
 ///
 /// Node indices are those of the game's public tree ([`Solution::game`]), which on a river spot
 /// are those of the [`PostflopTree`] ([`Solution::tree`]); [`PostflopGame::find`] gives the
 /// node of a path. Hand indices are those of each player's [`HandList`] ([`Solution::hands`]).
+///
+/// # Partial solutions
+///
+/// A solution from [`solve`] holds the strategy on every street. One loaded from a solution
+/// file that leaves out the river, or loaded only up to the turn, holds the strategy on the
+/// streets from the spot's first to [`Solution::last_street`] and none below:
+/// [`Solution::holds`] says which nodes it holds. Every read that returns an `Option` returns
+/// `None` at a node it does not hold, and [`Solution::reach`] and
+/// [`Solution::reach_probability`] work at every node whose player nodes on the way from the
+/// root it holds, the first node of a street it does not hold included, and panic below. Its
+/// [exploitability](Solution::exploitability) and [values](Solution::values) are those the file
+/// recorded for the whole strategy, measured before the river was left out.
 #[derive(Debug, Clone)]
 pub struct Solution {
+    spot: Spot,
     game: PostflopGame,
     strategy: PublicProfile,
+    /// The last street the strategy covers: the river, except for a solution loaded without
+    /// its last streets.
+    last_street: Street,
     stop: StopReason,
     iterations: u64,
     elapsed: Duration,
     exploitability: Exploitability,
+    /// What the solve measured, for the strategy it found: `exploitability` for a solution from
+    /// a solve, and the solve's figure before quantizing for one loaded from a file.
+    solve_exploitability: Exploitability,
 }
 
 impl Solution {
+    /// A solution put together from its parts, as a solution file holds them: see
+    /// [`crate::solution_file`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts(
+        spot: Spot,
+        game: PostflopGame,
+        strategy: PublicProfile,
+        last_street: Street,
+        stop: StopReason,
+        iterations: u64,
+        elapsed: Duration,
+        exploitability: Exploitability,
+        solve_exploitability: Exploitability,
+    ) -> Solution {
+        Solution {
+            spot,
+            game,
+            strategy,
+            last_street,
+            stop,
+            iterations,
+            elapsed,
+            exploitability,
+            solve_exploitability,
+        }
+    }
+
+    /// The spot that was solved.
+    pub fn spot(&self) -> &Spot {
+        &self.spot
+    }
+
     /// The game that was solved.
     pub fn game(&self) -> &PostflopGame {
         &self.game
+    }
+
+    /// The last street the solution holds the strategy on: the river for a solution from a
+    /// solve or a complete solution file, and an earlier street for one loaded without its
+    /// last streets (see [partial solutions](Solution#partial-solutions)).
+    pub fn last_street(&self) -> Street {
+        self.last_street
+    }
+
+    /// Whether the solution holds the strategy on every street: always for a solution from a
+    /// solve.
+    pub fn is_complete(&self) -> bool {
+        self.last_street == Street::River
+    }
+
+    /// Whether the solution holds the node `node`: whether its street, the street it deals for a
+    /// chance node, is one the solution holds the strategy on. True at every node of a complete
+    /// solution, and false out of range.
+    pub fn holds(&self, node: u32) -> bool {
+        (node as usize) < self.game.num_nodes() && self.game.street(node) <= self.last_street
+    }
+
+    /// Panics unless the solution holds the strategy at every player node on the way to `node`,
+    /// with a message that names the street it does not hold.
+    fn check_held_above(&self, node: u32) {
+        if self.is_complete() {
+            return;
+        }
+        if let Some(&(at, _)) = self
+            .game
+            .path(node)
+            .iter()
+            .find(|&&(at, _)| self.game.actor(at).is_some() && !self.holds(at))
+        {
+            panic!(
+                "node {node} is below node {at}, on the {}, which this solution does not hold: \
+                 it holds the strategy up to the {} (see `Solution::holds`)",
+                self.game.street(at),
+                self.last_street
+            );
+        }
     }
 
     /// The betting tree. Its node indices are the public tree's on a river spot only: see
@@ -339,14 +433,26 @@ impl Solution {
     }
 
     /// The time the solve took, from the call until it returned, the last measurement included.
-    /// The check of the solution that a build with debug assertions makes is not counted.
+    /// The check of the solution that a build with debug assertions makes is not counted. Zero
+    /// for a solution loaded from a solution file, which holds nothing from the machine that
+    /// solved it.
     pub fn elapsed(&self) -> Duration {
         self.elapsed
     }
 
-    /// The exploitability of the average strategy.
+    /// The exploitability of the average strategy. For a solution loaded from a solution file,
+    /// whose strategy is the file's quantized one, it is that strategy's, as the file recorded it
+    /// ([`crate::solution_file`]).
     pub fn exploitability(&self) -> &Exploitability {
         &self.exploitability
+    }
+
+    /// The exploitability the solve measured for the strategy it found. For a solution from
+    /// [`solve`] it is [`Solution::exploitability`]; for one loaded from a solution file it is
+    /// the solve's measurement before the strategy was quantized for the file, and
+    /// [`Solution::exploitability`] is the quantized strategy's.
+    pub fn solve_exploitability(&self) -> &Exploitability {
+        &self.solve_exploitability
     }
 
     /// Each player's expected value under the average strategy, in chips per hand dealt and
@@ -356,62 +462,74 @@ impl Solution {
     }
 
     /// The average strategy at every player node, laid out `[actions × hands]` as
-    /// [`PublicProfile`] describes.
+    /// [`PublicProfile`] describes. A partial solution has none at the nodes it does not hold.
     pub fn strategy(&self) -> &PublicProfile {
         &self.strategy
     }
 
     /// The probability of each action at the player node `node` for the acting player's hand
-    /// `hand`, or `None` if `node` is not a player node. Panics if the acting player has no
-    /// hand `hand`.
+    /// `hand`, or `None` if `node` is not a player node or is not held. Panics if the acting
+    /// player has no hand `hand`.
     pub fn hand_strategy(&self, node: u32, hand: usize) -> Option<Vec<f32>> {
         self.strategy.hand(node as usize, hand)
     }
 
     /// Each player's own reach of `node` with each of its hands under the average strategy:
-    /// see [`PostflopGame::reach`]. Panics if `node` is out of range.
+    /// see [`PostflopGame::reach`]. Panics if `node` is out of range, or if the solution does
+    /// not hold a player node on the way to it ([`Solution::holds`]).
     pub fn reach(&self, node: u32) -> [Vec<f64>; 2] {
+        self.check_held_above(node);
         self.game.reach(&self.strategy, node)
     }
 
     /// The probability that the acting player holds each of its hands once `node` is reached
-    /// under the average strategy: see [`PostflopGame::hand_weights`].
+    /// under the average strategy: see [`PostflopGame::hand_weights`]. `None` at a node the
+    /// solution does not hold.
     pub fn hand_weights(&self, node: u32) -> Option<Vec<f64>> {
-        self.game.hand_weights(&self.strategy, node)
+        self.holds(node)
+            .then(|| self.game.hand_weights(&self.strategy, node))?
     }
 
     /// The probability of each action once `node` is reached under the average strategy, card
     /// removal by the opponent's range included: see [`PostflopGame::action_frequencies`]. This
-    /// is how often each action is actually taken there, not what a range view shows.
+    /// is how often each action is actually taken there, not what a range view shows. `None` at
+    /// a node the solution does not hold.
     pub fn action_frequencies(&self, node: u32) -> Option<Vec<f64>> {
-        self.game.action_frequencies(&self.strategy, node)
+        self.holds(node)
+            .then(|| self.game.action_frequencies(&self.strategy, node))?
     }
 
     /// Each hand's share of the acting player's range at `node` by its own combos alone, range
     /// weight times own reach, under the average strategy: see
-    /// [`PostflopGame::range_view_weights`].
+    /// [`PostflopGame::range_view_weights`]. `None` at a node the solution does not hold.
     pub fn range_view_weights(&self, node: u32) -> Option<Vec<f64>> {
-        self.game.range_view_weights(&self.strategy, node)
+        self.holds(node)
+            .then(|| self.game.range_view_weights(&self.strategy, node))?
     }
 
     /// Each action's frequency at `node` as a solver's range view shows it, over the acting
     /// player's own combos with no card removal by the opponent's range, under the average
     /// strategy: see [`PostflopGame::range_view_frequencies`]. Use it to compare with another
-    /// solver; use [`Solution::action_frequencies`] for how often an action is taken.
+    /// solver; use [`Solution::action_frequencies`] for how often an action is taken. `None` at
+    /// a node the solution does not hold.
     pub fn range_view_frequencies(&self, node: u32) -> Option<Vec<f64>> {
-        self.game.range_view_frequencies(&self.strategy, node)
+        self.holds(node)
+            .then(|| self.game.range_view_frequencies(&self.strategy, node))?
     }
 
     /// Each hand class in the acting player's range at `node`, with its share of the range and
     /// its frequency for each action, as a range view shows them, under the average strategy:
-    /// see [`PostflopGame::range_view_classes`].
+    /// see [`PostflopGame::range_view_classes`]. `None` at a node the solution does not hold.
     pub fn range_view_classes(&self, node: u32) -> Option<Vec<ClassView>> {
-        self.game.range_view_classes(&self.strategy, node)
+        self.holds(node)
+            .then(|| self.game.range_view_classes(&self.strategy, node))?
     }
 
     /// The probability that a hand dealt plays to `node` under the average strategy: see
-    /// [`PostflopGame::reach_probability`]. Panics if `node` is out of range.
+    /// [`PostflopGame::reach_probability`]. Panics if `node` is out of range, or if the
+    /// solution does not hold a player node on the way to it ([`Solution::holds`]).
     pub fn reach_probability(&self, node: u32) -> f64 {
+        self.check_held_above(node);
         self.game.reach_probability(&self.strategy, node)
     }
 }
@@ -468,12 +586,15 @@ pub fn solve(
         }
     };
     let solution = Solution {
+        spot: spot.clone(),
         game,
         strategy: finished.strategy,
+        last_street: Street::River,
         stop: finished.stop,
         iterations: finished.measured.iterations,
         elapsed: start.elapsed(),
         exploitability: finished.measured.exploitability,
+        solve_exploitability: finished.measured.exploitability,
     };
     // A debug assertion, which the elapsed time does not count.
     debug_assert_valid(&solution);

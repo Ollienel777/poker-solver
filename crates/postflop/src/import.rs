@@ -369,15 +369,24 @@ pub struct MappedSolution {
 }
 
 impl MappedSolution {
-    /// One of our solutions, which needs no mapping. It is complete and holds every player
-    /// node. Its reported numbers are those the solve gives, and its reported EVs are the EVs
-    /// our code measures, as its dump would hold.
+    /// One of our solutions, which needs no mapping. A solution from a solve is complete and
+    /// holds every player node. Its reported numbers are those the solve gives, and its
+    /// reported EVs are the EVs our code measures, as its dump would hold.
+    ///
+    /// A solution loaded from a [solution file](crate::solution_file) without its last streets
+    /// is mapped as a partial dump is: it holds the player nodes of its streets, its strategy is
+    /// uniform below them, its exploitability is not measured, its reported values are those
+    /// its file recorded, it reports no EVs, and its EVs are measured only at the nodes whose
+    /// whole subtree it holds.
     pub fn from_solution(solution: &Solution) -> MappedSolution {
         let solver = SolverInfo {
             name: SOLVER_NAME.to_string(),
             iterations: Some(solution.iterations()),
             exploitability: Some(solution.exploitability().chips),
         };
+        if !solution.is_complete() {
+            return MappedSolution::from_partial(solution, solver);
+        }
         let game = solution.game().clone();
         let strategy = solution.strategy().clone();
         let measured_evs = node_values(&game, &strategy);
@@ -395,6 +404,52 @@ impl MappedSolution {
             solver,
             game,
             strategy,
+        }
+    }
+
+    /// [`MappedSolution::from_solution`] for a solution that does not hold every street.
+    fn from_partial(solution: &Solution, solver: SolverInfo) -> MappedSolution {
+        let game = solution.game().clone();
+        let held: Vec<bool> = (0..game.num_nodes() as u32)
+            .map(|node| game.actor(node).is_some() && solution.holds(node))
+            .collect();
+        let strategy = PublicProfile::from_fn(&game, |node, hand| {
+            solution
+                .hand_strategy(node as u32, hand)
+                .unwrap_or_else(|| {
+                    let width = game.children(node as u32).len();
+                    vec![1.0 / width as f32; width]
+                })
+        });
+        let needed: Vec<bool> = (0..game.num_nodes() as u32)
+            .map(|node| game.actor(node).is_some())
+            .collect();
+        let whole = measurable(&game, &held, &needed);
+        let measured = node_values(&game, &strategy);
+        let measured_evs = NodeValues::from_nodes(
+            (0..game.num_nodes() as u32)
+                .map(|node| {
+                    let evs = measured.get(node)?;
+                    whole[node as usize].then(|| evs.to_vec())
+                })
+                .collect(),
+        );
+        let first = solution.spot().street();
+        let streets = Street::ALL
+            .iter()
+            .filter(|&&street| first <= street && street <= solution.last_street())
+            .count();
+        MappedSolution {
+            held,
+            streets,
+            complete: false,
+            solver,
+            reported_values: Some(solution.values()),
+            reported_evs: None,
+            exploitability: None,
+            measured_evs,
+            strategy,
+            game,
         }
     }
 

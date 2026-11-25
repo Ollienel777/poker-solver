@@ -84,6 +84,21 @@ impl NodeValues {
 /// Panics if `profile` has no strategy, or one of the wrong size, at a player node.
 pub fn node_values(game: &PostflopGame, profile: &PublicProfile) -> NodeValues {
     let mut nodes = vec![None; game.num_nodes()];
+    node_values_into(game, profile, |node, evs| nodes[node as usize] = Some(evs));
+    NodeValues { nodes }
+}
+
+/// [`node_values`], giving each player node's EVs to `sink` as the walks find them instead of
+/// keeping them: the acting player's EV with each of its hands, by hand index. Every player
+/// node is given once, OOP's in the order OOP's walk reaches them and then IP's in IP's. A
+/// [solution file](crate::solution_file) writes them to its sections this way.
+///
+/// Panics as [`node_values`] does.
+pub(crate) fn node_values_into(
+    game: &PostflopGame,
+    profile: &PublicProfile,
+    mut sink: impl FnMut(u32, Vec<Option<f64>>),
+) {
     for player in 0..2 {
         let walk = Walk {
             game,
@@ -95,10 +110,9 @@ pub fn node_values(game: &PostflopGame, profile: &PublicProfile) -> NodeValues {
             PostflopTree::ROOT,
             game.deal(1 - player),
             &possible,
-            &mut nodes,
+            &mut sink,
         );
     }
-    NodeValues { nodes }
 }
 
 /// One player's walk.
@@ -110,14 +124,14 @@ struct Walk<'a> {
 
 impl Walk<'_> {
     /// Returns `q(node, h)` for each of the player's hands, given the opponent's reach `ρ`,
-    /// and records the EVs at the player's own nodes below. `possible` says which of the
+    /// and gives `out` the EVs at the player's own nodes below. `possible` says which of the
     /// player's hands can be held at `node`.
     fn visit(
         &self,
         node: u32,
         opponent_reach: &[f64],
         possible: &[bool],
-        out: &mut [Option<Vec<Option<f64>>>],
+        out: &mut impl FnMut(u32, Vec<Option<f64>>),
     ) -> Vec<f64> {
         let game = self.game;
         let num_hands = game.num_hands(self.player);
@@ -199,7 +213,7 @@ impl Walk<'_> {
                     (possible && total > 0.0 && m > ZERO_REACH * total).then(|| q / m)
                 })
                 .collect();
-            out[node as usize] = Some(evs);
+            out(node, evs);
         } else {
             for (&child, probabilities) in children.iter().zip(strategy.chunks_exact(acting)) {
                 let reach: Vec<f64> = opponent_reach

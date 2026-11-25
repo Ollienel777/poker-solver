@@ -19,6 +19,8 @@ thiserror = "2"
 toml = "1"
 # Peak resident memory on Windows, for the postflop resource log; Linux reads /proc instead.
 windows-sys = "0.61"
+# The sections of a postflop solution file, each one zstd frame with its checksum.
+zstd = { version = "0.14", default-features = false }
 
 criterion = "0.8"
 proptest = "1"
