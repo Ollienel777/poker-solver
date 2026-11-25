@@ -20,6 +20,11 @@
 //! `the_configured_reference_solver_matches_ours_on_turn_and_flop_spots` runs the reference on
 //! every spot of `reference/spots/turn` and `reference/spots/flop`, and
 //! `the_configured_reference_solver_on_the_test_spots` on the spots here.
+//!
+//! The last tests compare a spot with itself, its suits relabelled, as the gate compares ours
+//! with the reference: on two small spots in the fast suite, and in the slow test
+//! `every_gate_spot_relabelled_passes_the_comparison_with_the_spot` on the spots of
+//! `reference/spots/turn` and `reference/spots/flop`, which needs no reference solver.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,7 +32,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use pk_cfr::{Dcfr, PublicGame, Schedule};
-use pk_core::{Card, Combo};
+use pk_core::{Card, Combo, SuitPermutation};
 use pk_game::{Player, Street};
 use pk_postflop::dump::PathText;
 use pk_postflop::{
@@ -1142,4 +1147,118 @@ fn the_configured_reference_solver_on_the_test_spots() {
         }
     }
     assert!(failed.is_empty(), "the reference differs on {failed:?}");
+}
+
+// A spot against itself with its suits relabelled
+
+/// `spot` with its suits relabelled by `sigma`: the board and both ranges.
+fn relabelled(spot: &Spot, sigma: SuitPermutation) -> Spot {
+    let mut image = spot.clone();
+    image.name = format!("{} relabelled by {sigma}", spot.name);
+    image.board = sigma.apply_set(spot.board);
+    image.oop_range = sigma.apply_range(&spot.oop_range);
+    image.ip_range = sigma.apply_range(&spot.ip_range);
+    image
+}
+
+/// A dump of a solution of a spot relabelled by `sigma`, with its suits relabelled back, which
+/// makes it a dump of the spot itself: the board, every hand and every card dealt on a path go
+/// through the inverse of `sigma`, and nothing else changes.
+fn relabelled_back(dump: &SolutionDump, sigma: SuitPermutation) -> SolutionDump {
+    let back = sigma.inverse();
+    let mut image = dump.clone();
+    image.spot.board = back.apply_set(dump.spot.board);
+    for (combo, _) in image.spot.hands.iter_mut().flatten() {
+        *combo = back.apply_combo(*combo);
+    }
+    for node in &mut image.nodes {
+        for step in &mut node.path {
+            if let DumpAction::Deal(card) = step {
+                *card = back.apply_card(*card);
+            }
+        }
+        for (combo, _) in &mut node.strategy {
+            *combo = back.apply_combo(*combo);
+        }
+        for (combo, _) in node.ev.iter_mut().flatten() {
+            *combo = back.apply_combo(*combo);
+        }
+    }
+    image
+}
+
+/// The relabelling these tests use: clubs with spades and diamonds with hearts, which moves
+/// the board of every spot they solve.
+const RELABELLING: SuitPermutation = SuitPermutation::new([3, 2, 1, 0]);
+
+/// Solves `spot` and `spot` relabelled by [`RELABELLING`] to `target` percent of the pot, and
+/// compares the two as the gate compares our solution with the reference's: ours on every
+/// street against the dump of the relabelled solve's first two streets, relabelled back, under
+/// the default tolerances. Prints the comparison.
+fn against_relabelled(spot: &Spot, target: f64) -> Comparison {
+    let image = relabelled(spot, RELABELLING);
+    assert_ne!(image.board, spot.board, "{}", spot.name);
+    let check_every = if spot.board.len() == 3 { 10 } else { 1 };
+    let ours = solve_to(spot, dcfr(), target, check_every);
+    let theirs = solve_to(&image, dcfr(), target, check_every);
+    let streets = streets_of(spot).min(2);
+    let dump = SolutionDump::from_solution_streets(&theirs, streets);
+    // As it stands the dump is of another board, and does not answer the spot.
+    assert!(MappedSolution::from_dump(&dump, spot).is_err());
+    let dump = relabelled_back(&dump, RELABELLING);
+    let comparison = compare_mapped(
+        &MappedSolution::from_solution(&ours),
+        &MappedSolution::from_dump(&dump, spot).unwrap(),
+        &Tolerances::default(),
+    );
+    println!(
+        "{} against itself relabelled by {RELABELLING} ({} and {} iterations):\n{comparison}",
+        spot.name,
+        ours.iterations(),
+        theirs.iterations()
+    );
+    comparison
+}
+
+#[test]
+fn a_spot_relabelled_passes_the_comparison_with_the_spot() {
+    // The gate's "suit-isomorphic boards give identical results", read as the gate reads
+    // agreement with the reference: a turn spot and a flop spot, each solved to 0.03% of the
+    // pot as it is and with its suits relabelled, pass the comparison under the default
+    // tolerances, with nodes checked on both streets compared. The two solves are of different
+    // boards, so their sums run in different orders and they part within rounding (DECISIONS
+    // P61); `tests/merged.rs` holds them to each other bit for bit while they have not.
+    for name in ["turn_small", "flop_tiny"] {
+        let comparison = against_relabelled(&load(name), 0.03);
+        assert!(comparison.passes(), "{name}: {comparison}");
+        let streets = by_street(&comparison);
+        assert_eq!(streets.len(), 2, "{name}");
+        assert!(streets.iter().all(|street| street.checked > 0), "{name}");
+    }
+}
+
+#[test]
+#[ignore = "slow"]
+fn every_gate_spot_relabelled_passes_the_comparison_with_the_spot() {
+    // The same on every spot the gate compares with the reference, those of
+    // `reference/spots/turn` and `reference/spots/flop`, and needing no reference: each
+    // against itself relabelled, both solved to 0.03% of the pot, under the tolerances the
+    // reference is held to. The river of a flop spot is not compared, as it is not with the
+    // reference, whose dumps of a flop spot hold two streets; DECISIONS P61 records what was
+    // measured there once, where one rarely reached river node of `paired_raise` is far apart.
+    // Measured, the largest differences are 0.03 points on the first street and 1.23 below a
+    // card, and the values are within 0.0002% of the pot; the test takes about 11 minutes.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../reference/spots");
+    let mut failed = Vec::new();
+    for street in ["turn", "flop"] {
+        let paths = spot_files(&root.join(street));
+        assert!(!paths.is_empty(), "no spots in reference/spots/{street}");
+        for path in paths {
+            let spot = Spot::load(&path).unwrap();
+            if !against_relabelled(&spot, 0.03).passes() {
+                failed.push(spot.name);
+            }
+        }
+    }
+    assert!(failed.is_empty(), "relabelled, these differ: {failed:?}");
 }
