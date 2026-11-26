@@ -9,9 +9,10 @@
 use std::fmt;
 use std::time::Duration;
 
-use pk_game::{CHIPS_PER_BB, Player, StreetSizing};
-use pk_postflop::MemoryEstimate;
+use pk_core::NUM_CLASSES;
+use pk_game::{CHIPS_PER_BB, Player, Position, StreetSizing};
 use pk_postflop::memory::format_bytes;
+use pk_postflop::{MemoryEstimate, Spot};
 
 use crate::spot_input::{Source, SpotInput};
 
@@ -152,14 +153,31 @@ pub fn tree_rules(max_raises: u32, allin_threshold: f64) -> String {
 /// Prints the spot: its name, where it came from, the board, the players, the pot and stack,
 /// the rake and the tree, a line each and the tree a line per street.
 pub fn print_spot(input: &SpotInput) {
-    let spot = &input.spot;
+    let positions = match &input.source {
+        Source::RangeFile { positions, .. } => Some(*positions),
+        Source::SpotFile(_) => None,
+    };
+    print_spot_lines(&input.spot, Some(&input.source), positions, &input.tree);
+}
+
+/// Prints a spot as [`print_spot`] does, from its parts: `from`, the line that says where it
+/// came from, if there is one; the players' positions, if they are known; and `tree`, what the
+/// tree line says before the sizing of each street.
+pub fn print_spot_lines(
+    spot: &Spot,
+    from: Option<&dyn fmt::Display>,
+    positions: Option<[Position; 2]>,
+    tree: &dyn fmt::Display,
+) {
     field("Spot", &spot.name);
-    field("From", &input.source);
+    if let Some(from) = from {
+        field("From", from);
+    }
     field(
         "Board",
         format!("{}, starting on the {}", spot.board, spot.street()),
     );
-    if let Source::RangeFile { positions, .. } = &input.source {
+    if let Some(positions) = positions {
         field(
             "Players",
             format!(
@@ -186,7 +204,7 @@ pub fn print_spot(input: &SpotInput) {
         )
     };
     field("Rake", rake);
-    field("Tree", &input.tree);
+    field("Tree", tree);
     let tree = &spot.tree;
     for street in pk_game::Street::ALL {
         if let Some(sizing) = tree.street(street) {
@@ -197,6 +215,43 @@ pub fn print_spot(input: &SpotInput) {
         }
     }
     field("  rules", tree_rules(tree.max_raises, tree.allin_threshold));
+}
+
+/// The ranks of a 13x13 grid's rows and columns, in grid order.
+const GRID_RANKS: &str = "AKQJT98765432";
+
+/// A 13x13 grid of hand classes, as lines: a line of the column ranks, then a line per row,
+/// each its rank and its 13 cells, each cell right-aligned in `width` characters, pairs on the
+/// diagonal, suited hands above it and offsuit hands below. `cells` holds a cell per class in
+/// [`HandClass::index`](pk_core::HandClass::index) order, `None` for a cell left blank. Rows
+/// end at their last cell that is not blank.
+pub fn grid(cells: &[Option<String>], width: usize) -> Vec<String> {
+    assert_eq!(cells.len(), NUM_CLASSES, "a grid has a cell per hand class");
+    let mut lines = Vec::with_capacity(14);
+    let header: String = GRID_RANKS
+        .chars()
+        .map(|rank| format!("{rank:>width$}"))
+        .collect();
+    lines.push(format!("   {header}"));
+    for (row, rank) in GRID_RANKS.chars().enumerate() {
+        let line: String = cells[13 * row..13 * (row + 1)]
+            .iter()
+            .map(|cell| format!("{:>width$}", cell.as_deref().unwrap_or("")))
+            .collect();
+        lines.push(format!("  {rank}{line}").trim_end().to_string());
+    }
+    lines
+}
+
+/// A probability as a percent, to two decimals, or to three significant digits below 1%:
+/// `61.23%`, `0.0123%`.
+pub fn share(probability: f64) -> String {
+    let percent = 100.0 * probability;
+    if percent >= 1.0 || percent <= 0.0 {
+        return format!("{percent:.2}%");
+    }
+    let decimals = (2.0 - percent.log10().floor()).clamp(2.0, 12.0) as usize;
+    format!("{percent:.decimals$}%")
 }
 
 /// Prints each player's hands and the size of the trees, from the memory estimate.
@@ -300,5 +355,41 @@ mod tests {
         assert_eq!(list(&items(&["a"])), "a");
         assert_eq!(list(&items(&["a", "b"])), "a and b");
         assert_eq!(list(&items(&["a", "b", "c"])), "a, b and c");
+    }
+
+    #[test]
+    fn a_grid_puts_pairs_on_the_diagonal_and_suited_hands_above_it() {
+        use pk_core::HandClass;
+        let mut cells = vec![None; NUM_CLASSES];
+        for (class, cell) in [("AA", "100"), ("AKs", "7"), ("AKo", "0"), ("22", "55")] {
+            let class: HandClass = class.parse().unwrap();
+            cells[class.index()] = Some(cell.to_string());
+        }
+        let lines = grid(&cells, 4);
+        assert_eq!(lines.len(), 14);
+        assert_eq!(
+            lines[0],
+            "      A   K   Q   J   T   9   8   7   6   5   4   3   2"
+        );
+        assert_eq!(lines[1], "  A 100   7");
+        assert_eq!(lines[2], "  K   0");
+        assert_eq!(lines[3], "  Q");
+        assert_eq!(lines[13], format!("  2{}55", " ".repeat(50)));
+        // Each cell ends under its column's rank.
+        let column = lines[0].find('2').unwrap();
+        assert_eq!(lines[13].len(), column + 1);
+        let wide = grid(&cells, 6);
+        assert_eq!(&wide[0][..9], "        A");
+        assert_eq!(wide[1], "  A   100     7");
+    }
+
+    #[test]
+    fn a_share_keeps_three_significant_digits_below_one_percent() {
+        assert_eq!(share(1.0), "100.00%");
+        assert_eq!(share(0.6123), "61.23%");
+        assert_eq!(share(0.01), "1.00%");
+        assert_eq!(share(0.005), "0.500%");
+        assert_eq!(share(0.000_123_4), "0.0123%");
+        assert_eq!(share(0.0), "0.00%");
     }
 }

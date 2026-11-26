@@ -3,4 +3,5 @@
 //! error for `main` to print.
 
 pub mod estimate;
+pub mod inspect;
 pub mod solve_postflop;

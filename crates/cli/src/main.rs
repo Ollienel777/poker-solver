@@ -3,8 +3,9 @@
 //! Each command is a module of [`commands`], with its arguments and its `run`. What the commands
 //! share has modules of its own: [`spot_input`] turns the options that name a spot into a
 //! [`pk_postflop::Spot`], [`limits`] holds the limits a solve runs under and says what to do
-//! when a spot is over one, [`format`] writes amounts, sizes and times and prints the spot, and
-//! [`save`] is where a solve's solution is written.
+//! when a spot is over one, [`format`] writes amounts, sizes and times and prints the spot,
+//! [`save`] is where a solve's solution is written, and [`view`] is what `inspect` shows of a
+//! solution, built as data before it is printed.
 //!
 //! Only this crate prints. Everything a command reports goes to stdout. Errors go to stderr,
 //! each as one `solver: <message>`, with exit code 1, or 2 for a command line that does not
@@ -20,6 +21,7 @@ mod format;
 mod limits;
 mod save;
 mod spot_input;
+mod view;
 
 /// A No-Limit Hold'em cash-game solver.
 #[derive(Debug, Parser)]
@@ -45,6 +47,15 @@ enum Command {
     /// It takes the same spot and the same limits as solve-postflop, builds the betting tree
     /// only, and says whether solve-postflop would refuse the spot and what to change if so.
     Estimate(commands::estimate::Args),
+    /// Show a solution file: its spot and solve, and a node of its solution.
+    ///
+    /// Without --node it shows the root. A node shows who acts, the pot and the stacks, how
+    /// often play reaches it and each range there, each action's frequency, a 13x13 grid of
+    /// hand classes per action and one of the EVs, and, with --hand, the strategy and EV of each
+    /// combo of one class. A node on a river the file leaves out is solved again from the ranges
+    /// that reach it. --spot prints the file's spot as a spot file, and --dump writes the
+    /// solution as a JSON solution dump.
+    Inspect(commands::inspect::Args),
 }
 
 fn main() -> ExitCode {
@@ -55,6 +66,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::SolvePostflop(args) => commands::solve_postflop::run(&args),
         Command::Estimate(args) => commands::estimate::run(&args),
+        Command::Inspect(args) => commands::inspect::run(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

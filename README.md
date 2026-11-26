@@ -48,7 +48,41 @@ The river is nearly all of a flop solution's file: `--last-street turn` leaves i
 
 Without `--tree`, both say that config A's tree is over the node limit, and what to do. `--target <percent>` and `--max-iters <n>` change when a solve stops, `--threads <n>` how many threads it uses, and `--max-memory <GB>` the limit over which a solve is refused, 10 by default, which holds the save as it holds the solve. Each solve appends a line to `runs/log.jsonl` with its memory estimate, its peak memory, its time and its exploitability; `--no-log` turns that off. `solver solve-postflop --help` lists every option, and [ARCHITECTURE.md](docs/ARCHITECTURE.md#cli) describes the commands and the [tree file](docs/ARCHITECTURE.md#tree-file).
 
-Until `solver inspect` arrives, the example `solve_spot` prints a spot file's strategy at a node as a 13x13 grid of hand classes per action: `cargo run --release -p pk-postflop --example solve_spot -- reference/spots/river/dry_ip_polarized.toml --node "x"`.
+`solver inspect` shows a saved solution: the file, its spot and its solve, then a node, the root unless `--node` names another by its path, with each action's frequency, a 13x13 grid of hand classes per action, and one of the EVs. After OOP checks and IP bets half the pot:
+
+```bash
+target/release/solver inspect solutions/BTN_vs_BB_SRP_Ks7d2c.pksol --node "x b50"
+```
+
+```text
+Node         `x b50`, on the flop, Ks7d2c
+Pot          8.25bb; OOP has put in 0bb and has 97.5bb behind, IP 2.75bb and 94.75bb
+Reached      85.42% of the hands dealt
+Ranges       OOP 394.88 combos, IP 339.13: each hand's range weight times its own reach
+Acts         OOP
+
+  action                taken  of range
+  f     fold           48.95%    48.73%
+  c     call 2.75bb    51.05%    51.27%
+...
+c (call 2.75bb): the percent of each class's combos in OOP's range that take it; 51.27% of the range
+      A   K   Q   J   T   9   8   7   6   5   4   3   2
+  A         100  98  88  74  73 100  13  71  70  65 100
+  K 100     100 100 100 100 100 100 100 100 100 100 100
+  Q     100 100  76  74  70   6 100   0   0   0
+  J  93 100   2 100  78  72   7 100   0
+  T  34 100   0   1 100  78  67 100   0
+  9   0               1 100  72 100  24
+  8   0                   0 100 100  66   3
+  7 100                         100 100 100
+  6   0                              97  20   0
+  5   0                                  91   9
+  4   0                                      40   0
+  3   0                                           1
+  2 100                                             100
+```
+
+`--hand KQo` adds one class combo by combo, `--spot` prints the spot as a spot file, and `--dump` writes the solution as JSON. The root of this 226 MB file comes up in about a quarter of a second, since it reads none of the river. Saved with `--last-street turn`, the file is 1.8 MB, and a node on its river is shown by solving that river again from the ranges that reach it, in a few milliseconds.
 
 ## Docs
 
