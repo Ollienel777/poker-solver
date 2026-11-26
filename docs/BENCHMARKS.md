@@ -624,3 +624,26 @@ The comparison passes every check under the gates' tolerances (DECISIONS D20, D2
 | Our file's EVs against its strategy's, 395 nodes | 0.0000% of the pot apart | 0.1% |
 
 The river is not compared, since the reference's dump of a flop spot holds the flop and the turn, and for the same reason the reference's exploitability and values are its own figures, which cannot be measured here. The reference reached the target in about half our time, 42 s against 84 s; nothing in M5 changed the solver's speed.
+
+### On ranges recorded by hand
+
+The gate's comparison was run again on 2026-11-26 on `reference/ranges/a/BTN_vs_BB_SRP_recorded.toml`, BTN's open and BB's call of it recorded by hand from a reference ([#49](https://github.com/Ollienel777/poker-solver/issues/49)), which is what `the_gate_flop_compared_with_the_reference` now solves. Same flop, tree, machine and command. The ranges are wider, 578 and 524 hands against 452 and 422, on the same 191,844 public nodes.
+
+| Run | Result |
+| --- | --- |
+| `solve-postflop --target 0.03` | 230 iterations, 107 s, 0.0276% of the pot; 1.35 GB resident against estimates of 1.38 GB to solve and 1.30 GB to save; its file is 271.6 MB, saved in 22 s, and as stored 0.0276% |
+| the reference on the same spot | 200 iterations, 52 s, 0.0276% of the pot by its own figure; its dump is 16.9 MB |
+| `compare`, the reference's solve apart | 25 s |
+
+Every check passes:
+
+| Check | Measured | Limit |
+| --- | --- | --- |
+| Exploitability, ours, measured here | 0.0276% of the pot | 0.3% |
+| Exploitability, the reference's, as it reports it | 0.0276% of the pot | 0.3% |
+| Values at the root, ours against the reference's | 0.0033% of the pot apart for OOP, 0.0037% for IP | 0.2% |
+| Frequencies on the flop, 3 of 4 nodes checked | 0.123 points apart at the most | 2 points |
+| Frequencies on the turn, 392 of 588 nodes checked | 2.930 points apart at the most, 0.231 on average by reach | 10 points |
+| Our file's EVs against its strategy's, 395 nodes | 0.0000% of the pot apart | 0.1% |
+
+As before, the river is not compared, and the reference's exploitability and values are its own figures.

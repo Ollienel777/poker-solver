@@ -20,6 +20,8 @@ mod common;
 use common::*;
 
 const ONE_BET: &str = "configs/trees/one_bet.toml";
+/// BTN's open and BB's call of it, recorded by hand from a reference (#49).
+const GATE_RANGES: &str = "reference/ranges/a/BTN_vs_BB_SRP_recorded.toml";
 
 /// Solves a spot through the command line and saves it to `out`, with `options` added.
 fn solve_to(spot: &[&str], out: &Path, options: &[&str]) {
@@ -499,10 +501,10 @@ fn a_file_that_is_not_a_solution_and_a_missing_reference_are_named() {
 // ---------------------------------------------------------------------------------------------
 // The gate
 
-/// M5's gate: the gate's range file on the flop Ks7d2c under `configs/trees/one_bet.toml`,
-/// solved by `solve-postflop` to 0.03% of the pot, saved, and compared with what the reference
-/// solver writes for its spot. The status must be the library's verdict on the same pair,
-/// whatever that verdict is: the range file is illustrative, and a failure is a finding.
+/// M5's gate: the ranges recorded by hand for BTN against BB, on the flop Ks7d2c under
+/// `configs/trees/one_bet.toml`, solved by `solve-postflop` to 0.03% of the pot, saved, and
+/// compared with what the reference solver writes for its spot. The status must be the
+/// library's verdict on the same pair, whatever that verdict is: a failure is a finding.
 /// Without `PK_REFERENCE_SOLVER` it does nothing. Run in release with `--nocapture` to see the
 /// comparison.
 #[test]
@@ -516,7 +518,14 @@ fn the_gate_flop_compared_with_the_reference() {
     let (file, kept) = (folder.join("gate.pksol"), folder.join("reference.json"));
     let started = Instant::now();
     solve_to(
-        &["--ranges", RANGES, "--board", "Ks7d2c", "--tree", ONE_BET],
+        &[
+            "--ranges",
+            GATE_RANGES,
+            "--board",
+            "Ks7d2c",
+            "--tree",
+            ONE_BET,
+        ],
         &file,
         &["--target", "0.03"],
     );

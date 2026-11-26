@@ -28,7 +28,11 @@ The first four files are illustrative. Their ranges were made up to exercise the
 | `c/BTN_vs_BB_SRP` | BTN opens to 5bb over the straddle, SB folds, BB calls, UTG folds | 5 + 5 + 0.5 (SB) + 2 (straddle) + 4 (antes) = 16.5bb | 100 − 0.5 (ante) − 5 = 94.5bb |
 | `c/BTN_vs_UTG_SRP` | BTN opens to 5bb, both blinds fold, UTG calls from the straddle | 5 + 5 + 0.5 (SB) + 1 (BB) + 4 (antes) = 15.5bb | 100 − 0.5 (ante) − 5 = 94.5bb |
 
-Hand-recorded references go alongside them. Keep an illustrative file's `source` as it is, so that it is never mistaken for a reference.
+Hand-recorded references go alongside them. Keep an illustrative file's `source` as it is, so that it is never mistaken for a reference. Where a formation already has an illustrative file that tests use as a fixture, the recorded one takes the formation's name with `_recorded` added.
+
+| Recorded file | Source | Holds |
+| --- | --- | --- |
+| `a/BTN_vs_BB_SRP_recorded` | GTO Wizard, Cash 100bb, 8max cEV, with cold calls 2.5x, read from its strategy grids on 2026-11-26 | BTN's open, 570 combos against the 562.86 the source shows, and BB's call of it, 556 against 551.33. Mixed hands are read to about 0.05. The source is chip EV, so its ranges are without config A's rake |
 
 ## River spots
 
