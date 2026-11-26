@@ -449,6 +449,7 @@ The binary is `solver`.
 | `inspect S [--node "x b50 c 8h"] [--hand AKs]`, `inspect S --spot`, or `inspect S --dump D [--streets N]` | M5 |
 | `compare A B` | M5 |
 | `estimate --ranges F --board B [--tree T]`, or `--spot P` (the memory estimate only) | M5 |
+| `serve S`: a local page for studying solution files in a browser | its own milestone, after M5 (DECISIONS D24) |
 | `build-buckets --street flop\|turn\|river` | M6 |
 | `solve-preflop --config a [--iters N] [--checkpoint-dir D] [--resume]` | M7 |
 | `inspect-preflop --config a --node "UTG r BTN c"` | M7 |

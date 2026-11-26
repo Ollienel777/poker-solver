@@ -105,6 +105,8 @@ Chance nodes, suit isomorphism, multithreading, compressed storage. Gate: local 
 
 Solve from a range file + board, save/reload, 13x13 grids. Version 2's postflop half becomes usable with hand-recorded ranges.
 
+Solutions are studied in a browser (DECISIONS D24): a local viewer, served by a `solver serve` command from the solution files M5 writes, is a milestone of its own straight after this gate, and its issues are written when it is planned. Whether it is also hosted is decided once it works. M5's `inspect` is the small terminal check that this gate's test reads.
+
 | Issue | Title | Kind | Blocked by |
 | --- | --- | --- | --- |
 | [#44](https://github.com/Ollienel777/poker-solver/issues/44) | Decide: output format for studying | decision | none |

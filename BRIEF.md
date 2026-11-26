@@ -6,7 +6,7 @@ Nov 23, 2026 · @Nelson
 
 ## Goal and scope
 
-Build a personal-use No-Limit Hold'em cash game solver in two versions, covering four game configs. It is not a product: no accounts, no pre-solved library, no polished UI.
+Build a personal-use No-Limit Hold'em cash game solver in two versions, covering four game configs. It is not a product: no accounts, no pre-solved library. Solutions are studied in a local browser viewer, built after milestone 5, and whether it is also hosted is decided once it works (decided 2026-11-25, DECISIONS D24; the brief first said "no polished UI").
 
 **Version 1, preflop only.** Outputs a full preflop strategy (frequencies per hand class at every preflop node) for a multiway table.
 
@@ -41,7 +41,7 @@ These are defaults chosen to get started. Change any of them in the first sessio
 | Preflop method | Full-game MCCFR with abstracted postflop | Decided |
 | Postflop method | Discounted CFR, no card abstraction | Decided |
 
-**Out of scope:** multiway postflop solving, neural value networks, ICM and tournaments, a pre-solved library across all flops, node locking, hand history import, a web UI.
+**Out of scope:** multiway postflop solving, neural value networks, ICM and tournaments, a pre-solved library across all flops, node locking, hand history import. A web UI was out of scope until 2026-11-25: a local viewer now follows milestone 5 (DECISIONS D24).
 
 ## Architecture
 
@@ -155,7 +155,7 @@ Settle the first three before writing GameConfig, since they shape the preflop t
 - [x] Rust or C++? The brief assumes Rust. **Rust.**
 - [ ] Are limps allowed in the preflop tree? They matter more in straddle and ante games but enlarge the tree.
 - [ ] Local machine specs (cores, RAM), which set how far milestones 3 to 7 can go before AWS is needed.
-- [ ] Output format wanted for studying: terminal grids, JSON, or a simple local HTML viewer later?
+- [x] Output format wanted for studying: terminal grids, JSON, or a simple local HTML viewer later? **A local browser viewer, as its own milestone after milestone 5, and possibly hosted later. The terminal keeps a small `inspect`, and the JSON export is the solution dump.**
 
 ## Kickoff prompt
 
