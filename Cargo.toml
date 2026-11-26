@@ -8,6 +8,10 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+# The command line's errors, each saying what to do about it; in `pk-cli` only.
+anyhow = "1"
+# The command line's arguments, parsed from structs that derive them; in `pk-cli` only.
+clap = { version = "4", features = ["derive"] }
 rand_chacha = "0.10"
 # Threads for the postflop walks, which run a chance node's children in parallel.
 rayon = "1"
@@ -19,6 +23,8 @@ thiserror = "2"
 toml = "1"
 # Peak resident memory on Windows, for the postflop resource log; Linux reads /proc instead.
 windows-sys = "0.61"
+# The sections of a postflop solution file, each one zstd frame with its checksum.
+zstd = { version = "0.14", default-features = false }
 
 criterion = "0.8"
 proptest = "1"

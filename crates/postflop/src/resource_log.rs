@@ -5,8 +5,7 @@
 //!
 //! The library builds a [`SolveRecord`] and appends it, as one line of JSON, to a file the
 //! caller names ([`append_record`]); it never writes a file on its own. The example program
-//! `solve_spot` appends one per solve to `runs/log.jsonl`, and the `solver` command line will
-//! do the same.
+//! `solve_spot` appends one per solve to `runs/log.jsonl`, and so does `solver solve-postflop`.
 //!
 //! [`peak_resident_bytes`] asks the operating system for the most memory the process has held
 //! resident: `VmHWM` from `/proc/self/status` on Linux, and `PeakWorkingSetSize` from

@@ -11,8 +11,8 @@
 //! `--node "x x 7s b50"`.
 //!
 //! Before it solves, it prints the memory estimate, and `--estimate` prints the estimate item by
-//! item and stops there, without building the game: this is `solver estimate` until the command
-//! line exists. After each solve it appends a record of the solve's resources, the estimate, the
+//! item and stops there, without building the game, as `solver estimate` does. After each solve
+//! it appends a record of the solve's resources, the estimate, the
 //! peak resident memory, the wall time, the iterations and the exploitability, as one line of
 //! JSON to `runs/log.jsonl`, or to the file `--log` names; `--no-log` writes nothing.
 //! `--max-memory` sets the memory limit in GB, 10 by default, and `--threads` the threads the
@@ -25,8 +25,9 @@
 //! cargo run --release -p pk-postflop --example solve_spot -- <spot> --compressed
 //! ```
 //!
-//! This is a way to try the library, not the `solver` command line, which comes in M5. Every
-//! number it prints is one of the library's read-outs; the example only formats them.
+//! This is a way to try the library, not the `solver` command line (`crates/cli`), which solves
+//! a spot from a range file and a board as well and writes a solution file. Every number it
+//! prints is one of the library's read-outs; the example only formats them.
 
 use std::process::ExitCode;
 

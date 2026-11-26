@@ -8,7 +8,9 @@
 //! also carries the spot it answers, so that a dump of another spot, or of another tree, is
 //! caught before any number in it is read.
 //!
-//! [`SolutionDump::from_solution`] makes the dump of one of our solutions, and
+//! [`SolutionDump::from_solution`] makes the dump of one of our solutions,
+//! [`SolutionDump::from_saved`] the dump of one read from a
+//! [solution file](crate::solution_file) with the EVs the file holds, and
 //! [`SolutionDump::to_json`] writes it. [`SolutionDump::from_json`] and [`SolutionDump::load`]
 //! read a dump and check it on its own; [`MappedSolution::from_dump`] then checks it against a
 //! spot and maps it onto our tree. Version 1 holds spots that start on the river, and is
@@ -338,6 +340,7 @@ use thiserror::Error;
 
 use crate::game::PostflopGame;
 use crate::node_values::node_values;
+use crate::solution_file::SavedSolution;
 use crate::solve::Solution;
 
 #[cfg(doc)]
@@ -589,12 +592,17 @@ impl SolutionDump {
     /// The dump of one of our solutions, complete: its spot, its hands, every decision node of
     /// its public tree with the average strategy, the EVs of
     /// [`node_values`](mod@crate::node_values), each player's value, and the iterations and
-    /// exploitability of the solve. The spot's name is left out, since a solution does not
-    /// hold it. A river solution gives a version 1 dump, and a flop or turn solution a version
-    /// 2 dump, in which the nodes after a card that cannot fall are left out.
+    /// exploitability of the solve. The spot's name is left out. A river solution gives a
+    /// version 1 dump, and a flop or turn solution a version 2 dump, in which the nodes after a
+    /// card that cannot fall are left out.
     ///
     /// The complete dump of a flop solution with real ranges runs to gigabytes: use
     /// [`SolutionDump::from_solution_streets`] for the first streets only.
+    ///
+    /// Panics if the solution does not hold every street ([`Solution::is_complete`]), as one
+    /// loaded from a solution file without its river does: the EVs need the whole strategy.
+    /// [`SolutionDump::from_saved`] makes the dump of such a solution from the EVs its file
+    /// holds.
     pub fn from_solution(solution: &Solution) -> SolutionDump {
         let streets = streets_from(solution.game().board(0).len());
         SolutionDump::from_solution_streets(solution, streets)
@@ -606,19 +614,62 @@ impl SolutionDump {
     /// [`SolutionDump::from_solution`].
     ///
     /// Panics if `streets` is 0 or more than the spot plays: 3 from the flop, 2 from the turn
-    /// and 1 on the river.
+    /// and 1 on the river, and if the solution does not hold every street.
     pub fn from_solution_streets(solution: &Solution, streets: usize) -> SolutionDump {
-        let solver = SolverInfo {
-            name: SOLVER_NAME.to_string(),
-            iterations: Some(solution.iterations()),
-            exploitability: Some(solution.exploitability().chips),
-        };
+        assert!(
+            solution.is_complete(),
+            "a dump is made from a solution that holds every street, and this one holds the \
+             strategy up to the {} only: its EVs need the whole strategy",
+            solution.last_street()
+        );
+        let evs = node_values(solution.game(), solution.strategy());
         dump_of(
             solution.game(),
             solution.strategy(),
-            solver,
+            solver_info(solution),
             Some(solution.values()),
             streets,
+            |node, hand| evs.get(node).expect("the EVs cover every player node")[hand],
+        )
+    }
+
+    /// The dump of a solution read from a [solution file](crate::solution_file), holding the
+    /// decision nodes of its first `streets` streets, with the EVs the file holds in place of
+    /// EVs measured again. So it can be made from a file that leaves out the river, or from a
+    /// file loaded without it ([`SavedSolution::load_streets`]), up to the last street loaded.
+    /// Otherwise as [`SolutionDump::from_solution_streets`]: the strategy is the file's, and the
+    /// iterations, the exploitability and the values are those the file records for it.
+    ///
+    /// The file holds each EV as an `f32`, which the dump writes as it is, and a NaN as `null`.
+    /// So the EVs of the dump of a complete file are those of `from_solution_streets` of its
+    /// solution, which measures them again in `f64`, rounded to `f32`.
+    ///
+    /// Panics if `streets` is 0 or more than the solution holds.
+    pub fn from_saved(saved: &SavedSolution, streets: usize) -> SolutionDump {
+        let solution = saved.solution();
+        let first = solution.spot().street();
+        let held = Street::ALL
+            .iter()
+            .filter(|&&street| first <= street && street <= solution.last_street())
+            .count();
+        assert!(
+            (1..=held).contains(&streets),
+            "a dump of a solution that holds {held} streets, from the {first} to the {}, holds 1 \
+             to {held} of them, not {streets}",
+            solution.last_street()
+        );
+        dump_of(
+            solution.game(),
+            solution.strategy(),
+            solver_info(solution),
+            Some(solution.values()),
+            streets,
+            |node, hand| {
+                let ev = saved
+                    .ev(node)
+                    .expect("the file holds the EVs of every node held")[hand];
+                (!ev.is_nan()).then_some(f64::from(ev))
+            },
         )
     }
 
@@ -655,14 +706,25 @@ impl SolutionDump {
     }
 }
 
-/// The dump of `profile` in `game`, with the EVs it gives, holding the decision nodes of the
-/// first `streets` streets.
+/// The solver of a dump of `solution`: this one, with the solution's iterations and its
+/// exploitability in chips.
+fn solver_info(solution: &Solution) -> SolverInfo {
+    SolverInfo {
+        name: SOLVER_NAME.to_string(),
+        iterations: Some(solution.iterations()),
+        exploitability: Some(solution.exploitability().chips),
+    }
+}
+
+/// The dump of `profile` in `game`, holding the decision nodes of the first `streets` streets,
+/// with `ev(node, hand)` the EV of the acting player's hand `hand` at the player node `node`.
 pub(crate) fn dump_of(
     game: &PostflopGame,
     profile: &PublicProfile,
     solver: SolverInfo,
     values: Option<[f64; 2]>,
     streets: usize,
+    ev: impl Fn(u32, usize) -> Option<f64>,
 ) -> SolutionDump {
     let board = game.board_hands().board();
     let total = streets_from(board.len());
@@ -688,7 +750,6 @@ pub(crate) fn dump_of(
         rake_cap: rake.cap,
         hands,
     };
-    let evs = node_values(game, profile);
     let nodes = decisions(game)
         .into_iter()
         .filter(|decision| !decision.dead && decision.street() < streets)
@@ -710,14 +771,11 @@ pub(crate) fn dump_of(
                     (combo, row)
                 })
                 .collect();
-            let ev = evs
-                .get(decision.node)
-                .expect("the EVs cover every player node");
             let ev = combos
                 .iter()
                 .enumerate()
                 .filter(live)
-                .map(|(hand, &combo)| (combo, ev[hand]))
+                .map(|(hand, &combo)| (combo, ev(decision.node, hand)))
                 .collect();
             DumpNode {
                 path: decision.path,
@@ -862,7 +920,9 @@ fn dump_action(action: Action, mine: Chips, theirs: Chips) -> DumpAction {
 // ---------------------------------------------------------------------------------------------
 // JSON values, read strictly
 
-mod json {
+/// JSON values read strictly, for the dump and for the header of a
+/// [solution file](crate::solution_file).
+pub(crate) mod json {
     use std::collections::HashSet;
     use std::fmt;
 
@@ -870,7 +930,7 @@ mod json {
 
     /// A JSON value whose objects keep their keys in order and may not repeat one.
     #[derive(Debug, Clone, PartialEq)]
-    pub(super) enum Json {
+    pub(crate) enum Json {
         Null,
         Bool(bool),
         /// A number written without a fraction or exponent.

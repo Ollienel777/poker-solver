@@ -1186,3 +1186,139 @@ fn a_spot_built_in_code_gets_the_same_checks() {
         assert_eq!(invalid_field(&spot).0, field);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Tree files
+
+/// A tree file of all three streets. It is also the example in the module documentation.
+const TREE_FILE: &str = r#"max_raises = 0
+allin_threshold = 1.0
+flop = { bets = [0.5], raises = [], allin = false }
+turn = { bets = [0.5], raises = [], allin = false }
+river = { bets = [0.5], raises = [], allin = false }
+"#;
+
+/// The field and reason of the error that reading `text` as a tree file gives.
+fn rejected_tree(text: &str) -> (String, String) {
+    match TreeSizing::from_toml(text) {
+        Err(SpotError::Invalid { field, reason }) => {
+            println!("`{field}` {reason}");
+            (field, reason)
+        }
+        other => panic!("expected an invalid-tree error, got {other:?} for\n{text}"),
+    }
+}
+
+#[test]
+fn a_tree_file_reads_as_the_tree_table_of_a_spot_file() {
+    let sizing = TreeSizing::from_toml(TREE_FILE).unwrap();
+    let half = street(&[0.5], &[], false);
+    assert_eq!(
+        sizing,
+        TreeSizing {
+            max_raises: 0,
+            allin_threshold: 1.0,
+            flop: Some(half.clone()),
+            turn: Some(half.clone()),
+            river: Some(half),
+        }
+    );
+    // The same keys under `[tree]` in a spot file give the same sizing.
+    let flop_spot = base_with("Ks9h7d4c2s", "Ks9h7d").replacen(
+        "max_raises = 1\nallin_threshold = 1.0\nriver = { bets = [0.5, 1.0], raises = [3.0], allin = false }\n",
+        TREE_FILE,
+        1,
+    );
+    assert_eq!(read(&flop_spot).tree, sizing);
+    // So does the base spot's tree, and a tree file written as tables.
+    let river_only = "max_raises = 1\nallin_threshold = 1.0\n\n[river]\nbets = [0.5, 1.0]\nraises = [3.0]\nallin = false\n";
+    assert_eq!(TreeSizing::from_toml(river_only).unwrap(), base().tree);
+}
+
+#[test]
+fn the_module_documentation_shows_the_tree_file() {
+    let source = include_str!("../spot.rs");
+    let doc: String = source
+        .lines()
+        .skip_while(|line| *line != "//! # Tree files")
+        .skip_while(|line| *line != "//! ```toml")
+        .skip(1)
+        .take_while(|line| *line != "//! ```")
+        .map(|line| format!("{}\n", line.trim_start_matches("//!").trim_start()))
+        .collect();
+    assert_eq!(doc, TREE_FILE);
+}
+
+#[test]
+fn a_tree_file_sizes_the_streets_from_its_first_on() {
+    let flop = "flop = { bets = [0.5], raises = [], allin = false }\n";
+    let turn = "turn = { bets = [0.5], raises = [], allin = false }\n";
+    let river = "river = { bets = [0.5], raises = [], allin = false }\n";
+    let turn_and_river = TREE_FILE.replacen(flop, "", 1);
+    let sizing = TreeSizing::from_toml(&turn_and_river).unwrap();
+    assert!(sizing.flop.is_none() && sizing.turn.is_some() && sizing.river.is_some());
+    let river_alone = turn_and_river.replacen(turn, "", 1);
+    assert!(TreeSizing::from_toml(&river_alone).unwrap().turn.is_none());
+
+    let (field, reason) = rejected_tree(&TREE_FILE.replacen(turn, "", 1));
+    assert_eq!(field, "turn");
+    assert!(reason.contains("sizes the flop"), "{reason}");
+    let (field, reason) = rejected_tree(&TREE_FILE.replacen(river, "", 1));
+    assert_eq!(field, "river");
+    assert!(reason.contains("sizes the turn"), "{reason}");
+    let (field, reason) = rejected_tree(&river_alone.replacen(river, "", 1));
+    assert_eq!(field, "river");
+    assert!(reason.contains("every spot plays the river"), "{reason}");
+}
+
+#[test]
+fn a_tree_file_gets_the_checks_of_the_tree_table_with_its_own_field_names() {
+    for (from, to, field) in [
+        (
+            "allin_threshold = 1.0",
+            "allin_threshold = 0.0",
+            "allin_threshold",
+        ),
+        ("max_raises = 0", "max_raises = -1", "max_raises"),
+        ("max_raises = 0\n", "", "max_raises"),
+        ("flop = { bets = [0.5]", "flop = { bets = []", "flop.bets"),
+        (
+            "turn = { bets = [0.5]",
+            "turn = { bets = [33.0]",
+            "turn.bets",
+        ),
+        (
+            "raises = [], allin = false }\n",
+            "raises = [0.9], allin = false }\n",
+            "flop.raises",
+        ),
+        ("allin = false }\n", "allin = \"no\" }\n", "flop.allin"),
+        (
+            "river = { bets",
+            "river = { sizes = [0.5], bets",
+            "river.sizes",
+        ),
+        ("max_raises", "max_rases", "max_rases"),
+    ] {
+        assert!(TREE_FILE.contains(from), "test setup: {from:?}");
+        assert_eq!(
+            rejected_tree(&TREE_FILE.replacen(from, to, 1)).0,
+            field,
+            "{to}"
+        );
+    }
+    // A spot file's keys, or the `[tree]` line kept, are named as such.
+    let (field, reason) = rejected_tree(BASE);
+    assert_eq!(field, "board");
+    assert!(reason.contains("not a tree-file key"), "{reason}");
+    let (field, reason) = rejected_tree(&format!("[tree]\n{TREE_FILE}"));
+    assert_eq!(field, "tree");
+    assert!(reason.contains("without the `[tree]` line"), "{reason}");
+    assert!(matches!(
+        TreeSizing::from_toml("max_raises = "),
+        Err(SpotError::Toml(_))
+    ));
+    let error = TreeSizing::load("reference/trees/does-not-exist.toml").unwrap_err();
+    assert!(matches!(error, SpotError::Io { .. }));
+    assert!(error.to_string().contains("does-not-exist.toml"));
+}

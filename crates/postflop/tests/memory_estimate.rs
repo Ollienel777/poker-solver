@@ -14,6 +14,13 @@
 //! if it came at the peak; the threads of an earlier pool, the solve's or a test's, may also
 //! still be freeing theirs while the next solve is measured. So the estimate must still never be
 //! below the measured peak, and is held to 5% above it plus 16 KiB a thread and 64 KiB.
+//!
+//! The save's estimate (`estimate_save_memory`) is checked the same way: a spot is solved and
+//! saved, and the most the process held while it saved, above what it held before the solve,
+//! the solution included, is compared with the estimate's heap. It must never be below, and is
+//! held to 25% above, since it counts each compressed section as the room zstd's bound gives
+//! it, which the numbers decide how much of is used. zstd allocates through Rust's allocator,
+//! as `pk-postflop` builds it, so the allocator counts zstd's working memory too.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -21,8 +28,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
 use pk_cfr::{CompressedStorage, Dcfr, Schedule, VectorCfr};
+use pk_game::Street;
 use pk_postflop::memory::POOL_THREAD_BYTES;
-use pk_postflop::{MemoryEstimate, PostflopGame, SolveOptions, Spot, estimate_memory, solve};
+use pk_postflop::{
+    MemoryEstimate, PostflopGame, SaveOptions, SolveOptions, Spot, estimate_memory,
+    estimate_save_memory, solve,
+};
 use rayon::ThreadPoolBuilder;
 
 /// The system allocator, counting the bytes held and the most held since the last reset.
@@ -484,4 +495,95 @@ fn on_several_threads_the_estimate_covers_what_a_merged_solve_allocates() {
             check_threads(&format!("{name}, {threads} threads"), &spot, &options);
         }
     }
+}
+
+/// Solves `spot`, saves the solution once with each of `saves`, and checks each save's estimate
+/// against the most the process held while it saved, above what it held before the solve: the
+/// solution and the save's own. The estimate must never be below, and within `factor` of it.
+fn check_saves(
+    name: &str,
+    spot: &Spot,
+    options: &SolveOptions,
+    saves: &[SaveOptions],
+    factor: f64,
+) {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("memory_estimate");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.pksol"));
+    let base = HELD.load(SeqCst);
+    let solution = solve(spot, options, |_| {}).unwrap();
+    for save in saves {
+        let name = format!("{name}, to the {}", save.last_street);
+        let estimate = estimate_save_memory(spot, options, save).unwrap();
+        MOST.store(HELD.load(SeqCst), SeqCst);
+        pk_postflop::save(&solution, &path, save).unwrap();
+        let measured = MOST.load(SeqCst) - base;
+        let ratio = estimate.heap_bytes as f64 / measured as f64;
+        println!(
+            "{name}: save estimated {} bytes {}, measured {measured}, ratio {ratio:.4}; total \
+             with allowances {}; by phase {}, {}, {}, {}, {}",
+            estimate.heap_bytes,
+            estimate.peak_phase,
+            estimate.total,
+            estimate.quantizing_phase,
+            estimate.measuring_phase,
+            estimate.evaluating_phase,
+            estimate.compressing_phase,
+            estimate.writing_phase
+        );
+        assert!(
+            estimate.heap_bytes >= measured,
+            "{name}: the save estimate, {} bytes, is below the measured peak, {measured}\n\
+             {estimate}",
+            estimate.heap_bytes
+        );
+        assert!(
+            ratio <= factor,
+            "{name}: the save estimate, {} bytes, is more than {factor} times the measured \
+             peak, {measured}\n{estimate}",
+            estimate.heap_bytes
+        );
+    }
+}
+
+/// Every street, and up to the turn when the spot has more than the river.
+fn saves(spot: &Spot) -> Vec<SaveOptions> {
+    let mut saves = vec![SaveOptions::default()];
+    if spot.street() < Street::River {
+        saves.push(SaveOptions {
+            last_street: Street::Turn,
+        });
+    }
+    saves
+}
+
+#[test]
+fn the_save_estimate_covers_what_a_save_allocates() {
+    // What a save holds does not depend on how far the solve went, so two iterations do.
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (name, path) in [
+        (
+            "river deep_high_spr",
+            "../../reference/spots/river/deep_high_spr",
+        ),
+        ("turn_small", "tests/data/turn_small"),
+        ("turn_srp", "benches/data/turn_srp"),
+        ("flop_small", "tests/data/flop_small"),
+        ("flop_monotone", "tests/data/flop_monotone"),
+    ] {
+        let spot = load(path);
+        check_saves(name, &spot, &capped(2), &saves(&spot), 1.25);
+    }
+}
+
+#[test]
+#[ignore = "slow"]
+fn the_save_estimate_covers_what_a_save_of_the_benchmark_flop_allocates() {
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let spot = load("benches/data/flop_srp");
+    check_saves("flop_srp", &spot, &capped(2), &saves(&spot), 1.25);
 }

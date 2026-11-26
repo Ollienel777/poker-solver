@@ -647,7 +647,8 @@ pub fn compare(
 
 /// Compares two solutions on the tree of one spot, at the nodes both hold.
 ///
-/// Panics if they are not on the same game: the same tree, hands, pot and rake.
+/// Panics if they are not on the same game: the same tree, hands, pot and rake. Two trees are
+/// the same when their nodes are, whatever node limit each was built under.
 pub fn compare_mapped(
     a: &MappedSolution,
     b: &MappedSolution,
@@ -656,7 +657,7 @@ pub fn compare_mapped(
     let game = a.game();
     let other = b.game();
     assert!(
-        game.tree() == other.tree()
+        game.tree().nodes() == other.tree().nodes()
             && game.board_hands().board() == other.board_hands().board()
             && [Player::Oop, Player::Ip]
                 .iter()

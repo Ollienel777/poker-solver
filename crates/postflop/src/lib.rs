@@ -23,6 +23,10 @@
 //! EVs of [`node_values`](mod@node_values); [`import`] maps a dump onto our tree for its spot,
 //! checking first that it answers that spot; [`compare`](mod@compare) compares two solutions
 //! and gives a verdict against tolerances; and [`external`] runs a program that writes a dump.
+//!
+//! [`solution_file`] saves a solution to a `.pksol` file and loads it back, its strategy
+//! quantized to 16 bits and laid out by street, with or without the river, and gives a river
+//! left out of a file as a spot of its own to solve again.
 
 pub mod compare;
 pub mod dump;
@@ -39,6 +43,7 @@ pub mod node_values;
 pub mod payoff;
 pub mod resource_log;
 pub mod river;
+pub mod solution_file;
 pub mod solve;
 pub mod spot;
 pub mod terminal;
@@ -55,11 +60,15 @@ pub use hands::HandList;
 pub use import::{ImportError, MappedSolution, Mismatch};
 pub use invariants::{Invariant, Report, Violation, check_solution};
 pub use memory::{MemoryEstimate, estimate_memory};
+pub use memory::{SaveMemoryEstimate, estimate_save_memory};
 pub use merged::{MergedGame, merging_group};
 pub use node_values::{NodeValues, node_values};
 pub use payoff::{Payoff, ShowdownPayoff, fold_payoffs, rake_on, showdown_payoff};
 pub use resource_log::{SolveRecord, append_record, peak_resident_bytes};
 pub use river::RiverGame;
+pub use solution_file::{
+    RiverSpot, SaveOptions, SaveReport, SavedSolution, SolutionFileError, read_header, save,
+};
 pub use solve::{Progress, Solution, SolveError, SolveOptions, StopReason, solve};
 pub use spot::{SPOT_FORMAT, Spot, SpotError, TreeSizing};
 pub use terminal::BoardHands;
