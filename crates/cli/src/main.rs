@@ -56,6 +56,15 @@ enum Command {
     /// that reach it. --spot prints the file's spot as a spot file, and --dump writes the
     /// solution as a JSON solution dump.
     Inspect(commands::inspect::Args),
+    /// Compare two solutions of one spot, or a solution and the reference solver's answer.
+    ///
+    /// Each solution is a solution file or a JSON solution dump, ours or another solver's. The
+    /// comparison checks each strategy's exploitability, the values, each action's frequency at
+    /// every node reached often enough, and the EVs, under the gates' tolerances, and prints
+    /// what it could and could not check. It exits with 0 when every check passes and with 1
+    /// when one does not. --reference compares a solution with what the reference solver that
+    /// PK_REFERENCE_SOLVER names writes for its spot.
+    Compare(commands::compare::Args),
 }
 
 fn main() -> ExitCode {
@@ -67,6 +76,7 @@ fn main() -> ExitCode {
         Command::SolvePostflop(args) => commands::solve_postflop::run(&args),
         Command::Estimate(args) => commands::estimate::run(&args),
         Command::Inspect(args) => commands::inspect::run(&args),
+        Command::Compare(args) => commands::compare::run(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

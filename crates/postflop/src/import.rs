@@ -68,6 +68,7 @@ use crate::dump::{
 use crate::exploitability::{Exploitability, exploitability};
 use crate::game::PostflopGame;
 use crate::node_values::{NodeValues, node_values};
+use crate::solution_file::SavedSolution;
 use crate::solve::{Solution, SolveError};
 use crate::spot::Spot;
 
@@ -377,15 +378,47 @@ impl MappedSolution {
     /// is mapped as a partial dump is: it holds the player nodes of its streets, its strategy is
     /// uniform below them, its exploitability is not measured, its reported values are those
     /// its file recorded, it reports no EVs, and its EVs are measured only at the nodes whose
-    /// whole subtree it holds.
+    /// whole subtree it holds. [`MappedSolution::from_saved`] maps it with the EVs its file
+    /// holds.
     pub fn from_solution(solution: &Solution) -> MappedSolution {
+        MappedSolution::from_ours(solution, None)
+    }
+
+    /// One of our solutions read from a [solution file](crate::solution_file), whose reported
+    /// EVs are the EVs the file holds, at every player node the solution holds, `None` where
+    /// the file holds a NaN. Otherwise as [`MappedSolution::from_solution`].
+    ///
+    /// So a file without its river reports EVs on the streets it holds, as a partial dump does,
+    /// and they are compared with another solution's there; they are the EVs of its whole
+    /// strategy, river included, measured when the file was written. Its exploitability and
+    /// values are still not measured here: those it reports are its file's, measured on the
+    /// whole strategy when it was written. A complete file reports its file's EVs, which are
+    /// those `from_solution` measures again, rounded to `f32`.
+    pub fn from_saved(saved: &SavedSolution) -> MappedSolution {
+        let solution = saved.solution();
+        let evs = (0..solution.game().num_nodes() as u32)
+            .map(|node| {
+                let evs = saved.ev(node)?;
+                Some(
+                    evs.iter()
+                        .map(|&ev| (!ev.is_nan()).then_some(f64::from(ev)))
+                        .collect(),
+                )
+            })
+            .collect();
+        MappedSolution::from_ours(solution, Some(NodeValues::from_nodes(evs)))
+    }
+
+    /// One of our solutions, reporting `reported_evs`, or for a complete solution with none
+    /// given the EVs our code measures, as [`MappedSolution::from_solution`] describes.
+    fn from_ours(solution: &Solution, reported_evs: Option<NodeValues>) -> MappedSolution {
         let solver = SolverInfo {
             name: SOLVER_NAME.to_string(),
             iterations: Some(solution.iterations()),
             exploitability: Some(solution.exploitability().chips),
         };
         if !solution.is_complete() {
-            return MappedSolution::from_partial(solution, solver);
+            return MappedSolution::from_partial(solution, solver, reported_evs);
         }
         let game = solution.game().clone();
         let strategy = solution.strategy().clone();
@@ -396,7 +429,7 @@ impl MappedSolution {
         MappedSolution {
             exploitability: Some(*solution.exploitability()),
             reported_values: Some(solution.values()),
-            reported_evs: Some(measured_evs.clone()),
+            reported_evs: Some(reported_evs.unwrap_or_else(|| measured_evs.clone())),
             measured_evs,
             held,
             streets: streets_from(game.board(PostflopTree::ROOT).len()),
@@ -407,8 +440,13 @@ impl MappedSolution {
         }
     }
 
-    /// [`MappedSolution::from_solution`] for a solution that does not hold every street.
-    fn from_partial(solution: &Solution, solver: SolverInfo) -> MappedSolution {
+    /// [`MappedSolution::from_solution`] for a solution that does not hold every street, which
+    /// reports `reported_evs`, if any.
+    fn from_partial(
+        solution: &Solution,
+        solver: SolverInfo,
+        reported_evs: Option<NodeValues>,
+    ) -> MappedSolution {
         let game = solution.game().clone();
         let held: Vec<bool> = (0..game.num_nodes() as u32)
             .map(|node| game.actor(node).is_some() && solution.holds(node))
@@ -445,7 +483,7 @@ impl MappedSolution {
             complete: false,
             solver,
             reported_values: Some(solution.values()),
-            reported_evs: None,
+            reported_evs,
             exploitability: None,
             measured_evs,
             strategy,

@@ -2,6 +2,7 @@
 //! derives [`clap::Args`], and its `run`, which prints what the command reports and returns an
 //! error for `main` to print.
 
+pub mod compare;
 pub mod estimate;
 pub mod inspect;
 pub mod solve_postflop;

@@ -84,6 +84,29 @@ c (call 2.75bb): the percent of each class's combos in OOP's range that take it;
 
 `--hand KQo` adds one class combo by combo, `--spot` prints the spot as a spot file, and `--dump` writes the solution as JSON. The root of this 226 MB file comes up in about a quarter of a second, since it reads none of the river. Saved with `--last-street turn`, the file is 1.8 MB, and a node on its river is shown by solving that river again from the ranges that reach it, in a few milliseconds.
 
+`solver compare A B` compares two solutions of one spot, each a solution file or a JSON dump, ours or another solver's, under the gates' tolerances, and `solver compare A --reference` compares one with what the reference solver writes for its spot, once `PK_REFERENCE_SOLVER` names it ([reference/README.md](reference/README.md)). It prints which solution is which, the tolerances, what it could not check, and the comparison, and exits with 0 when every check passes and 1 when one does not. The spot above, solved again to 0.03% of the pot, as the gates compare, against the reference:
+
+```bash
+target/release/solver solve-postflop --ranges reference/ranges/a/BTN_vs_BB_SRP.toml --board Ks7d2c --tree configs/trees/one_bet.toml --target 0.03 --out solutions/BTN_vs_BB_SRP_Ks7d2c.tight.pksol
+target/release/solver compare solutions/BTN_vs_BB_SRP_Ks7d2c.tight.pksol --reference
+```
+
+```text
+Checked      not everything:
+- B holds the flop and the turn only, so its strategy cannot be measured here: its exploitability is the 0.0297% of the pot its solver reports, which the verdict holds to the limit without checking it
+...
+Values at the root, in chips per hand dealt (limit 0.2% of the pot apart):
+  OOP: A 156.76, B 156.71 (as reported, not measured): 0.0084% of the pot apart
+  IP: A 327.44, B 327.40 (as reported, not measured): 0.0074% of the pot apart
+...
+  flop: 3 of 4 nodes checked (limit 2 points apart)
+    largest difference 0.265 points, check at [check]
+  turn, below 1 deal: 392 of 588 nodes checked (limit 10 points apart)
+    largest difference 2.766 points, bet 275 at [check, check, deal Ah]
+...
+Verdict      A and B agree within the tolerances: every check passes
+```
+
 ## Docs
 
 | File | What it holds |
