@@ -99,6 +99,8 @@ impl HandQuery {
 pub struct NodeView {
     /// The node's path, its tokens separated by one space: empty at the root.
     pub path: String,
+    /// The steps of the path, from the root: an action or a card dealt each.
+    pub line: Vec<Step>,
     /// The node's street: a chance node is on the street it deals.
     pub street: Street,
     /// The board at the node: the spot's and every card dealt on the way.
@@ -117,6 +119,17 @@ pub struct NodeView {
     pub kind: NodeKind,
     /// The river solved again to show the node, when the file leaves its river out.
     pub river: Option<RiverSolve>,
+}
+
+/// One step of the path to a node: an action, or a card dealt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    /// Its token in a node path, such as `b50` or `8h`.
+    pub token: String,
+    /// The player who takes the action; `None` for a card dealt.
+    pub actor: Option<Player>,
+    /// The street it is on: for a card, the street it deals.
+    pub street: Street,
 }
 
 /// What a node is.
@@ -452,8 +465,25 @@ fn view(
             payoff: game.payoff(node).expect("a terminal has its payoffs"),
         },
     };
+    let line = game
+        .path(node)
+        .into_iter()
+        .map(|(at, index)| {
+            let actor = game.actor(at);
+            let token = match actor {
+                Some(_) => game.actions(at)[index].to_string(),
+                None => game.outcomes(at)[index].to_string(),
+            };
+            Step {
+                token,
+                actor,
+                street: game.street(at),
+            }
+        })
+        .collect();
     NodeView {
         path: path.to_string(),
+        line,
         street: game.street(node),
         board,
         pot: game.pot() + put_in[0] + put_in[1],

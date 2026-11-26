@@ -2,8 +2,9 @@
 //! pot and the stacks, how often play gets there, each action's frequency, a 13x13 grid of hand
 //! classes for each action and one of the EVs, and, for one class or combo, each combo's
 //! strategy and EV. A node on a river the file leaves out is shown from that river solved
-//! again. `--spot` prints the file's spot as a spot file, and `--dump` writes the solution as a
-//! JSON solution dump.
+//! again. `--json` prints the same as JSON, as `solver serve` answers ([`crate::json`]),
+//! `--spot` prints the file's spot as a spot file, and `--dump` writes the solution as a JSON
+//! solution dump.
 //!
 //! It reads the file's sections up to the street the node is on and no further
 //! ([`SavedSolution::load_streets`]), so that the flop and the turn of a large flop solution
@@ -24,6 +25,7 @@ use pk_postflop::{
 };
 
 use crate::format::{self, bb, bb_value, bytes, duration, field, list, percent, share, thousands};
+use crate::json::NodeAnswer;
 use crate::save;
 use crate::view::{
     self, ActionView, Decision, FileView, HandQuery, Missing, Next, NodeKind, NodeView,
@@ -59,6 +61,10 @@ pub struct Args {
         conflicts_with_all = ["spot", "dump"]
     )]
     pub hand: Option<HandQuery>,
+
+    /// Print the file and the node as JSON, as solver serve answers, in place of the text
+    #[arg(long, conflicts_with_all = ["spot", "dump"])]
+    pub json: bool,
 
     /// Print the file's spot as a spot file, and nothing else
     #[arg(long, conflicts_with = "dump")]
@@ -109,6 +115,14 @@ pub fn run(args: &Args) -> Result<()> {
     let saved = SavedSolution::load_streets(file, last).map_err(|error| file_error(file, error))?;
     let node = view::find(&saved, path)?;
     let shown = view::node_view(&saved, file, node, args.hand)?;
+    if args.json {
+        let answer = NodeAnswer::new(&info, &shown);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&answer).expect("a node's view is JSON")
+        );
+        return Ok(());
+    }
     print_file(&info);
     println!();
     print_node(&shown, args.hand);

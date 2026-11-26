@@ -4,8 +4,8 @@
 //! share has modules of its own: [`spot_input`] turns the options that name a spot into a
 //! [`pk_postflop::Spot`], [`limits`] holds the limits a solve runs under and says what to do
 //! when a spot is over one, [`format`] writes amounts, sizes and times and prints the spot,
-//! [`save`] is where a solve's solution is written, and [`view`] is what `inspect` shows of a
-//! solution, built as data before it is printed.
+//! [`save`] is where a solve's solution is written, [`view`] is what `inspect` shows of a
+//! solution, built as data before it is printed, and [`json`] is that data's JSON form.
 //!
 //! Only this crate prints. Everything a command reports goes to stdout. Errors go to stderr,
 //! each as one `solver: <message>`, with exit code 1, or 2 for a command line that does not
@@ -18,6 +18,7 @@ use clap::{Parser, Subcommand};
 
 mod commands;
 mod format;
+mod json;
 mod limits;
 mod save;
 mod spot_input;
@@ -53,8 +54,9 @@ enum Command {
     /// often play reaches it and each range there, each action's frequency, a 13x13 grid of
     /// hand classes per action and one of the EVs, and, with --hand, the strategy and EV of each
     /// combo of one class. A node on a river the file leaves out is solved again from the ranges
-    /// that reach it. --spot prints the file's spot as a spot file, and --dump writes the
-    /// solution as a JSON solution dump.
+    /// that reach it. --json prints the file and the node as JSON, as solver serve answers,
+    /// --spot prints the file's spot as a spot file, and --dump writes the solution as a JSON
+    /// solution dump.
     Inspect(commands::inspect::Args),
     /// Compare two solutions of one spot, or a solution and the reference solver's answer.
     ///

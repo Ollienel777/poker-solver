@@ -446,7 +446,7 @@ The binary is `solver`.
 | Command | Milestone |
 | --- | --- |
 | `solve-postflop --ranges F --board Ks7d2c [--tree T] [--target 0.3] [--threads N] --out S`, or `--spot P` in place of `--ranges` and `--board` | M5 |
-| `inspect S [--node "x b50 c 8h"] [--hand AKs]`, `inspect S --spot`, or `inspect S --dump D [--streets N]` | M5 |
+| `inspect S [--node "x b50 c 8h"] [--hand AKs] [--json]`, `inspect S --spot`, or `inspect S --dump D [--streets N]` | M5 |
 | `compare A B [--spot P]`, or `compare A --reference [--keep-reference D]` | M5 |
 | `estimate --ranges F --board B [--tree T]`, or `--spot P` (the memory estimate only) | M5 |
 | `serve S`: a local page for studying solution files in a browser | its own milestone, after M5 (DECISIONS D24) |
@@ -469,7 +469,7 @@ A node path is a space-separated list of actions:
 
 `compare` prints a `pk_postflop::Comparison` ([Cross-solver comparison](#cross-solver-comparison)), after which solution is which and what could be checked, and ends with its verdict ([compare](#compare)). The tokens above are labels from our own sizes, so a [solution dump](#solution-dump), which another solver writes, names each action by its kind and chip amount instead.
 
-**Layout.** Each command is a module of `commands`, holding its arguments, a struct that derives `clap::Args`, and its `run`. What the commands share has modules of its own: `spot_input` turns the options that name a spot into a `Spot`, `limits` holds the limit options and says what to do when a spot is over a limit, `format` writes amounts, sizes and times and prints the spot and the 13x13 grids, `save` is the one place a solution is written, and `view` builds what `inspect` shows of a solution as data, printing nothing.
+**Layout.** Each command is a module of `commands`, holding its arguments, a struct that derives `clap::Args`, and its `run`. What the commands share has modules of its own: `spot_input` turns the options that name a spot into a `Spot`, `limits` holds the limit options and says what to do when a spot is over a limit, `format` writes amounts, sizes and times and prints the spot and the 13x13 grids, `save` is the one place a solution is written, `view` builds what `inspect` shows of a solution as data, printing nothing, and `json` is that data's JSON form, [the viewer's JSON](#the-viewers-json).
 
 **Output.** Everything a command reports goes to stdout, so that redirecting it keeps a whole run. Errors go to stderr, each as one line, `solver: <message>`, that names the file or option it is about and says what to do, with exit code 1. A command line that does not parse is reported the same way, followed by clap's usage line, with exit code 2. Help and `--version` print to stdout with exit code 0, and `solver` alone prints the help to stderr with exit code 2. Amounts are in big blinds: exact for the pot, the stack and the rake cap, to two decimals for values. Bet sizes are percents of the pot, raise sizes multiples of the bet, and memory is in decimal units, as the estimate writes it. Each line that describes the spot or the result is a label padded to 13 characters and its value, and the progress is a table with a column for each measure.
 
@@ -520,6 +520,7 @@ While it solves, it prints a line per exploitability measurement: the iterations
 | `FILE` | | the solution file, as `solve-postflop --out` writes it |
 | `--node PATH` | the root | the node to show, by its path (the tokens above) |
 | `--hand HAND` | | a class (`AKs`, `77`, `T9o`) or a combo (`AhKh`) to show combo by combo at the node |
+| `--json` | off | print the file and the node as JSON, [the viewer's JSON](#the-viewers-json), in place of the text |
 | `--spot` | off | print the file's spot as a spot file, and nothing else |
 | `--dump D` | | write the solution to `D` as a [solution dump](#solution-dump) |
 | `--streets N` | the streets the file holds | the streets the dump holds, from the spot's first |
@@ -537,7 +538,48 @@ While it solves, it prints a line per exploitability measurement: the iterations
 
 **`--dump`** writes the solution as a solution dump through `SolutionDump::from_saved`, with the EVs the file holds rather than EVs measured again, so that a file without its river dumps the streets it has (DECISIONS P77). It holds the streets the file holds unless `--streets` says fewer; a dump of fewer streets than the spot plays is partial, `"complete": false`, and a line says so. It is estimated first from the raw lengths of the sections it covers, and a dump of more than 1 GB is refused unless `--streets` asks for it by name, with the size and that of the dump of a street fewer: the complete dump of the flop above is about 2.4 GB of JSON, built in memory and written in one piece, and the dump of its flop and turn 15.6 MB, written in 1.9 s. The dump goes to `D.part`, renamed once it is written, and not over a file that exists unless `--force` is given; its folder must exist.
 
-**As data.** What `inspect` shows is built by `view`, which prints nothing: `FileView` (the path, the size and the header), and `NodeView`, with the path, street, board, pot, chips put in and behind, reach, combos, and the node's kind: a `Decision` with its `ActionView`s (action, token, chips, both frequencies and what follows), its `ClassRow`s (class, combos, share, frequencies, EV) and the `Breakdown` asked for, a deal with its cards, or the end with its outcome and payoffs; and a `RiverSolve` when the river was solved again. `commands::inspect` prints them, and the viewer will serialize the same structures.
+**As data.** What `inspect` shows is built by `view`, which prints nothing: `FileView` (the path, the size and the header), and `NodeView`, with the path, street, board, pot, chips put in and behind, reach, combos, and the node's kind: a `Decision` with its `ActionView`s (action, token, chips, both frequencies and what follows), its `ClassRow`s (class, combos, share, frequencies, EV) and the `Breakdown` asked for, a deal with its cards, or the end with its outcome and payoffs; and a `RiverSolve` when the river was solved again. `commands::inspect` prints them, and `json` gives them the JSON form below, which `--json` prints.
+
+### The viewer's JSON
+
+`inspect --json` prints, and `solver serve` answers with, the JSON form of `view`'s structures, built by the module `json` of `pk-cli` with `serde`'s derive, as the solution file's header is written (DECISIONS P82). It is the contract the viewer's page is written against. It holds the numbers of the view exactly: each `f64` is written as the shortest decimal that reads back as the same number.
+
+**Units.** Amounts are integer chips, 1bb = 100, as everywhere in the solver: the pot, the stack, what each player has put in and has behind, the rake cap, and what an action adds. Values and EVs are chips that need not be whole, from the start of the spot. Frequencies, shares, reaches and probabilities are fractions from 0 to 1, not percents; an exploitability gives `percent_of_pot` and `chips`. A number that is undefined is `null`. Players are `"oop"` and `"ip"`, streets `"flop"`, `"turn"` and `"river"`, and cards, combos and classes are written as everywhere else: `"8h"`, `"AhKh"`, `"AKs"`. Every pair, such as `put_in`, is OOP's first. Fields come in the order below.
+
+**The answer for a node** is `{"file": File, "node": Node}`.
+
+**File**, from the file's header alone:
+
+| Field | Meaning |
+| --- | --- |
+| `name`, `bytes` | the file's name, without its folder, and its length |
+| `written_by` | the program that wrote it, such as `"pk-postflop 0.1.0"` |
+| `spot` | `name`, `description`; `board`, the spot's cards from the highest; `street`, the one it starts on; `pot` and `stack`, the effective stack behind each player; `rake_percent` and `rake_cap`; `tree`, with `max_raises`, `allin_threshold` and `streets`, one `{"street", "bets", "raises", "allin"}` for each street the spot plays, bets as fractions of the pot and raises as multiples of the bet |
+| `streets`, `complete` | the streets the file holds, and whether the river is one of them; a node on a river the file leaves out is solved again |
+| `nodes`, `player_nodes`, `hands` | the public tree's nodes and player nodes, and each player's hands on the board |
+| `stop`, `iterations` | how the solve stopped, `"target"`, `"iteration_cap"` or `"time_cap"`, and after how many iterations |
+| `exploitability`, `solve_exploitability` | of the strategy as stored, in 16 bits a probability, and as solved |
+| `values` | each player's value, in chips per hand dealt |
+
+A file knows no positions: a spot made from a range file has its formation in its name, such as `BTN_vs_BB_SRP_Ks7d2c`.
+
+**Node:**
+
+| Field | Meaning |
+| --- | --- |
+| `path` | the node's path, its tokens joined by one space; `""` at the root |
+| `line` | a step per token of the path, from the root: `{"token", "path", "actor", "street"}`, `path` the node the step leads to, `actor` `null` for a card dealt, and `street` the street a card deals |
+| `street` | the node's street; a deal is on the street it deals |
+| `board` | the spot's cards from the highest, then each card dealt on the way, in the order dealt |
+| `pot`, `put_in`, `behind` | the pot at the node, and what each player has put in since the spot started and has left |
+| `reached` | the probability that a hand dealt plays to the node |
+| `combos` | each player's range at the node in combos: range weight times own reach, summed |
+| `kind` | `"decision"`, `"deal"` or `"end"`, with the fields of that kind after it |
+| `river` | `null`, or the river solved again to show the node: `start`, the path where the river spot starts, its `pot`, `stop`, `iterations`, `exploitability` in the river spot's terms, the `target` as a percent of its pot, and `seconds` |
+
+A **decision** adds `actor`; `actions`, in the tree's order, which every list of frequencies and every strategy follows, each `{"token", "path", "action", "adds", "to", "frequency", "range_frequency", "next"}`, with `path` the node it leads to, `action` one of `"fold"`, `"check"`, `"call"`, `"bet"`, `"raise"` and `"allin"`, `adds` the chips it puts in, `to` the player's chips on the street once it is taken, the two frequencies of [inspect](#inspect) (taken, and of range), and `next` one of `{"kind": "acts", "player"}`, `{"kind": "deals", "street"}` and `{"kind": "ends", "outcome", "winner"}`; `classes`, all 169 hand classes in grid order, index `13 * row + column` with rows and columns from the ace to the deuce, pairs on the diagonal, suited hands above it and offsuit below, each `{"class", "in_range", "combos", "share", "frequencies", "ev"}`, a class outside the range with `in_range` false, 0 combos and share, and `null` frequencies and EV; and `hand`, `null` unless a hand was asked for, else `{"query", "rows", "missing"}`, a row `{"combo", "weight", "strategy", "ev"}` for each of its combos among the acting player's hands and a `{"combo", "reason"}` for each other, the reason `"on_board"` or `"not_in_range"`. The path of the node an action leads to is the node's path with its token after it, so the page builds every path by appending a token.
+
+A **deal** adds `cards`, each card it can deal in the order of its index, as `{"card", "path"}`, the card being its own token. An **end** adds `outcome`, `"fold"` or `"showdown"`, the `winner` after a fold or `null`, and `payoff`, from the start of the spot with the rake taken: `{"kind": "fold", "values": [oop, ip]}`, or `{"kind": "showdown", "win", "lose", "tie"}`, a player's payoff for holding the better hand, the worse, or a split.
 
 ### compare
 

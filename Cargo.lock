@@ -577,6 +577,8 @@ dependencies = [
  "pk-core",
  "pk-game",
  "pk-postflop",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
