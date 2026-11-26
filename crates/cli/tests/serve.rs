@@ -894,3 +894,90 @@ fn a_solve_from_the_page_is_refused_or_fails_and_the_server_goes_on() {
     drop(server);
     fs::remove_dir_all(&parent).unwrap();
 }
+
+// ---------------------------------------------------------------------------------------------
+// The gate
+
+/// The viewer's gate (#95): the ranges recorded by hand for BTN against BB, on the flop Ks7d2c
+/// under `configs/trees/one_bet.toml`, solved from the page's own endpoint with the
+/// repository's range and tree folders, then asked for as the page asks, at decisions on every
+/// street, at a deal and at an end. Each answer is what `inspect --json` prints for the node,
+/// which the M5 gate's test checks cell by cell against the library, and the root is checked
+/// against the library here as well. Run in release with `--nocapture`.
+#[test]
+#[ignore = "slow"]
+fn the_gate_flop_solved_from_the_page_and_served_at_every_street() {
+    let parent = scratch("serve-gate");
+    let folder = parent.join("solutions");
+    fs::create_dir_all(&folder).unwrap();
+    let server = Server::start(&folder, &["--no-log"]);
+    let spot = serde_json::json!({
+        "ranges": "a/BTN_vs_BB_SRP_recorded.toml",
+        "board": "Ks7d2c",
+        "tree": "one_bet.toml",
+        "out": "gate",
+    });
+
+    let (status, estimate) = server.post("/api/estimate", &spot);
+    assert_eq!(status, 200, "{estimate}");
+    assert!(estimate["refusal"].is_null(), "{estimate}");
+    assert_eq!(estimate["nodes"]["public"], 191_844);
+
+    let started = Instant::now();
+    let (status, answer) = server.post("/api/solve", &spot);
+    assert_eq!(status, 202, "{answer}");
+    let done = server.wait_for_state(&["done", "failed", "cancelled"]);
+    assert_eq!(done["state"], "done", "{done}");
+    println!(
+        "solved from the page and saved in {:.1?}: {} iterations, {}% of the pot",
+        started.elapsed(),
+        done["result"]["iterations"],
+        done["result"]["exploitability"]["percent_of_pot"]
+    );
+    let file = folder.join("gate.pksol");
+    assert!(read_header(&file).unwrap().exploitability.percent_of_pot <= 0.3);
+    assert_eq!(server.json("/api/files")["files"][0]["name"], "gate.pksol");
+
+    // What the page asks for, a click at a time, down one line of play to the river.
+    let nodes = [
+        ("", "decision", "flop"),
+        ("x", "decision", "flop"),
+        ("x x", "deal", "turn"),
+        ("x b50 f", "end", "flop"),
+        ("x b50 c", "deal", "turn"),
+        ("x b50 c 8h", "decision", "turn"),
+        ("x b50 c 8h x", "decision", "turn"),
+        ("x b50 c 8h x b50 c", "deal", "river"),
+        ("x b50 c 8h x b50 c 2s", "decision", "river"),
+        ("x b50 c 8h x b50 c 2s x", "decision", "river"),
+        ("x b50 c 8h x b50 c 2s x b50 c", "end", "river"),
+    ];
+    for (path, kind, street) in nodes {
+        let started = Instant::now();
+        let target = format!(
+            "/api/node?file=gate.pksol&path={}&hand=AKs",
+            path.replace(' ', "+")
+        );
+        let served = server.json(&target);
+        let took = started.elapsed();
+        assert_eq!(served["node"]["kind"], kind, "{path}");
+        assert_eq!(served["node"]["street"], street, "{path}");
+        assert_eq!(
+            served,
+            inspect_json(&file, &["--node", path, "--hand", "AKs"]),
+            "{path}"
+        );
+        if kind == "decision" {
+            assert_eq!(served["node"]["classes"].as_array().unwrap().len(), 169);
+        }
+        println!("`{path}`: a {kind} on the {street}, answered in {took:.1?}");
+    }
+
+    let saved = SavedSolution::load(&file).unwrap();
+    let evs = saved.ev(0).unwrap();
+    let ev = |hand: usize| (!evs[hand].is_nan()).then_some(f64::from(evs[hand]));
+    let root_node = server.json("/api/node?file=gate.pksol");
+    check_json_decision(&root_node["node"], saved.solution(), 0, &ev, 1.0);
+    drop(server);
+    fs::remove_dir_all(&parent).unwrap();
+}
