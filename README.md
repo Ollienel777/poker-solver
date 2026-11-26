@@ -107,6 +107,14 @@ Values at the root, in chips per hand dealt (limit 0.2% of the pot apart):
 Verdict      A and B agree within the tolerances: every check passes
 ```
 
+`solver serve` serves a folder of solution files to a browser, on this machine only:
+
+```bash
+target/release/solver serve solutions
+```
+
+It prints the address, `http://127.0.0.1:8080/` unless `--port` says another, and a line per request. The page there is a placeholder that lists the files for now; the viewer's page is being built against its JSON, `/api/files` for the list and `/api/node?file=BTN_vs_BB_SRP_Ks7d2c.pksol&path=x+b50` for a node, which is what `inspect --json` prints ([ARCHITECTURE.md](docs/ARCHITECTURE.md#serve)). Solutions stay loaded between requests, up to `--max-memory`, 10 GB by default.
+
 ## Docs
 
 | File | What it holds |

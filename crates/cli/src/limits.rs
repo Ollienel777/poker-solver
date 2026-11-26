@@ -80,7 +80,7 @@ fn parse_threads(text: &str) -> Result<usize, String> {
     }
 }
 
-fn parse_gigabytes(text: &str) -> Result<u64, String> {
+pub fn parse_gigabytes(text: &str) -> Result<u64, String> {
     match text.trim().parse::<f64>() {
         Ok(gb) if gb.is_finite() && gb > 0.0 => Ok((gb * 1e9) as u64),
         _ => Err("give a size in gigabytes, more than 0, such as 10 or 2.5".to_string()),

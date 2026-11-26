@@ -94,7 +94,7 @@ pub struct Args {
     pub force: bool,
 }
 
-fn parse_hand(text: &str) -> Result<HandQuery, String> {
+pub fn parse_hand(text: &str) -> Result<HandQuery, String> {
     HandQuery::parse(text).ok_or_else(|| {
         "give a hand class, such as AKs, AKo or 77, or a combo, such as AhKh".to_string()
     })
@@ -130,7 +130,7 @@ pub fn run(args: &Args) -> Result<()> {
 }
 
 /// A solution file's error as the command reports it, naming the file and saying what to do.
-fn file_error(path: &Path, error: SolutionFileError) -> anyhow::Error {
+pub fn file_error(path: &Path, error: SolutionFileError) -> anyhow::Error {
     let shown = path.display();
     match error {
         SolutionFileError::Io { source, .. } => {

@@ -20,6 +20,8 @@ serde = { version = "1", features = ["derive"] }
 # enough digits reads back exactly.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
+# The local HTTP server of `solver serve`, synchronous, with no TLS; in `pk-cli` only.
+tiny_http = { version = "0.12", default-features = false }
 toml = "1"
 # Peak resident memory on Windows, for the postflop resource log; Linux reads /proc instead.
 windows-sys = "0.61"

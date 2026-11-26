@@ -5,7 +5,8 @@
 //! [`pk_postflop::Spot`], [`limits`] holds the limits a solve runs under and says what to do
 //! when a spot is over one, [`format`] writes amounts, sizes and times and prints the spot,
 //! [`save`] is where a solve's solution is written, [`view`] is what `inspect` shows of a
-//! solution, built as data before it is printed, and [`json`] is that data's JSON form.
+//! solution, built as data before it is printed, [`json`] is that data's JSON form, and
+//! [`server`] is what `serve` answers.
 //!
 //! Only this crate prints. Everything a command reports goes to stdout. Errors go to stderr,
 //! each as one `solver: <message>`, with exit code 1, or 2 for a command line that does not
@@ -21,6 +22,7 @@ mod format;
 mod json;
 mod limits;
 mod save;
+mod server;
 mod spot_input;
 mod view;
 
@@ -67,6 +69,14 @@ enum Command {
     /// when one does not. --reference compares a solution with what the reference solver that
     /// PK_REFERENCE_SOLVER names writes for its spot.
     Compare(commands::compare::Args),
+    /// Serve a folder of solution files to a browser, on this machine only.
+    ///
+    /// It listens on 127.0.0.1 at --port, serves the viewer's page at / and answers the page's
+    /// requests: the folder's solution files at /api/files, and a node of one at /api/node, as
+    /// inspect --json prints it. Solutions stay loaded between requests, up to --max-memory, the
+    /// least recently used dropped first. It prints a line per request, and runs until it is
+    /// stopped.
+    Serve(commands::serve::Args),
 }
 
 fn main() -> ExitCode {
@@ -79,6 +89,7 @@ fn main() -> ExitCode {
         Command::Estimate(args) => commands::estimate::run(&args),
         Command::Inspect(args) => commands::inspect::run(&args),
         Command::Compare(args) => commands::compare::run(&args),
+        Command::Serve(args) => commands::serve::run(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

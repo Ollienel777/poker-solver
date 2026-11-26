@@ -449,7 +449,7 @@ The binary is `solver`.
 | `inspect S [--node "x b50 c 8h"] [--hand AKs] [--json]`, `inspect S --spot`, or `inspect S --dump D [--streets N]` | M5 |
 | `compare A B [--spot P]`, or `compare A --reference [--keep-reference D]` | M5 |
 | `estimate --ranges F --board B [--tree T]`, or `--spot P` (the memory estimate only) | M5 |
-| `serve S`: a local page for studying solution files in a browser | its own milestone, after M5 (DECISIONS D24) |
+| `serve FOLDER [--port 8080] [--max-memory 10]`: the viewer's page and its JSON, from a folder of solution files, on 127.0.0.1 only | M5b (DECISIONS D24, D25) |
 | `build-buckets --street flop\|turn\|river` | M6 |
 | `solve-preflop --config a [--iters N] [--checkpoint-dir D] [--resume]` | M7 |
 | `inspect-preflop --config a --node "UTG r BTN c"` | M7 |
@@ -469,7 +469,7 @@ A node path is a space-separated list of actions:
 
 `compare` prints a `pk_postflop::Comparison` ([Cross-solver comparison](#cross-solver-comparison)), after which solution is which and what could be checked, and ends with its verdict ([compare](#compare)). The tokens above are labels from our own sizes, so a [solution dump](#solution-dump), which another solver writes, names each action by its kind and chip amount instead.
 
-**Layout.** Each command is a module of `commands`, holding its arguments, a struct that derives `clap::Args`, and its `run`. What the commands share has modules of its own: `spot_input` turns the options that name a spot into a `Spot`, `limits` holds the limit options and says what to do when a spot is over a limit, `format` writes amounts, sizes and times and prints the spot and the 13x13 grids, `save` is the one place a solution is written, `view` builds what `inspect` shows of a solution as data, printing nothing, and `json` is that data's JSON form, [the viewer's JSON](#the-viewers-json).
+**Layout.** Each command is a module of `commands`, holding its arguments, a struct that derives `clap::Args`, and its `run`. What the commands share has modules of its own: `spot_input` turns the options that name a spot into a `Spot`, `limits` holds the limit options and says what to do when a spot is over a limit, `format` writes amounts, sizes and times and prints the spot and the 13x13 grids, `save` is the one place a solution is written, `view` builds what `inspect` shows of a solution as data, printing nothing, `json` is that data's JSON form, [the viewer's JSON](#the-viewers-json), and `server` is what [serve](#serve) answers, its routing and its shared state in one place.
 
 **Output.** Everything a command reports goes to stdout, so that redirecting it keeps a whole run. Errors go to stderr, each as one line, `solver: <message>`, that names the file or option it is about and says what to do, with exit code 1. A command line that does not parse is reported the same way, followed by clap's usage line, with exit code 2. Help and `--version` print to stdout with exit code 0, and `solver` alone prints the help to stderr with exit code 2. Amounts are in big blinds: exact for the pot, the stack and the rake cap, to two decimals for values. Bet sizes are percents of the pot, raise sizes multiples of the bet, and memory is in decimal units, as the estimate writes it. Each line that describes the spot or the result is a label padded to 13 characters and its value, and the progress is a table with a column for each measure.
 
@@ -539,6 +539,40 @@ While it solves, it prints a line per exploitability measurement: the iterations
 **`--dump`** writes the solution as a solution dump through `SolutionDump::from_saved`, with the EVs the file holds rather than EVs measured again, so that a file without its river dumps the streets it has (DECISIONS P77). It holds the streets the file holds unless `--streets` says fewer; a dump of fewer streets than the spot plays is partial, `"complete": false`, and a line says so. It is estimated first from the raw lengths of the sections it covers, and a dump of more than 1 GB is refused unless `--streets` asks for it by name, with the size and that of the dump of a street fewer: the complete dump of the flop above is about 2.4 GB of JSON, built in memory and written in one piece, and the dump of its flop and turn 15.6 MB, written in 1.9 s. The dump goes to `D.part`, renamed once it is written, and not over a file that exists unless `--force` is given; its folder must exist.
 
 **As data.** What `inspect` shows is built by `view`, which prints nothing: `FileView` (the path, the size and the header), and `NodeView`, with the path, street, board, pot, chips put in and behind, reach, combos, and the node's kind: a `Decision` with its `ActionView`s (action, token, chips, both frequencies and what follows), its `ClassRow`s (class, combos, share, frequencies, EV) and the `Breakdown` asked for, a deal with its cards, or the end with its outcome and payoffs; and a `RiverSolve` when the river was solved again. `commands::inspect` prints them, and `json` gives them the JSON form below, which `--json` prints.
+
+### serve
+
+`serve` is a local HTTP server over a folder of [solution files](#solution-file), for the viewer's page: it serves the page and answers the page's requests with [the viewer's JSON](#the-viewers-json) (DECISIONS D25, P83). It listens on `127.0.0.1` only, so that nothing but this machine reaches it, and there is no option to listen on another address. It is synchronous, on `tiny_http`, and answers one request at a time.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `FOLDER` | | the folder of solution files to serve; files in folders below it are not served |
+| `--port N` | 8080 | the port to listen on; 0 takes any free port |
+| `--max-memory GB` | 10 | hold loaded solutions of at most this many gigabytes, 10^9 bytes, by their estimates |
+
+On start it prints `Serving      the solution files of `FOLDER` at http://127.0.0.1:PORT/`, the port the one it got, then the memory limit, and then one line per request, `METHOD URL STATUS TIME`, after a line for each solution it loads or drops. It runs until it is stopped.
+
+**Endpoints.** Every one is a `GET`; another method is refused with 405. A query is percent-decoded, with `+` read as a space, and a key an endpoint does not take is refused with 400, saying which keys it takes.
+
+| Endpoint | Answer |
+| --- | --- |
+| `/`, `/index.html` and the page's other files | the page, built into the binary from `crates/cli/assets/` with `include_bytes!`; a file there is served once it has a line in `server::ASSETS` |
+| `/api/files` | `{"folder", "files"}`: the folder as given, and its `.pksol` files by name, each a File of [the viewer's JSON](#the-viewers-json) from its header alone, or `{"name", "bytes", "error"}` for one whose header cannot be read. No solution is loaded to list them |
+| `/api/node?file=NAME&path=PATH&hand=HAND` | `{"file": File, "node": Node}`, as `inspect NAME --node PATH --hand HAND --json` prints it: the node of the file `NAME` that `PATH` leads to, the root without `path`, with the combos of `HAND`, a class or a combo, at a decision. Tokens may be in either case, and are joined by spaces, escaped as `+` or `%20` |
+
+**Errors** are JSON, `{"error": "..."}`, one line in the words `inspect` uses, with a path named `path` rather than `--node`:
+
+| Status | When |
+| --- | --- |
+| 400 | a file name that is not a plain name: empty, with `/`, `\`, `:` or `..` in it, or absolute; a path that leads to no node, or to one after a turn the file leaves out; a hand that is neither a class nor a combo; a query that does not decode, a key that is not taken, or `/api/node` without `file` |
+| 404 | a file the folder does not hold as a `.pksol` file, and a URL that is neither an endpoint nor a file of the page |
+| 405 | a method other than `GET` |
+| 500 | a file that cannot be read or is not a solution file, with `inspect`'s message, and a request the server failed on; it goes on serving |
+| 503 | a solution that would need more memory loaded than `--max-memory` lets the server hold, even with nothing else loaded |
+
+**Loaded solutions** stay loaded between requests (DECISIONS P84). A node needs its file's sections up to the node's street, counted from the path as `inspect` counts it, and no further, so the root of the gate's 226 MB flop file reads 13 kB of sections; a node on a later street than the one loaded loads the file again, that far. A file whose length or time of writing has changed since it was loaded is loaded again. Each loaded solution is counted at an estimate of what it holds: its game as `estimate_memory` counts the public tree, the boards' hands and the betting tree, its strategy on the streets loaded as `f32`s, twice the raw length of their 16-bit sections, its EVs as the raw length of theirs, and 48 bytes a node. Before a solution is loaded the one it replaces is dropped and, until the new one fits in `--max-memory` beside those held, the least recently used; one that does not fit alone is refused. A river the file leaves out is solved again for each request of a node on it, as `inspect` does, and is not kept.
+
+**Layout.** `commands::serve` listens and prints; `server` holds everything else: `State`, the folder and the loaded solutions, which every request shares and to which a solve started from the page (#94) will add its jobs, and `State::answer`, which routes a method and URL to its endpoint and returns the reply, catching a panic as a 500. `server::cache` is the memory-bounded cache.
 
 ### The viewer's JSON
 
