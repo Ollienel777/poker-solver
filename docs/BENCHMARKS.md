@@ -589,3 +589,38 @@ A river spot's file has no river to leave out. A flop tree whose player nodes al
 | `dry_rainbow` | `ev.river` | 148.0 MB | 122.9 MB | 120.0 MB | 119.6 MB | 118.9 MB | 102.8 MB | 96.6 MB | 0.95 s, 2.75 s, 7.85 s, 88.1 s |
 
 On the river sections of the two large flops, which are nearly all of their files, level 9 is 0.3% to 17% smaller than level 3 for about three times its time, level 19 0.9% to 25% smaller for 40 to 45 times, and level 1 1% to 5% larger in 0.4 of the time. The gain depends on the spot: `flop_srp`'s sections shrink with the level and `dry_rainbow`'s hardly do. Level 3, zstd's default, is the simplest choice, and the files use it (DECISIONS P68). Writing the codes' bytes apart changed the strategy sections by −5% to +4%, and by −1% on the large flops, so the codes are written whole. Written apart, the EVs are 11% to 20% smaller on the large rivers, `dry_rainbow`'s 120.0 MB becoming 102.8 MB, and 2% larger on `turn_srp`'s river (6% on a small flop test spot). They are written whole, as `f32`, by the owner's decision: the planes help complete flop files only, while a viewer reads the flop and the turn, under 2 MB, and they can come with a format version of their own if complete flop files need to be smaller (DECISIONS P68).
+
+## The runs of the M5 gate
+
+The M5 gate ([#50](https://github.com/Ollienel777/poker-solver/issues/50)) asks for a spot solved from a range file through the command line, saved, loaded and inspected, and for a real spot from `reference/ranges/a/BTN_vs_BB_SRP.toml` compared with the reference solver. Both were run on 2026-11-25 on the development machine, on 16 threads, with the `solver` binary built in release at `4d55ed5`, by the two slow tests that hold them:
+
+```bash
+cargo test --release -p pk-cli --test inspect -- --ignored --nocapture
+PK_REFERENCE_SOLVER='["<path to postflop-ref>", "{spot}", "{out}"]' cargo test --release -p pk-cli --test compare -- --ignored --nocapture
+```
+
+The spot is the range file on the flop Ks7d2c under `configs/trees/one_bet.toml`, one half-pot bet a street and no raises: 452 and 422 hands, and 191,844 public nodes from 117 betting nodes. Config A's own tree there has 9,789,026 nodes, over the limit of a million, and is refused. The range file is illustrative, not recorded by hand, so these runs show that the gate's path works and what it costs; the gate's comparison is the same run on the ranges of [#49](https://github.com/Ollienel777/poker-solver/issues/49).
+
+| Run | Result |
+| --- | --- |
+| `solve-postflop` to 0.3% of the pot | 70 iterations, 28 to 30 s, 0.2923% of the pot; 1.06 GB resident against estimates of 1.11 GB to solve and 1.04 GB to save |
+| its solution file | 226.2 MB, saved in 16 to 17 s; 1.8 MB, saved in 10 s, with `--last-street turn`; as stored, 0.2922% of the pot |
+| `inspect` at the root of the 226.2 MB file | 0.28 s for the command, reading none of the river |
+| `inspect` at a river node of the whole file | 1.9 s |
+| `inspect` at the same river node of the file without its river | the river solved again to 0.0088% of its pot in 130 iterations and 14 ms; 0.68 s in the test, its own check of the numbers included |
+| `solve-postflop --target 0.03` | 220 iterations, 84 s, 0.0299% of the pot; its file is 218.1 MB, saved in 15 s, and as stored 0.0298% |
+| the reference on the same spot, run by `compare --reference` | 190 iterations, 42 s, 0.0297% of the pot by its own figure; its dump holds the flop and the turn, 13.3 MB |
+| `compare`, the reference's solve apart | 13 s to load, map and compare |
+
+The comparison passes every check under the gates' tolerances (DECISIONS D20, D21):
+
+| Check | Measured | Limit |
+| --- | --- | --- |
+| Exploitability, ours, measured here | 0.0298% of the pot | 0.3% |
+| Exploitability, the reference's, as it reports it | 0.0297% of the pot | 0.3% |
+| Values at the root, ours against the reference's | 0.0084% of the pot apart for OOP, 0.0074% for IP | 0.2% |
+| Frequencies on the flop, 3 of 4 nodes checked | 0.265 points apart at the most | 2 points |
+| Frequencies on the turn, 392 of 588 nodes checked | 2.766 points apart at the most, 0.208 on average by reach | 10 points |
+| Our file's EVs against its strategy's, 395 nodes | 0.0000% of the pot apart | 0.1% |
+
+The river is not compared, since the reference's dump of a flop spot holds the flop and the turn, and for the same reason the reference's exploitability and values are its own figures, which cannot be measured here. The reference reached the target in about half our time, 42 s against 84 s; nothing in M5 changed the solver's speed.
