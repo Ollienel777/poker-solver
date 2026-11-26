@@ -1,6 +1,6 @@
 //! The solutions `solver serve` holds loaded between requests, under a memory budget: each one
 //! counted at its estimated size, and the least recently used dropped first to make room for
-//! another. A value is handed out behind an [`Arc`], so that one dropped from the cache while a
+//! another. A solve running from the page reserves its own estimate out of the same budget. A value is handed out behind an [`Arc`], so that one dropped from the cache while a
 //! request still reads it is freed when that request is done.
 
 use std::sync::Arc;
@@ -9,6 +9,8 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct Cache<T> {
     budget: u64,
+    /// The bytes held back for a solve while it runs, which no value may use.
+    reserved: u64,
     entries: Vec<Entry<T>>,
     /// Counts the uses, so that the entry used least recently has the lowest `used`.
     clock: u64,
@@ -22,11 +24,12 @@ struct Entry<T> {
     used: u64,
 }
 
-/// Why a value was not made room for: it is larger than the whole budget.
+/// Why a value was not made room for: it is larger than the budget, less what is reserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TooLarge {
     pub bytes: u64,
     pub budget: u64,
+    pub reserved: u64,
 }
 
 impl<T> Cache<T> {
@@ -34,6 +37,7 @@ impl<T> Cache<T> {
     pub fn new(budget: u64) -> Cache<T> {
         Cache {
             budget,
+            reserved: 0,
             entries: Vec::new(),
             clock: 0,
         }
@@ -41,6 +45,33 @@ impl<T> Cache<T> {
 
     pub fn budget(&self) -> u64 {
         self.budget
+    }
+
+    /// The bytes held back for a running solve.
+    pub fn reserved(&self) -> u64 {
+        self.reserved
+    }
+
+    /// Holds back `bytes` of the budget for a solve, in place of any reserved before, after
+    /// dropping the least recently used values until they fit; gives the names dropped. Refuses,
+    /// dropping nothing, if `bytes` is over the whole budget.
+    pub fn reserve(&mut self, bytes: u64) -> Result<Vec<String>, TooLarge> {
+        let before = std::mem::replace(&mut self.reserved, 0);
+        match self.make_room(bytes) {
+            Ok(dropped) => {
+                self.reserved = bytes;
+                Ok(dropped)
+            }
+            Err(too_large) => {
+                self.reserved = before;
+                Err(too_large)
+            }
+        }
+    }
+
+    /// Gives back what [`Cache::reserve`] held back.
+    pub fn release(&mut self) {
+        self.reserved = 0;
     }
 
     /// The bytes the cache holds: the sizes of its values, summed.
@@ -67,18 +98,19 @@ impl<T> Cache<T> {
         self.entries.clear();
     }
 
-    /// Drops the least recently used values until `bytes` more fit in the budget, and gives
-    /// their names in the order dropped. Refuses, dropping nothing, if `bytes` is over the whole
-    /// budget.
+    /// Drops the least recently used values until `bytes` more fit in the budget beside what
+    /// is reserved, and gives their names in the order dropped. Refuses, dropping nothing, if
+    /// `bytes` is over the budget less what is reserved.
     pub fn make_room(&mut self, bytes: u64) -> Result<Vec<String>, TooLarge> {
-        if bytes > self.budget {
+        if bytes > self.budget.saturating_sub(self.reserved) {
             return Err(TooLarge {
                 bytes,
                 budget: self.budget,
+                reserved: self.reserved,
             });
         }
         let mut dropped = Vec::new();
-        while self.held() + bytes > self.budget {
+        while self.held() + self.reserved + bytes > self.budget {
             let oldest = self
                 .entries
                 .iter()
@@ -143,7 +175,8 @@ mod tests {
             cache.make_room(101),
             Err(TooLarge {
                 bytes: 101,
-                budget: 100
+                budget: 100,
+                reserved: 0
             })
         );
         assert_eq!(cache.held(), 60);
@@ -167,5 +200,33 @@ mod tests {
         assert_eq!(*held, 2);
         assert_eq!(cache.held(), 0);
         assert_eq!(cache.budget(), 100);
+    }
+
+    #[test]
+    fn a_reservation_is_counted_against_the_budget() {
+        let mut cache = Cache::new(100);
+        cache.insert("a", 1, 40).unwrap();
+        cache.insert("b", 2, 40).unwrap();
+        cache.get("a");
+        // A solve of 50 drops the least recently used value to fit.
+        assert_eq!(cache.reserve(50).unwrap(), ["b"]);
+        assert_eq!((cache.held(), cache.reserved()), (40, 50));
+        // While it runs, a value fits only in what is left.
+        assert_eq!(cache.insert("c", 3, 20).unwrap().1, ["a"]);
+        let refused = cache.make_room(60).unwrap_err();
+        assert_eq!(
+            refused,
+            TooLarge {
+                bytes: 60,
+                budget: 100,
+                reserved: 50
+            }
+        );
+        // A reservation refused leaves the one before it.
+        assert!(cache.reserve(101).is_err());
+        assert_eq!(cache.reserved(), 50);
+        cache.release();
+        assert_eq!(cache.reserved(), 0);
+        assert!(cache.make_room(80).unwrap().is_empty());
     }
 }

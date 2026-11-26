@@ -1,5 +1,7 @@
 // The viewer's page: it shows one node of one solution file, as /api/node answers it, and moves
-// to another by changing the address after the `#`, so that back and forward work.
+// to another by changing the address after the `#`, so that back and forward work. `#new` is
+// the form that starts a solve, estimated by /api/estimate as it is filled in, and `#solve` the
+// solve running, which /api/solve reports about once a second.
 // Amounts arrive in chips, 100 to the big blind, and frequencies as fractions.
 "use strict";
 
@@ -7,7 +9,10 @@ const $ = (id) => document.getElementById(id);
 const RANKS = "AKQJT98765432";
 const SUITS = "shdc";
 
-const state = { files: [], folder: "", file: "", path: "", hand: "", show: "strategy", answer: null };
+const state = {
+  files: [], folder: "", file: "", path: "", hand: "", show: "strategy", answer: null,
+  inputs: null, inputsError: "", poll: 0,
+};
 
 // ---- Small helpers -----------------------------------------------------------------------
 
@@ -406,41 +411,468 @@ async function load() {
   }
 }
 
-async function start() {
-  try {
-    const list = await api("/api/files");
-    state.files = list.files;
-    state.folder = list.folder;
-  } catch (error) {
-    showError("The list of solutions could not be read: " + error.message);
+// ---- Views -------------------------------------------------------------------------------
+
+// The page shows one view at a time: a node of a file, the form of a new solve (`#new`), a
+// running solve (`#solve`), or the empty folder.
+const VIEWS = ["main", "new", "running", "empty"];
+
+function knownFiles() {
+  return state.files.filter((file) => !file.error).map((file) => file.name);
+}
+
+function showView(name) {
+  for (const view of VIEWS) $(view).hidden = view !== name;
+  $("facts").hidden = name !== "main";
+  $("file-pick").hidden = name !== "main";
+  $("new-solve").hidden = name !== "main";
+  if (name !== "main") showError("");
+  // What the form said of the last solve is for the form; a file shown has moved on.
+  if (name === "main") form.notice = null;
+  if (name !== "running") stopPolling();
+}
+
+function replaceHash(hash) {
+  history.replaceState(null, "", "#" + hash);
+  route();
+}
+
+function route() {
+  const hash = location.hash.slice(1);
+  if (hash === "new") return showForm();
+  if (hash === "solve") return showRunning();
+  if (!knownFiles().length) {
+    showView("empty");
     return;
   }
+  showView("main");
+  $("main").hidden = !state.answer;
+  load();
+}
+
+async function refreshFiles() {
+  const list = await api("/api/files");
+  state.files = list.files;
+  state.folder = list.folder;
   const select = $("files");
+  select.replaceChildren();
   for (const file of state.files) {
     const option = make("option", "", file.error ? file.name + " (cannot be read)" : file.name);
     option.value = file.name;
     option.disabled = Boolean(file.error);
     select.append(option);
   }
-  if (!state.files.some((file) => !file.error)) {
-    $("empty").hidden = false;
-    $("empty-command").textContent =
-      "solver solve-postflop --ranges reference/ranges/a/BTN_vs_BB_SRP_recorded.toml --board Ks7d2c " +
-      "--tree configs/trees/one_bet.toml --out " + state.folder + "/BTN_vs_BB_Ks7d2c.pksol";
+}
+
+// ---- Numbers -----------------------------------------------------------------------------
+
+function count(value) {
+  return Number(value).toLocaleString("en-US");
+}
+
+// Bytes in decimal units, as the solver writes them: 1.10 GB, 613.0 MB.
+function size(bytes) {
+  if (bytes === null || bytes === undefined) return "–";
+  if (bytes >= 1e9) return (bytes / 1e9).toFixed(2) + " GB";
+  if (bytes >= 1e6) return (bytes / 1e6).toFixed(1) + " MB";
+  if (bytes >= 1e3) return (bytes / 1e3).toFixed(1) + " kB";
+  return bytes + " B";
+}
+
+function clock(seconds) {
+  if (seconds < 60) return seconds.toFixed(1) + "s";
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.floor(seconds - 60 * minutes);
+  return minutes + "m " + String(rest).padStart(2, "0") + "s";
+}
+
+async function post(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const answer = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = new Error(answer && answer.error ? answer.error : "The server answered " + response.status);
+    error.answer = answer;
+    throw error;
+  }
+  return answer;
+}
+
+// ---- The form of a new solve -------------------------------------------------------------
+
+const form = { estimate: null, timer: 0, latest: 0, notice: null };
+
+function rangeEntry() {
+  return state.inputs ? state.inputs.ranges.find((entry) => entry.name === $("f-ranges").value) : null;
+}
+
+function fillInputs() {
+  const ranges = $("f-ranges");
+  ranges.replaceChildren();
+  for (const entry of state.inputs.ranges) {
+    const option = make("option", "", entry.error ? entry.name + " (cannot be read)" : entry.name);
+    option.value = entry.name;
+    option.disabled = Boolean(entry.error);
+    ranges.append(option);
+  }
+  const first = state.inputs.ranges.find((entry) => !entry.error);
+  if (first) ranges.value = first.name;
+  fillTrees();
+}
+
+function fillTrees() {
+  const select = $("f-tree");
+  // The tree chosen stays chosen; the first time, one bet a street is, the config's own tree
+  // being too large to solve on a flop.
+  const first = select.options.length === 0;
+  const chosen = select.value;
+  select.replaceChildren();
+  const entry = rangeEntry();
+  const own = make("option", "", entry && entry.config ? "Config " + entry.config.toUpperCase() + "'s own tree" : "The config's own tree");
+  own.value = "";
+  select.append(own);
+  for (const tree of state.inputs ? state.inputs.trees : []) {
+    const option = make("option", "", tree.error ? tree.name + " (cannot be read)" : tree.name);
+    option.value = tree.name;
+    option.disabled = Boolean(tree.error);
+    select.append(option);
+  }
+  const names = Array.from(select.options).filter((option) => !option.disabled).map((option) => option.value);
+  select.value = !first && names.includes(chosen) ? chosen : names.includes("one_bet.toml") ? "one_bet.toml" : "";
+}
+
+// Reads the board as it is typed: the cards so far, and what is wrong with it, if anything.
+function readBoard(text) {
+  const letters = text.replace(/[\s,]+/g, "");
+  const cards = [];
+  for (let at = 0; at + 1 < letters.length; at += 2) {
+    const rank = letters[at].toUpperCase();
+    const suit = letters[at + 1].toLowerCase();
+    const card = rank + suit;
+    if (!RANKS.includes(rank) || !SUITS.includes(suit)) {
+      return { cards, error: "“" + letters.slice(at, at + 2) + "” is not a card: write a rank (A K Q J T 9 to 2) and a suit (s h d c), as in Ks7d2c" };
+    }
+    if (cards.includes(card)) return { cards, error: card + " is on the board twice; give each card once" };
+    cards.push(card);
+  }
+  const typing = letters.length % 2 === 1;
+  if (cards.length > 5) return { cards, error: "A board has 3, 4 or 5 cards, not " + cards.length };
+  return { cards, error: "", complete: !typing && cards.length >= 3 };
+}
+
+function drawBoardInput() {
+  const board = readBoard($("f-board").value);
+  const chips = $("f-board-cards");
+  chips.replaceChildren(...board.cards.map((card) => cardChip(card)));
+  $("f-board-error").textContent = board.error;
+  $("f-board-error").hidden = !board.error;
+  $("f-board").setAttribute("aria-invalid", String(Boolean(board.error)));
+  return board;
+}
+
+function drawRangeFacts() {
+  const entry = rangeEntry();
+  $("f-range-facts").textContent = entry && !entry.error
+    ? entry.positions[0] + " out of position, " + entry.positions[1] + " in position · pot " + bb(entry.pot) +
+      " · " + bb(entry.stack) + " behind · " + entry.combos[0].toFixed(1) + " and " + entry.combos[1].toFixed(1) + " combos"
+    : "";
+}
+
+function drawTreeFacts() {
+  const name = $("f-tree").value;
+  const entry = rangeEntry();
+  const tree = state.inputs ? state.inputs.trees.find((tree) => tree.name === name) : null;
+  $("f-tree-facts").textContent = name ? (tree && tree.summary) || "" : (entry && entry.config_tree) || "";
+}
+
+function numberField(id, whole) {
+  const text = $(id).value.trim();
+  const value = Number(text);
+  const fine = text !== "" && Number.isFinite(value) && value >= 0 && (!whole || Number.isInteger(value));
+  $(id).setAttribute("aria-invalid", String(!fine));
+  return fine ? value : null;
+}
+
+function request() {
+  return {
+    ranges: $("f-ranges").value,
+    board: $("f-board").value.trim(),
+    tree: $("f-tree").value || null,
+    target: numberField("f-target", false),
+    max_iterations: numberField("f-iterations", true),
+    last_street: $("f-street").value,
+    out: $("f-out").value.trim() || null,
+    force: $("f-force").checked,
+    compressed: $("f-compressed").checked,
+  };
+}
+
+function formChanged() {
+  drawRangeFacts();
+  drawTreeFacts();
+  const board = drawBoardInput();
+  const asked = request();
+  const numbers = asked.target !== null && asked.max_iterations !== null;
+  $("f-numbers-error").hidden = numbers;
+  form.estimate = null;
+  clearTimeout(form.timer);
+  form.latest += 1;
+  if (!asked.ranges || !board.complete || board.error || !numbers) {
+    drawEstimate(null, "");
     return;
   }
+  $("f-estimate").classList.add("loading");
+  const mine = form.latest;
+  form.timer = setTimeout(() => estimate(asked, mine), 350);
+}
+
+async function estimate(asked, mine) {
+  try {
+    const answer = await post("/api/estimate", asked);
+    if (mine === form.latest) drawEstimate(answer, "");
+  } catch (error) {
+    if (mine === form.latest) drawEstimate(null, error.message);
+  }
+}
+
+function drawEstimate(answer, error) {
+  form.estimate = answer;
+  const panel = $("f-estimate");
+  panel.classList.remove("loading");
+  panel.classList.toggle("refused", Boolean(error || (answer && answer.refusal)));
+  panel.replaceChildren();
+  if (error) {
+    panel.append(make("p", "field-error", error));
+  } else if (!answer) {
+    panel.append(make("p", "hint", "Choose the ranges and type a board of 3, 4 or 5 cards to see what the solve would need."));
+  } else {
+    const list = make("dl", "facts");
+    fact(list, "Spot", answer.spot.name);
+    if (answer.hands) {
+      const [oop, ip] = answer.positions || ["OOP", "IP"];
+      fact(list, "Hands", count(answer.hands[0]) + " " + oop + ", " + count(answer.hands[1]) + " " + ip);
+    }
+    if (answer.nodes) {
+      fact(list, "Tree", count(answer.nodes.public) + " nodes, from " + count(answer.nodes.betting) + " in the betting tree");
+    }
+    const memory = answer.memory;
+    if (memory.solve !== null) {
+      let words = size(memory.solve) + " to solve" + (memory.save !== null ? ", " + size(memory.save) + " to save" : "") +
+        ", of " + size(memory.limit);
+      if (memory.lifted) words += ", as if the node limit were lifted";
+      fact(list, "Memory", words);
+    }
+    if (memory.loaded > 0) fact(list, "Loaded", size(memory.loaded) + " of solutions, dropped first if the solve needs the room");
+    fact(list, "Holds", answer.streets.join(", "));
+    fact(list, "File", answer.out + (answer.exists ? (request().force ? ", which will be overwritten" : ", which exists already") : ""));
+    panel.append(list);
+    if (answer.exists && !request().force) {
+      panel.append(make("p", "field-error", "A file of this name is in the folder. Tick Overwrite under Advanced, or give another name."));
+    }
+    if (answer.refusal) {
+      panel.append(make("h2", "", "This spot would be refused"));
+      const reasons = make("ul", "reasons");
+      for (const reason of answer.refusal.reasons) reasons.append(make("li", "", reason[0].toUpperCase() + reason.slice(1) + "."));
+      panel.append(reasons, make("p", "", "To solve it, " + answer.refusal.advice + "."));
+    }
+  }
+  const ready = answer && !answer.refusal && (!answer.exists || request().force);
+  $("f-solve").disabled = !ready;
+}
+
+function drawNotice() {
+  const notice = $("f-notice");
+  notice.hidden = !form.notice;
+  notice.textContent = form.notice || "";
+}
+
+// Puts a solve's inputs back in the form, as the status gives them.
+function fillFrom(run) {
+  if (!run || !state.inputs) return;
+  $("f-ranges").value = run.ranges;
+  fillTrees();
+  $("f-tree").value = run.tree === "config" ? "" : run.tree;
+  $("f-board").value = run.board;
+  $("f-target").value = String(run.target);
+  $("f-iterations").value = String(run.max_iterations);
+  $("f-street").value = run.last_street;
+  $("f-out").value = run.file;
+}
+
+async function showForm() {
+  showView("new");
+  drawNotice();
+  if (!state.inputs) {
+    $("f-estimate").replaceChildren(make("p", "field-error", state.inputsError || "The inputs could not be read."));
+    $("f-solve").disabled = true;
+    return;
+  }
+  formChanged();
+  try {
+    const status = await api("/api/solve");
+    if ((status.state === "running" || status.state === "saving") && location.hash === "#new") replaceHash("solve");
+  } catch (error) {
+    // The form still works; the start says if a solve runs.
+  }
+}
+
+async function solveClicked() {
+  $("f-solve").disabled = true;
+  form.notice = null;
+  drawNotice();
+  try {
+    await post("/api/solve", request());
+    location.hash = "solve";
+  } catch (error) {
+    form.notice = error.message;
+    drawNotice();
+    if (error.answer && error.answer.estimate) drawEstimate(error.answer.estimate, "");
+    else $("f-solve").disabled = false;
+  }
+}
+
+// ---- A running solve ---------------------------------------------------------------------
+
+function stopPolling() {
+  clearInterval(state.poll);
+  state.poll = 0;
+}
+
+function showRunning() {
+  showView("running");
+  stopPolling();
+  poll();
+  state.poll = setInterval(poll, 1000);
+}
+
+async function poll() {
+  let status;
+  try {
+    status = await api("/api/solve");
+  } catch (error) {
+    $("run-error").textContent = "The solve's progress could not be read: " + error.message;
+    $("run-error").hidden = false;
+    return;
+  }
+  $("run-error").hidden = true;
+  if (location.hash !== "#solve") return;
+  drawRunning(status);
+  if (status.state === "done") {
+    stopPolling();
+    form.notice = null;
+    await refreshFiles();
+    Object.assign(state, { file: status.result.file, path: "", hand: "", answer: null });
+    replaceHash(address());
+  } else if (status.state === "failed" || status.state === "cancelled" || status.state === "idle") {
+    stopPolling();
+    form.notice = status.state === "failed" ? "The solve failed: " + status.message
+      : status.state === "cancelled" ? "The solve was cancelled, and nothing was saved." : null;
+    fillFrom(status.solve);
+    replaceHash("new");
+  }
+}
+
+function drawRunning(status) {
+  const run = status.solve;
+  if (!run) return;
+  $("run-title").textContent = (status.state === "saving" ? "Saving " : "Solving ") + run.spot;
+  const facts = $("run-facts");
+  facts.replaceChildren();
+  const last = run.measurements[run.measurements.length - 1];
+  fact(facts, "Elapsed", clock(run.seconds));
+  fact(facts, "Iterations", count(run.iterations) + " of at most " + count(run.max_iterations));
+  fact(facts, "Exploitable", last ? last.percent_of_pot.toFixed(3) + "% of the pot" : "not measured yet");
+  fact(facts, "Target", run.target + "% of the pot");
+  fact(facts, "Memory", size(run.memory));
+  fact(facts, "File", run.file);
+  const rows = $("run-rows");
+  rows.replaceChildren();
+  for (const measured of run.measurements.slice().reverse()) {
+    const row = make("tr");
+    row.append(make("td", "", count(measured.iterations)), make("td", "", measured.percent_of_pot.toFixed(3) + "%"),
+      make("td", "", clock(measured.seconds)));
+    rows.append(row);
+  }
+  $("run-empty").hidden = run.measurements.length > 0;
+  const cancel = $("run-cancel");
+  cancel.disabled = status.state !== "running" || status.cancelling;
+  cancel.textContent = status.cancelling ? "Cancelling at the next measurement" : "Cancel";
+}
+
+async function cancelClicked() {
+  $("run-cancel").disabled = true;
+  try {
+    const status = await post("/api/solve/cancel", {});
+    drawRunning(status);
+  } catch (error) {
+    $("run-error").textContent = error.message;
+    $("run-error").hidden = false;
+  }
+}
+
+// ---- Starting ----------------------------------------------------------------------------
+
+async function start() {
+  try {
+    await refreshFiles();
+  } catch (error) {
+    showError("The list of solutions could not be read: " + error.message);
+    return;
+  }
+  try {
+    state.inputs = await api("/api/inputs");
+    fillInputs();
+  } catch (error) {
+    state.inputsError = "The range files and tree files could not be read: " + error.message;
+  }
+  $("empty-command").textContent =
+    "solver solve-postflop --ranges reference/ranges/a/BTN_vs_BB_SRP_recorded.toml --board Ks7d2c " +
+    "--tree configs/trees/one_bet.toml --out " + state.folder + "/BTN_vs_BB_Ks7d2c.pksol";
+
+  const select = $("files");
   select.addEventListener("change", () => go({ file: select.value }));
   $("show-strategy").addEventListener("click", () => { state.show = "strategy"; draw(); });
   $("show-ev").addEventListener("click", () => { state.show = "ev"; draw(); });
-  window.addEventListener("hashchange", load);
+  for (const id of ["new-solve", "empty-new"]) $(id).addEventListener("click", () => { location.hash = "new"; });
+  $("f-back").addEventListener("click", () => {
+    location.hash = knownFiles().length ? address() : "";
+  });
+  for (const id of ["f-ranges", "f-tree", "f-street", "f-force", "f-compressed"]) {
+    $(id).addEventListener("change", () => {
+      if (id === "f-ranges") fillTrees();
+      formChanged();
+    });
+  }
+  for (const id of ["f-board", "f-target", "f-iterations", "f-out"]) $(id).addEventListener("input", formChanged);
+  $("new").addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!$("f-solve").disabled) solveClicked();
+  });
+  $("run-cancel").addEventListener("click", cancelClicked);
+  window.addEventListener("hashchange", route);
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Backspace" || event.target.closest("select, input, textarea")) return;
+    if ($("main").hidden) return;
     const line = state.answer ? state.answer.node.line : [];
     if (!line.length) return;
     event.preventDefault();
     go({ path: line.length > 1 ? line[line.length - 2].path : "" });
   });
-  load();
+
+  // A solve that runs is shown, whatever the address, in this tab and in any other.
+  try {
+    const status = await api("/api/solve");
+    if (status.state === "running" || status.state === "saving") {
+      replaceHash("solve");
+      return;
+    }
+  } catch (error) {
+    // The page works without it.
+  }
+  route();
 }
 
 start();

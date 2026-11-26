@@ -87,7 +87,7 @@ pub fn parse_gigabytes(text: &str) -> Result<u64, String> {
     }
 }
 
-fn parse_nodes(text: &str) -> Result<u64, String> {
+pub fn parse_nodes(text: &str) -> Result<u64, String> {
     match text.trim().replace(['_', ','], "").parse::<u64>() {
         Ok(0) => Err("a tree has at least its root, so the limit is 1 or more".to_string()),
         Ok(nodes) => Ok(nodes),
@@ -281,6 +281,75 @@ fn fewer_sizes(input: &SpotInput) -> String {
                                  a lower max_raises"
             .to_string(),
     }
+}
+
+/// The estimates of a solve of `input`'s spot under `options`, and of saving its solution with
+/// `save` if it is to be saved, with every limit they are over: what `estimate` prints and what
+/// `solver serve` answers before a solve from the page starts.
+#[derive(Debug, Clone)]
+pub struct Estimates {
+    /// The options the estimates are made under: `options`, or `options` with the node limit
+    /// lifted to the public tree's size when the public tree is over it, so that the estimate
+    /// still says what the tree would need.
+    pub estimated: SolveOptions,
+    /// The solve's estimate; `None` when the betting tree is over the node limit, which leaves
+    /// nothing to estimate.
+    pub solve: Option<MemoryEstimate>,
+    /// The save's estimate, when the solution is to be saved and the solve has an estimate.
+    pub save: Option<SaveMemoryEstimate>,
+    /// The limits the spot is over; empty if a solve would run.
+    pub over: Vec<Over>,
+}
+
+impl Estimates {
+    /// Whether the node limit was lifted to estimate the spot.
+    pub fn lifted(&self, options: &SolveOptions) -> bool {
+        self.estimated.max_nodes != options.max_nodes
+    }
+}
+
+/// [`Estimates`] of `input`'s spot under `options`, with `save` the options of its solution file
+/// if it is to be saved. A solve error that is not a limit, such as a save before the spot's
+/// first street, is an error.
+pub fn estimates(
+    input: &SpotInput,
+    options: &SolveOptions,
+    save: Option<&SaveOptions>,
+) -> anyhow::Result<Estimates> {
+    let mut over = Vec::new();
+    let mut estimated = *options;
+    let solve = match estimate_memory(&input.spot, options) {
+        Ok(estimate) => Some(estimate),
+        Err(SolveError::PublicTreeTooLarge { nodes, limit }) => {
+            over.push(Over::PublicTree { nodes, limit });
+            estimated = SolveOptions {
+                max_nodes: nodes,
+                ..*options
+            };
+            estimate_memory(&input.spot, &estimated).ok()
+        }
+        Err(SolveError::Tree(TreeError::TooLarge { limit })) => {
+            over.push(Over::BettingTree { limit });
+            None
+        }
+        Err(error) => return Err(explain(input, options, error)),
+    };
+    let saving = match (&solve, save) {
+        (Some(_), Some(save)) => Some(
+            estimate_save_memory(&input.spot, &estimated, save)
+                .map_err(|error| explain(input, options, error))?,
+        ),
+        _ => None,
+    };
+    if let Some(estimate) = &solve {
+        over.extend(over_memory(options, estimate, saving.as_ref()));
+    }
+    Ok(Estimates {
+        estimated,
+        solve,
+        save: saving,
+        over,
+    })
 }
 
 /// A solve error as the command reports it: a refusal with what to change, or the error.

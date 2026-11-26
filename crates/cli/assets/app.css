@@ -36,6 +36,9 @@
   --size-m: 14px;
   --size-l: 18px;
   --fast: 160ms ease-out;
+  --target: 40px;
+  --form-width: 720px;
+  --panel-height: 320px;
 }
 
 * { box-sizing: border-box; }
@@ -53,7 +56,7 @@ h1, h2 { margin: 0; font-weight: 600; }
 h1 { font-size: var(--size-l); }
 h2 { font-size: var(--size-s); color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: var(--space-2); }
 
-button, select { font: inherit; color: inherit; }
+button, select, input { font: inherit; color: inherit; }
 button { cursor: pointer; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -69,14 +72,29 @@ button { cursor: pointer; }
 .brand { font-weight: 700; letter-spacing: 0.02em; }
 .file { display: flex; align-items: center; gap: var(--space-2); }
 .label { color: var(--text-dim); font-size: var(--size-s); }
-select {
+select, input[type="text"], input[type="number"] {
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: var(--space-2) var(--space-3);
-  min-height: 40px;
+  min-height: var(--target);
   max-width: 100%;
 }
+input[aria-invalid="true"] { border-color: var(--danger); }
+
+/* The one accent-coloured action of each view: New solve, or Solve. */
+.primary, .secondary {
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-4);
+  min-height: var(--target);
+  font-weight: 600;
+  transition: background var(--fast), opacity var(--fast);
+}
+.primary { background: var(--accent); color: var(--surface-0); border: 1px solid var(--accent); }
+.secondary { background: var(--surface-2); border: 1px solid var(--line); }
+.secondary:hover:not(:disabled) { background: var(--surface-3); }
+.primary:disabled, .secondary:disabled { opacity: 0.45; cursor: not-allowed; }
+.push { margin-left: auto; }
 
 .facts { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-6); margin: 0; }
 .facts div { display: flex; gap: var(--space-2); align-items: baseline; }
@@ -205,8 +223,68 @@ main { padding: var(--space-4); max-width: 1440px; margin: 0 auto; }
 .end dt { color: var(--text-dim); }
 .end dd { margin: 0; font-family: var(--mono); }
 
-.empty { max-width: 720px; margin: var(--space-6) auto; padding: var(--space-4); }
+.empty { max-width: var(--form-width); margin: var(--space-6) auto; padding: var(--space-4); }
 .empty p { color: var(--text-dim); }
+
+.form {
+  max-width: var(--form-width);
+  margin: var(--space-6) auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.field { display: flex; flex-direction: column; gap: var(--space-1); }
+.field > label { font-weight: 600; }
+.hint { color: var(--text-dim); font-size: var(--size-s); margin: 0; }
+.field-error { color: var(--danger); font-size: var(--size-s); margin: 0; }
+.notice {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  color: var(--danger);
+  background: var(--surface-1);
+}
+.row { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
+.advanced { display: flex; flex-direction: column; gap: var(--space-3); }
+.advanced summary {
+  min-height: var(--target);
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  color: var(--text-dim);
+}
+.advanced[open] summary { margin-bottom: var(--space-3); }
+.advanced .field { margin-bottom: var(--space-3); }
+.check { display: flex; align-items: center; gap: var(--space-2); min-height: var(--target); cursor: pointer; }
+.check input { width: var(--space-4); height: var(--space-4); accent-color: var(--accent); }
+.estimate {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  transition: opacity var(--fast);
+}
+.estimate.loading { opacity: 0.45; }
+.estimate.refused { border-color: var(--danger); }
+.estimate h2 { margin: var(--space-2) 0 0; color: var(--danger); }
+.estimate p, .estimate ul { margin: 0; }
+.reasons { padding-left: var(--space-6); }
+.measurements {
+  max-height: var(--panel-height);
+  overflow-y: auto;
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.measurements table { border-collapse: collapse; width: 100%; font-family: var(--mono); }
+.measurements th, .measurements td { text-align: right; padding: var(--space-1) var(--space-3); border-bottom: 1px solid var(--line); }
+.measurements th { position: sticky; top: 0; background: var(--surface-1); color: var(--text-dim); font: var(--size-s) var(--font); }
+.measurements .hint { padding: var(--space-3); }
 pre { background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-3); overflow-x: auto; font: var(--size-s) var(--mono); white-space: pre-wrap; }
 
 @media (max-width: 960px) {

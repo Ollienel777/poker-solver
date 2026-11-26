@@ -8,11 +8,10 @@
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
-use pk_game::{Street, TreeError};
-use pk_postflop::{SolveError, SolveOptions, estimate_memory, estimate_save_memory};
+use pk_game::Street;
 
 use crate::format::{self, bytes, threads};
-use crate::limits::{self, LimitArgs, Over, Refusal};
+use crate::limits::{self, LimitArgs, Refusal};
 use crate::save;
 use crate::spot_input::{self, SpotArgs};
 
@@ -52,37 +51,18 @@ pub fn run(args: &Args) -> Result<()> {
     };
     format::print_spot(&input);
 
-    let mut over = Vec::new();
-    // The options the estimates are made under: these, or these with the node limit lifted.
-    let mut estimated = options;
-    let estimate = match estimate_memory(&input.spot, &options) {
-        Ok(estimate) => Some(estimate),
-        Err(SolveError::PublicTreeTooLarge { nodes, limit }) => {
-            over.push(Over::PublicTree { nodes, limit });
-            estimated = SolveOptions {
-                max_nodes: nodes,
-                ..options
-            };
-            estimate_memory(&input.spot, &estimated).ok()
-        }
-        Err(SolveError::Tree(TreeError::TooLarge { limit })) => {
-            over.push(Over::BettingTree { limit });
-            None
-        }
-        Err(error) => return Err(limits::explain(&input, &options, error)),
-    };
-
-    if let Some(estimate) = &estimate {
+    let estimates = limits::estimates(&input, &options, save_options.as_ref())?;
+    if let Some(estimate) = &estimates.solve {
         format::print_sizes(&input, estimate);
         let storage = if options.compressed_storage {
             "16-bit storage"
         } else {
             "f32 storage"
         };
-        let condition = if estimated.max_nodes == options.max_nodes {
-            ""
-        } else {
+        let condition = if estimates.lifted(&options) {
             ", as if the node limit were lifted"
+        } else {
+            ""
         };
         println!();
         println!(
@@ -91,22 +71,16 @@ pub fn run(args: &Args) -> Result<()> {
             threads(estimate.threads)
         );
         println!("{estimate}");
-        let saving = match &save_options {
-            Some(save_options) => {
-                let saving = estimate_save_memory(&input.spot, &estimated, save_options)
-                    .map_err(|error| limits::explain(&input, &options, error))?;
-                println!();
-                println!(
-                    "Memory saving its solution would need, in a file holding {}{condition}:",
-                    save::streets(&input.spot, save_options)
-                );
-                println!("{saving}");
-                Some(saving)
-            }
-            None => None,
-        };
-        over.extend(limits::over_memory(&options, estimate, saving.as_ref()));
+        if let (Some(save_options), Some(saving)) = (&save_options, &estimates.save) {
+            println!();
+            println!(
+                "Memory saving its solution would need, in a file holding {}{condition}:",
+                save::streets(&input.spot, save_options)
+            );
+            println!("{saving}");
+        }
     }
+    let over = estimates.over;
 
     println!();
     if over.is_empty() {

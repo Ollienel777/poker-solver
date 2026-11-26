@@ -107,7 +107,7 @@ pub struct ExploitabilityJson {
 }
 
 impl ExploitabilityJson {
-    fn new(exploitability: &Exploitability) -> ExploitabilityJson {
+    pub fn new(exploitability: &Exploitability) -> ExploitabilityJson {
         ExploitabilityJson {
             percent_of_pot: exploitability.percent_of_pot,
             chips: exploitability.chips,
@@ -136,7 +136,7 @@ pub struct SpotJson {
 }
 
 impl SpotJson {
-    fn new(spot: &Spot) -> SpotJson {
+    pub fn new(spot: &Spot) -> SpotJson {
         let tree = &spot.tree;
         let streets = [
             (Street::Flop, &tree.flop),
@@ -618,7 +618,7 @@ fn street(street: Street) -> &'static str {
     street.name()
 }
 
-fn stop(stop: StopReason) -> &'static str {
+pub fn stop(stop: StopReason) -> &'static str {
     match stop {
         StopReason::Target => "target",
         StopReason::IterationCap => "iteration_cap",

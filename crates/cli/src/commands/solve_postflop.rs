@@ -112,9 +112,21 @@ impl Args {
 }
 
 fn parse_target(text: &str) -> Result<f64, String> {
-    match text.trim().trim_end_matches('%').parse::<f64>() {
-        Ok(target) if target.is_finite() && target >= 0.0 => Ok(target),
-        _ => Err("give a percent of the pot from 0 up, such as 0.3".to_string()),
+    text.trim()
+        .trim_end_matches('%')
+        .parse::<f64>()
+        .map_err(|_| TARGET_HELP.to_string())
+        .and_then(check_target)
+}
+
+const TARGET_HELP: &str = "give a percent of the pot from 0 up, such as 0.3";
+
+/// A target as a solve takes it: a finite percent of the pot, 0 or more.
+pub fn check_target(target: f64) -> Result<f64, String> {
+    if target.is_finite() && target >= 0.0 {
+        Ok(target)
+    } else {
+        Err(TARGET_HELP.to_string())
     }
 }
 

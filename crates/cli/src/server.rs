@@ -11,11 +11,16 @@
 //! the one loaded loads the file again, deeper. A file written again since it was loaded is
 //! loaded again.
 //!
+//! A solve started from the page ([`solving`]) runs on a thread of its own, one at a time, and
+//! holds back its estimate of the same memory budget while it runs, the loaded solutions dropped
+//! to make room for it.
+//!
 //! A request never takes the server down: an error is a reply, a JSON object with one line of
 //! `error`, and a panic while answering is caught and replied to as an error, the loaded
 //! solutions dropped in case it left them half-changed.
 
 pub mod cache;
+pub mod solving;
 
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
@@ -33,6 +38,7 @@ use crate::format::bytes;
 use crate::json::{FileJson, NodeAnswer};
 use crate::view::{self, FileView};
 use cache::Cache;
+use solving::{EstimateJson, Inputs, Job, Run, SolveRequest};
 
 /// The page's files, built into the binary: each one's path under `/`, its media type and its
 /// bytes. `/` serves `index.html`. A file added to `crates/cli/assets/` is served once it has a
@@ -111,11 +117,13 @@ impl Reply {
 /// An error reply on its way out of an endpoint.
 type Answer<T> = Result<T, Reply>;
 
-/// What the server shares between requests: the folder it serves and the solutions loaded from
-/// it. #94's solves will be held here too.
+/// What the server shares between requests: the folder it serves, the solutions loaded from it,
+/// where a solve's inputs come from, and the solve, which its own thread shares too.
 pub struct State {
     folder: PathBuf,
-    loaded: Mutex<Cache<Loaded>>,
+    loaded: Arc<Mutex<Cache<Loaded>>>,
+    inputs: Inputs,
+    job: Arc<Mutex<Job>>,
 }
 
 /// A solution loaded from a file, with what it was loaded from.
@@ -134,27 +142,31 @@ struct Stamp {
 
 impl State {
     /// The state of a server of `folder`, holding loaded solutions of at most `budget` bytes by
-    /// their estimates.
+    /// their estimates, with a solve's inputs from the default folders.
+    #[cfg(test)]
     pub fn new(folder: PathBuf, budget: u64) -> State {
+        State::with_inputs(folder, budget, Inputs::default())
+    }
+
+    /// The state of a server of `folder` under `budget`, with a solve's inputs from `inputs`.
+    pub fn with_inputs(folder: PathBuf, budget: u64, inputs: Inputs) -> State {
         State {
             folder,
-            loaded: Mutex::new(Cache::new(budget)),
+            loaded: Arc::new(Mutex::new(Cache::new(budget))),
+            inputs,
+            job: Arc::new(Mutex::new(Job::default())),
         }
     }
 
-    /// The reply to a request with `method` for `url`, a path and a query. A panic while
-    /// answering is caught and replied to with status 500.
-    pub fn answer(&self, method: &str, url: &str) -> Reply {
-        match panic::catch_unwind(AssertUnwindSafe(|| self.route(method, url))) {
+    /// The reply to a request with `method` for `url`, a path and a query, with `body`. A panic
+    /// while answering is caught and replied to with status 500.
+    pub fn answer(&self, method: &str, url: &str, body: &[u8]) -> Reply {
+        match panic::catch_unwind(AssertUnwindSafe(|| self.route(method, url, body))) {
             Ok(reply) => reply,
             Err(payload) => {
                 // The loaded solutions may be half-changed: drop them all.
                 self.loaded().clear();
-                let what = payload
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| payload.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "a panic".to_string());
+                let what = panic_message(payload.as_ref());
                 Reply::error(
                     500,
                     format!(
@@ -169,31 +181,44 @@ impl State {
     /// The loaded solutions. A request that panicked while holding them left them poisoned; they
     /// are emptied then, since the panic may have left them half-changed.
     fn loaded(&self) -> MutexGuard<'_, Cache<Loaded>> {
-        self.loaded.lock().unwrap_or_else(|poisoned| {
-            let mut cache = poisoned.into_inner();
-            cache.clear();
-            cache
-        })
+        lock_cache(&self.loaded)
     }
 
     /// Every endpoint, by method and path.
-    fn route(&self, method: &str, url: &str) -> Reply {
+    fn route(&self, method: &str, url: &str, body: &[u8]) -> Reply {
         let (path, query) = url.split_once('?').unwrap_or((url, ""));
-        if method != "GET" {
+        let takes = match path {
+            "/api/estimate" | "/api/solve/cancel" => "POST",
+            "/api/solve" if method == "POST" => "POST",
+            _ => "GET",
+        };
+        if method != takes {
             return Reply::error(
                 405,
-                format!("{method} {path}: the server answers GET requests only"),
+                format!(
+                    "{method} {path}: {path} takes {takes}; the server answers GET, and POST for \
+                     /api/estimate, /api/solve and /api/solve/cancel"
+                ),
             );
         }
         let query = match Query::parse(query) {
             Ok(query) => query,
             Err(reply) => return reply,
         };
-        let answer = match path {
-            "/api/files" => query.only(&[]).map(|()| self.files()),
-            "/api/node" => query
+        let answer = match (method, path) {
+            ("GET", "/api/files") => query.only(&[]).map(|()| self.files()),
+            ("GET", "/api/node") => query
                 .only(&["file", "path", "hand"])
                 .and_then(|()| self.node(&query)),
+            ("GET", "/api/inputs") => query
+                .only(&[])
+                .map(|()| solving::inputs(&self.inputs, self.loaded().budget())),
+            ("POST", "/api/estimate") => query.only(&[]).and_then(|()| self.estimate(body)),
+            ("POST", "/api/solve") => query.only(&[]).and_then(|()| self.start(body)),
+            ("GET", "/api/solve") => query
+                .only(&[])
+                .map(|()| Reply::json(&solving::lock(&self.job).status())),
+            ("POST", "/api/solve/cancel") => query.only(&[]).and_then(|()| self.cancel()),
             _ => match asset(path) {
                 Some(asset) => Ok(Reply {
                     status: 200,
@@ -205,7 +230,8 @@ impl State {
                     404,
                     format!(
                         "there is nothing at {path}: the page is at /, the solution files at \
-                         /api/files and a node at /api/node?file=NAME&path=PATH"
+                         /api/files, a node at /api/node?file=NAME&path=PATH, and a solve's \
+                         inputs at /api/inputs"
                     ),
                 )),
             },
@@ -304,14 +330,7 @@ impl State {
     /// name, one with a folder in it, is refused with 400, and one that is not a solution file
     /// of the folder with 404.
     fn file_path(&self, name: &str) -> Answer<PathBuf> {
-        let plain = !name.is_empty()
-            && name != "."
-            && name != ".."
-            && !name.contains(['/', '\\', ':', '\0'])
-            && !name.contains("..")
-            && !name.chars().any(char::is_control)
-            && Path::new(name).is_relative();
-        if !plain {
+        if !plain(name) {
             return Err(Reply::error(
                 400,
                 format!(
@@ -365,16 +384,25 @@ impl State {
         })?;
         let mut notes: Vec<String> = Vec::new();
         let dropped = loaded.make_room(size).map_err(|too_large| {
-            Reply::error(
-                503,
+            let message = if too_large.reserved > 0 && too_large.bytes <= too_large.budget {
+                format!(
+                    "file `{name}`: its solution up to the {last} needs about {} loaded, more \
+                     than the {} that the running solve leaves of the {} that --max-memory lets \
+                     the server hold; open it once the solve has ended",
+                    bytes(too_large.bytes),
+                    bytes(too_large.budget - too_large.reserved),
+                    bytes(too_large.budget)
+                )
+            } else {
                 format!(
                     "file `{name}`: its solution up to the {last} needs about {} loaded, over \
                      the {} that --max-memory lets the server hold; restart it with a higher \
                      --max-memory, if the machine has the memory",
                     bytes(too_large.bytes),
                     bytes(too_large.budget)
-                ),
-            )
+                )
+            };
+            Reply::error(503, message)
         })?;
         notes.extend(
             dropped
@@ -401,6 +429,149 @@ impl State {
         ));
         Ok((held, notes))
     }
+
+    /// `POST /api/estimate`: the solve the body asks for, checked and estimated, as
+    /// `solver estimate` gives it, whether or not it would be refused; nothing is started.
+    fn estimate(&self, body: &[u8]) -> Answer<Reply> {
+        let request = SolveRequest::parse(body)?;
+        let budget = self.loaded().budget();
+        let prepared = solving::prepare(&self.folder, &self.inputs, budget, request)?;
+        let (held, reserved) = {
+            let loaded = self.loaded();
+            (loaded.held(), loaded.reserved())
+        };
+        Ok(Reply::json(&EstimateJson::new(&prepared, held, reserved)))
+    }
+
+    /// `POST /api/solve`: starts the solve the body asks for, after the checks and estimates of
+    /// `/api/estimate`, on a thread of its own, and answers 202 with its status. Refuses with 409
+    /// while another solve runs, with 400 a file that exists unless `force` is given, and with
+    /// 422 a spot over a limit, with the estimate.
+    fn start(&self, body: &[u8]) -> Answer<Reply> {
+        let request = SolveRequest::parse(body)?;
+        {
+            let job = solving::lock(&self.job);
+            if job.busy() {
+                return Err(Reply::error(409, job.busy_message()));
+            }
+        }
+        let budget = self.loaded().budget();
+        let prepared = solving::prepare(&self.folder, &self.inputs, budget, request)?;
+        if prepared.exists && !prepared.request.force {
+            return Err(Reply::error(
+                400,
+                format!(
+                    "out `{}` already exists in the folder; ask to overwrite it, or give another \
+                     name",
+                    prepared.out
+                ),
+            ));
+        }
+        let estimate = EstimateJson::new(&prepared, self.loaded().held(), 0);
+        if let Some(refusal) = &estimate.refusal {
+            #[derive(Serialize)]
+            struct Refused<'a> {
+                error: String,
+                estimate: &'a EstimateJson,
+            }
+            let error = refusal
+                .message
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut reply = Reply::json(&Refused {
+                error,
+                estimate: &estimate,
+            });
+            reply.status = 422;
+            return Err(reply);
+        }
+        let memory = prepared.memory();
+        let mut notes: Vec<String> = Vec::new();
+        let dropped = self.loaded().reserve(memory).map_err(|too_large| {
+            Reply::error(
+                503,
+                format!(
+                    "the solve needs about {} by its estimate, over the {} that --max-memory \
+                     lets the server hold",
+                    bytes(too_large.bytes),
+                    bytes(too_large.budget)
+                ),
+            )
+        })?;
+        notes.extend(
+            dropped
+                .iter()
+                .map(|old| format!("dropped `{old}` to make room for the solve")),
+        );
+        let run = Run::new(&prepared, &estimate);
+        let begun = solving::lock(&self.job).begin(run);
+        let cancel = match begun {
+            Ok(cancel) => cancel,
+            Err(message) => {
+                self.loaded().release();
+                return Err(Reply::error(409, message));
+            }
+        };
+        notes.push(format!(
+            "solving {} into `{}`, holding about {} of memory by estimate",
+            prepared.input.spot.name,
+            prepared.out,
+            bytes(memory)
+        ));
+        let cache = Arc::clone(&self.loaded);
+        solving::spawn(
+            prepared,
+            Arc::clone(&self.job),
+            cancel,
+            self.inputs.log.clone(),
+            move || lock_cache(&cache).release(),
+        );
+        let mut reply = Reply::json(&solving::lock(&self.job).status());
+        reply.status = 202;
+        reply.notes = notes;
+        Ok(reply)
+    }
+
+    /// `POST /api/solve/cancel`: asks the running solve to stop at its next measurement, saving
+    /// nothing, and answers with its status. Refuses with 409 when no solve runs, or once it is
+    /// being saved.
+    fn cancel(&self) -> Answer<Reply> {
+        let mut job = solving::lock(&self.job);
+        job.cancel().map_err(|message| Reply::error(409, message))?;
+        Ok(Reply::json(&job.status()))
+    }
+}
+
+/// The loaded solutions. A request that panicked while holding them left them poisoned; they
+/// are emptied then, since the panic may have left them half-changed.
+fn lock_cache(cache: &Mutex<Cache<Loaded>>) -> MutexGuard<'_, Cache<Loaded>> {
+    cache.lock().unwrap_or_else(|poisoned| {
+        let mut cache = poisoned.into_inner();
+        cache.clear();
+        cache
+    })
+}
+
+/// What a panic said, as far as its payload is text.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic".to_string())
+}
+
+/// Whether `name` is a plain file name, with no folder in it: not empty, `.` or `..`, with no
+/// `/`, `\`, `:`, `..`, NUL or control character, and not absolute (DECISIONS P85).
+fn plain(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', ':', '\0'])
+        && !name.contains("..")
+        && !name.chars().any(char::is_control)
+        && Path::new(name).is_relative()
 }
 
 /// The asset served at `path`.
@@ -617,25 +788,34 @@ mod tests {
     #[test]
     fn a_route_that_is_not_an_endpoint_or_asset_is_not_found() {
         let state = State::new(std::env::temp_dir(), 1);
-        let page = state.answer("GET", "/");
+        let page = state.answer("GET", "/", b"");
         assert_eq!(
             (page.status, page.content_type),
             (200, ASSETS[0].content_type)
         );
         assert_eq!(page.body, ASSETS[0].bytes);
-        assert_eq!(state.answer("GET", "/index.html").body, ASSETS[0].bytes);
-        assert_eq!(state.answer("GET", "/nothing").status, 404);
-        assert_eq!(state.answer("GET", "/../Cargo.toml").status, 404);
-        assert_eq!(state.answer("POST", "/api/files").status, 405);
-        assert_eq!(state.answer("GET", "/api/files?x=1").status, 400);
-        assert_eq!(state.answer("GET", "/api/node").status, 400);
+        assert_eq!(
+            state.answer("GET", "/index.html", b"").body,
+            ASSETS[0].bytes
+        );
+        assert_eq!(state.answer("GET", "/nothing", b"").status, 404);
+        assert_eq!(state.answer("GET", "/../Cargo.toml", b"").status, 404);
+        assert_eq!(state.answer("POST", "/api/files", b"").status, 405);
+        assert_eq!(state.answer("GET", "/api/estimate", b"").status, 405);
+        assert_eq!(state.answer("PUT", "/api/solve", b"").status, 405);
+        assert_eq!(state.answer("GET", "/api/solve/cancel", b"").status, 405);
+        assert_eq!(state.answer("POST", "/api/estimate", b"{").status, 400);
+        assert_eq!(state.answer("POST", "/api/solve/cancel", b"").status, 409);
+        assert_eq!(state.answer("GET", "/api/solve", b"").status, 200);
+        assert_eq!(state.answer("GET", "/api/files?x=1", b"").status, 400);
+        assert_eq!(state.answer("GET", "/api/node", b"").status, 400);
     }
 
     #[test]
     fn the_page_is_served_whole() {
         let state = State::new(std::env::temp_dir(), 1);
         for asset in ASSETS {
-            let reply = state.answer("GET", &format!("/{}", asset.path));
+            let reply = state.answer("GET", &format!("/{}", asset.path), b"");
             assert_eq!(
                 (reply.status, reply.content_type),
                 (200, asset.content_type),
