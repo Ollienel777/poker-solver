@@ -3,35 +3,65 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Solution files</title>
-<style>
-  body { font-family: system-ui, sans-serif; margin: 2rem; }
-  pre { white-space: pre-wrap; }
-</style>
+<title>Solver</title>
+<link rel="stylesheet" href="app.css">
 </head>
 <body>
-<!-- A placeholder for the viewer's page (#93): it lists the folder's solution files from
-     /api/files, to show that the server and its API are wired. -->
-<h1>Solution files</h1>
-<p id="folder">Loading the list...</p>
-<pre id="files"></pre>
-<script>
-  fetch("/api/files")
-    .then((response) => response.json())
-    .then((list) => {
-      document.getElementById("folder").textContent =
-        list.files.length + " solution files in " + list.folder;
-      document.getElementById("files").textContent = list.files
-        .map((file) =>
-          file.error
-            ? file.name + ": " + file.error
-            : file.name + "  " + file.spot.name + "  " + file.spot.board.join("") +
-              "  held: " + file.streets.join(", "))
-        .join("\n");
-    })
-    .catch((error) => {
-      document.getElementById("folder").textContent = "Could not list the files: " + error;
-    });
-</script>
+<!-- The viewer's page (#93): app.js fills it from /api/files and /api/node, and app.css holds
+     every colour and size. docs/ARCHITECTURE.md, "The viewer's JSON", is what it reads. -->
+<header class="bar">
+  <span class="brand">Solver</span>
+  <label class="file">
+    <span class="label">Solution</span>
+    <select id="files" aria-label="Solution file"></select>
+  </label>
+  <dl class="facts" id="facts"></dl>
+</header>
+
+<p class="banner" id="banner" role="alert" hidden></p>
+
+<main id="main" hidden>
+  <section class="where" aria-label="Where in the hand">
+    <div class="board" id="board" aria-label="Board"></div>
+    <dl class="facts" id="table"></dl>
+    <nav class="line" id="line" aria-label="Action line"></nav>
+  </section>
+
+  <div class="study">
+    <section class="left" aria-label="Range">
+      <div class="left-head">
+        <h1 id="title"></h1>
+        <div class="switch" id="switch" role="group" aria-label="What the grid shows">
+          <button type="button" id="show-strategy" aria-pressed="true">Strategy</button>
+          <button type="button" id="show-ev" aria-pressed="false">EV</button>
+        </div>
+      </div>
+      <div class="grid" id="grid" aria-label="Hands"></div>
+      <div class="deal" id="deal" hidden></div>
+      <div class="end" id="end" hidden></div>
+      <p class="note" id="note" hidden></p>
+    </section>
+
+    <aside class="right" id="side">
+      <section aria-label="Actions">
+        <h2>Actions</h2>
+        <div class="bar-mix" id="mix"></div>
+        <div class="actions" id="actions"></div>
+      </section>
+      <section aria-label="Hand">
+        <h2 id="hand-title">Hand</h2>
+        <div class="hand" id="hand"></div>
+      </section>
+    </aside>
+  </div>
+</main>
+
+<section class="empty" id="empty" hidden>
+  <h1>No solutions in this folder yet</h1>
+  <p>Solve a spot and save it here, then reload this page:</p>
+  <pre id="empty-command"></pre>
+</section>
+
+<script src="app.js"></script>
 </body>
 </html>

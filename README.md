@@ -113,7 +113,7 @@ Verdict      A and B agree within the tolerances: every check passes
 target/release/solver serve solutions
 ```
 
-It prints the address, `http://127.0.0.1:8080/` unless `--port` says another, and a line per request. The page there is a placeholder that lists the files for now; the viewer's page is being built against its JSON, `/api/files` for the list and `/api/node?file=BTN_vs_BB_SRP_Ks7d2c.pksol&path=x+b50` for a node, which is what `inspect --json` prints ([ARCHITECTURE.md](docs/ARCHITECTURE.md#serve)). Solutions stay loaded between requests, up to `--max-memory`, 10 GB by default.
+It prints the address, `http://127.0.0.1:8080/` unless `--port` says another, and a line per request. The page there shows a solution a node at a time: the board, the action line as steps to click, the actions with their frequencies, a 13x13 grid with each hand's cell coloured by what the hand does, or by its EV, the combos of a hand clicked, and the cards to choose from where the turn or the river is dealt. It reads the server's JSON, `/api/files` for the list and `/api/node?file=BTN_vs_BB_SRP_Ks7d2c.pksol&path=x+b50` for a node, which is what `inspect --json` prints ([ARCHITECTURE.md](docs/ARCHITECTURE.md#serve)). Solutions stay loaded between requests, up to `--max-memory`, 10 GB by default.
 
 ## Docs
 

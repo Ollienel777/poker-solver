@@ -37,11 +37,23 @@ use cache::Cache;
 /// The page's files, built into the binary: each one's path under `/`, its media type and its
 /// bytes. `/` serves `index.html`. A file added to `crates/cli/assets/` is served once it has a
 /// line here.
-const ASSETS: &[Asset] = &[Asset {
-    path: "index.html",
-    content_type: "text/html; charset=utf-8",
-    bytes: include_bytes!("../assets/index.html"),
-}];
+const ASSETS: &[Asset] = &[
+    Asset {
+        path: "index.html",
+        content_type: "text/html; charset=utf-8",
+        bytes: include_bytes!("../assets/index.html"),
+    },
+    Asset {
+        path: "app.css",
+        content_type: "text/css; charset=utf-8",
+        bytes: include_bytes!("../assets/app.css"),
+    },
+    Asset {
+        path: "app.js",
+        content_type: "text/javascript; charset=utf-8",
+        bytes: include_bytes!("../assets/app.js"),
+    },
+];
 
 struct Asset {
     path: &'static str,
@@ -617,5 +629,34 @@ mod tests {
         assert_eq!(state.answer("POST", "/api/files").status, 405);
         assert_eq!(state.answer("GET", "/api/files?x=1").status, 400);
         assert_eq!(state.answer("GET", "/api/node").status, 400);
+    }
+
+    #[test]
+    fn the_page_is_served_whole() {
+        let state = State::new(std::env::temp_dir(), 1);
+        for asset in ASSETS {
+            let reply = state.answer("GET", &format!("/{}", asset.path));
+            assert_eq!(
+                (reply.status, reply.content_type),
+                (200, asset.content_type),
+                "{}",
+                asset.path
+            );
+            assert_eq!(reply.body, asset.bytes, "{}", asset.path);
+        }
+        // Every file the page asks for by `href` or `src` is one the server holds.
+        let page = std::str::from_utf8(ASSETS[0].bytes).unwrap();
+        let mut asked = 0;
+        for attribute in ["href=\"", "src=\""] {
+            for part in page.split(attribute).skip(1) {
+                let name = &part[..part.find('"').unwrap()];
+                assert!(
+                    asset(&format!("/{name}")).is_some(),
+                    "the page asks for `{name}`"
+                );
+                asked += 1;
+            }
+        }
+        assert_eq!(asked, ASSETS.len() - 1);
     }
 }
