@@ -233,7 +233,7 @@ pub fn default_config_path(name: &str) -> PathBuf {
 }
 
 /// The config of the range file at `ranges`: the one `--config` names, or the default.
-fn read_config(
+pub fn read_config(
     file: &RangeFile,
     ranges: &Path,
     given: Option<&Path>,

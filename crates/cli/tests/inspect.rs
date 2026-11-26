@@ -721,6 +721,176 @@ fn the_dump_is_the_files_solution_with_its_evs() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The JSON
+
+/// `inspect --json` of `file`, with `options`, read back.
+fn inspect_json(file: &Path, options: &[&str]) -> serde_json::Value {
+    let mut all = vec!["--json"];
+    all.extend(options);
+    let run = inspect(file, &all);
+    serde_json::from_str(&run.stdout).expect("inspect --json prints JSON")
+}
+
+/// `inspect --json` of a river file holds the library's numbers: the file's facts from its
+/// header, and at a decision, with and without a breakdown, and at the end of the hand, every
+/// number exactly.
+#[test]
+fn the_json_of_a_river_file_holds_the_librarys_numbers() {
+    let folder = scratch("inspect-json-river");
+    let file = folder.join("river.pksol");
+    solve_to(
+        &[
+            "--ranges",
+            RANGES,
+            "--board",
+            "Ks7d2c9h3s",
+            "--tree",
+            RIVER_TREE,
+        ],
+        &file,
+        "river",
+    );
+    let saved = SavedSolution::load(&file).unwrap();
+    let header = saved.header();
+    let solution = saved.solution();
+
+    let answer = inspect_json(&file, &[]);
+    let about = &answer["file"];
+    assert_eq!(about["name"], "river.pksol");
+    assert_eq!(about["bytes"], fs::metadata(&file).unwrap().len());
+    assert_eq!(about["spot"]["name"], "BTN_vs_BB_SRP_Ks9h7d3s2c");
+    assert_eq!(
+        about["spot"]["board"],
+        serde_json::json!(["Ks", "9h", "7d", "3s", "2c"])
+    );
+    assert_eq!(about["spot"]["pot"], 550);
+    assert_eq!(about["spot"]["stack"], 9750);
+    assert_eq!(about["spot"]["rake_cap"], 600);
+    assert_eq!(about["streets"], serde_json::json!(["river"]));
+    assert_eq!(about["complete"], true);
+    assert_eq!(about["nodes"], header.nodes);
+    assert_eq!(about["hands"], serde_json::json!(header.hands));
+    assert_eq!(about["iterations"], header.iterations);
+    assert_eq!(
+        about["exploitability"]["percent_of_pot"].as_f64(),
+        Some(header.exploitability.percent_of_pot)
+    );
+    assert_eq!(f64s(&about["values"]), header.exploitability.values);
+
+    let node = &answer["node"];
+    assert_eq!(node["path"], "");
+    assert_eq!(node["line"], serde_json::json!([]));
+    assert_eq!(node["pot"], 550);
+    assert!(node["river"].is_null());
+    check_json_decision(node, solution, 0, &file_evs(&saved, 0), 1.0);
+
+    // IP facing the half-pot bet, with the combos of a class.
+    let at = solution.game().find("b50").unwrap();
+    let class = solution.range_view_classes(at).unwrap()[0]
+        .class
+        .to_string();
+    let answer = inspect_json(&file, &["--node", "b50", "--hand", &class]);
+    let node = &answer["node"];
+    assert_eq!(node["put_in"], serde_json::json!([275, 0]));
+    assert_eq!(node["behind"], serde_json::json!([9475, 9750]));
+    assert_eq!(node["line"][0]["actor"], "oop");
+    assert_eq!(node["hand"]["query"], class.as_str());
+    assert!(!node["hand"]["rows"].as_array().unwrap().is_empty());
+    check_json_decision(node, solution, at, &file_evs(&saved, at), 1.0);
+    let fold = &node["actions"][0];
+    assert_eq!(fold["token"], "f");
+    assert_eq!(
+        fold["next"],
+        serde_json::json!({"kind": "ends", "outcome": "fold", "winner": "oop"})
+    );
+
+    // The end of the hand.
+    let answer = inspect_json(&file, &["--node", "b50 f"]);
+    let end = solution.game().find("b50 f").unwrap();
+    let Some(Payoff::Fold(values)) = solution.game().payoff(end) else {
+        panic!("a fold");
+    };
+    assert_eq!(answer["node"]["kind"], "end");
+    assert_eq!(answer["node"]["winner"], "oop");
+    assert_eq!(f64s(&answer["node"]["payoff"]["values"]), values);
+    fs::remove_dir_all(&folder).unwrap();
+}
+
+/// `inspect --json` of a turn file without its river holds the library's numbers: a turn
+/// decision from the file, a deal with each card's path, and a river decision solved again,
+/// against the library's own solve of that river.
+#[test]
+fn the_json_of_a_turn_file_without_its_river_holds_the_librarys_numbers() {
+    let folder = scratch("inspect-json-turn");
+    let (_, partial) = turn_files(&folder);
+    let saved = SavedSolution::load(&partial).unwrap();
+    let game = saved.solution().game();
+
+    let answer = inspect_json(&partial, &["--node", "b50"]);
+    assert_eq!(answer["file"]["complete"], false);
+    let at = game.find("b50").unwrap();
+    check_json_decision(
+        &answer["node"],
+        saved.solution(),
+        at,
+        &file_evs(&saved, at),
+        1.0,
+    );
+
+    let answer = inspect_json(&partial, &["--node", "x x"]);
+    let node = &answer["node"];
+    assert_eq!(node["kind"], "deal");
+    assert_eq!(node["street"], "river");
+    let deal = game.find("x x").unwrap();
+    let cards: Vec<(String, String)> = node["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|card| {
+            (
+                card["card"].as_str().unwrap().to_string(),
+                card["path"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let expected: Vec<(String, String)> = game
+        .outcomes(deal)
+        .iter()
+        .map(|card| (card.to_string(), format!("x x {card}")))
+        .collect();
+    assert_eq!(cards, expected);
+
+    let (start, path) = ("x x 3c", "x x 3c x");
+    let start_node = game.find(start).unwrap();
+    let (river, solved) = river_solved(&saved, start_node);
+    let at = solved.game().find("x").unwrap();
+    let values = node_values(solved.game(), solved.strategy());
+    let put_in = f64::from(river.put_in[1]);
+    let ev = |hand: usize| values.get(at).unwrap()[hand].map(|ev| ev - put_in);
+    let answer = inspect_json(&partial, &["--node", path, "--hand", "AhTh"]);
+    let node = &answer["node"];
+    assert_eq!(
+        node["board"],
+        serde_json::json!(["Kh", "9c", "7d", "2s", "3c"])
+    );
+    assert_eq!(node["river"]["start"], start);
+    assert_eq!(node["river"]["iterations"], solved.iterations());
+    assert_eq!(
+        node["river"]["exploitability"]["percent_of_pot"].as_f64(),
+        Some(solved.exploitability().percent_of_pot)
+    );
+    assert_eq!(node["river"]["target"].as_f64(), Some(RIVER_TARGET));
+    check_json_decision(
+        node,
+        &solved,
+        at,
+        &ev,
+        saved.solution().reach_probability(start_node),
+    );
+    fs::remove_dir_all(&folder).unwrap();
+}
+
+// ---------------------------------------------------------------------------------------------
 // Errors
 
 #[test]

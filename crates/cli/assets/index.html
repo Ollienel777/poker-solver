@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solver</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<!-- The viewer's page (#93): app.js fills it from /api/files and /api/node, and app.css holds
+     every colour and size. docs/ARCHITECTURE.md, "The viewer's JSON", is what it reads. The
+     form of a new solve and the solve running (#94) are views of their own, #new and #solve. -->
+<header class="bar">
+  <span class="brand">Solver</span>
+  <label class="file" id="file-pick">
+    <span class="label">Solution</span>
+    <select id="files" aria-label="Solution file"></select>
+  </label>
+  <dl class="facts" id="facts"></dl>
+  <button type="button" class="primary push" id="new-solve" hidden>New solve</button>
+</header>
+
+<p class="banner" id="banner" role="alert" hidden></p>
+
+<main id="main" hidden>
+  <section class="where" aria-label="Where in the hand">
+    <div class="board" id="board" aria-label="Board"></div>
+    <dl class="facts" id="table"></dl>
+    <nav class="line" id="line" aria-label="Action line"></nav>
+  </section>
+
+  <div class="study">
+    <section class="left" aria-label="Range">
+      <div class="left-head">
+        <h1 id="title"></h1>
+        <div class="switch" id="switch" role="group" aria-label="What the grid shows">
+          <button type="button" id="show-strategy" aria-pressed="true">Strategy</button>
+          <button type="button" id="show-ev" aria-pressed="false">EV</button>
+        </div>
+      </div>
+      <div class="grid" id="grid" aria-label="Hands"></div>
+      <div class="deal" id="deal" hidden></div>
+      <div class="end" id="end" hidden></div>
+      <p class="note" id="note" hidden></p>
+    </section>
+
+    <aside class="right" id="side">
+      <section aria-label="Actions">
+        <h2>Actions</h2>
+        <div class="bar-mix" id="mix"></div>
+        <div class="actions" id="actions"></div>
+      </section>
+      <section aria-label="Hand">
+        <h2 id="hand-title">Hand</h2>
+        <div class="hand" id="hand"></div>
+      </section>
+    </aside>
+  </div>
+</main>
+
+<section class="empty" id="empty" hidden>
+  <h1>No solutions in this folder yet</h1>
+  <p>Solve a spot from a range file and a board, and it opens here when it is done.</p>
+  <button type="button" class="primary" id="empty-new">New solve</button>
+  <p>Or solve one in a terminal, save it in this folder, then reload this page:</p>
+  <pre id="empty-command"></pre>
+</section>
+
+<form class="form" id="new" hidden novalidate>
+  <h1>New solve</h1>
+  <p class="notice" id="f-notice" role="alert" hidden></p>
+
+  <div class="field">
+    <label for="f-ranges">Ranges</label>
+    <select id="f-ranges"></select>
+    <p class="hint" id="f-range-facts"></p>
+  </div>
+
+  <div class="field">
+    <label for="f-board">Board</label>
+    <input type="text" id="f-board" placeholder="Ks7d2c" autocomplete="off" spellcheck="false"
+           aria-describedby="f-board-help f-board-error">
+    <div class="board" id="f-board-cards" aria-live="polite"></div>
+    <p class="hint" id="f-board-help">3, 4 or 5 cards, a rank and a suit each, as in Ks7d2c. A turn or river board starts the spot there, as if the streets before were checked through.</p>
+    <p class="field-error" id="f-board-error" hidden></p>
+  </div>
+
+  <div class="field">
+    <label for="f-tree">Tree</label>
+    <select id="f-tree"></select>
+    <p class="hint" id="f-tree-facts"></p>
+  </div>
+
+  <div class="field">
+    <label for="f-target">Target, in percent of the pot</label>
+    <input type="number" id="f-target" min="0" step="0.05" value="0.3" inputmode="decimal">
+    <p class="hint">The solve stops once its exploitability is at or below this.</p>
+  </div>
+
+  <details class="advanced">
+    <summary>Advanced</summary>
+    <div class="field">
+      <label for="f-iterations">Most iterations</label>
+      <input type="number" id="f-iterations" min="0" step="1" value="10000" inputmode="numeric">
+    </div>
+    <div class="field">
+      <label for="f-street">Last street to save</label>
+      <select id="f-street">
+        <option value="river">River</option>
+        <option value="turn">Turn: the river is solved again when it is looked at</option>
+        <option value="flop">Flop</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-out">File name</label>
+      <input type="text" id="f-out" placeholder="The spot's name" autocomplete="off" spellcheck="false">
+    </div>
+    <label class="check"><input type="checkbox" id="f-force"> Overwrite a file of that name</label>
+    <label class="check"><input type="checkbox" id="f-compressed"> Store the solve in 16 bits, for half its memory</label>
+  </details>
+  <p class="field-error" id="f-numbers-error" hidden>Give the target and the most iterations as numbers from 0 up, the iterations whole.</p>
+
+  <section class="estimate" id="f-estimate" aria-live="polite" aria-label="What the solve would need"></section>
+
+  <div class="row">
+    <button type="submit" class="primary" id="f-solve" disabled>Solve</button>
+    <button type="button" class="secondary" id="f-back">Back</button>
+  </div>
+</form>
+
+<section class="form" id="running" hidden aria-live="polite">
+  <h1 id="run-title">Solving</h1>
+  <p class="field-error" id="run-error" role="alert" hidden></p>
+  <dl class="facts" id="run-facts"></dl>
+  <div class="measurements">
+    <table>
+      <thead><tr><th scope="col">Iterations</th><th scope="col">Exploitable</th><th scope="col">Elapsed</th></tr></thead>
+      <tbody id="run-rows"></tbody>
+    </table>
+    <p class="hint" id="run-empty">The first measurement comes after 10 iterations.</p>
+  </div>
+  <div class="row">
+    <button type="button" class="secondary" id="run-cancel">Cancel</button>
+  </div>
+</section>
+
+<script src="app.js"></script>
+</body>
+</html>

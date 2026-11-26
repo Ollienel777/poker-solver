@@ -647,3 +647,22 @@ Every check passes:
 | Our file's EVs against its strategy's, 395 nodes | 0.0000% of the pot apart | 0.1% |
 
 As before, the river is not compared, and the reference's exploitability and values are its own figures.
+
+## The run of the viewer's gate
+
+The viewer's gate ([#95](https://github.com/Ollienel777/poker-solver/issues/95)) asks that `solver serve` answer nodes at every street of the gate's spot as the library has them. `the_gate_flop_solved_from_the_page_and_served_at_every_street`, in `crates/cli/tests/serve.rs`, ran on 2026-11-26 in release on the development machine, 16 threads:
+
+```bash
+cargo test --release -p pk-cli --test serve -- --ignored --nocapture
+```
+
+The spot is `reference/ranges/a/BTN_vs_BB_SRP_recorded.toml` on Ks7d2c under `configs/trees/one_bet.toml`, started through `POST /api/solve` as the page starts it. Solved to 0.23% of the pot in 80 iterations and saved, 52.6 s in all. Then 11 nodes down one line of play, each equal to what `inspect --json` prints for it:
+
+| Request | Time |
+| --- | --- |
+| the first node on the flop, which loads the file up to the flop, 65.9 MB by the estimate | 0.39 s |
+| the first node on the turn, which loads it up to the turn, 69.8 MB | 0.35 s |
+| the first node on the river, which loads it whole, 629.7 MB | 2.3 s |
+| every other node: a decision, a deal or an end on a street already loaded | 2 to 4 ms |
+
+The whole test took 68 s.

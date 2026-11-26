@@ -446,10 +446,10 @@ The binary is `solver`.
 | Command | Milestone |
 | --- | --- |
 | `solve-postflop --ranges F --board Ks7d2c [--tree T] [--target 0.3] [--threads N] --out S`, or `--spot P` in place of `--ranges` and `--board` | M5 |
-| `inspect S [--node "x b50 c 8h"] [--hand AKs]`, `inspect S --spot`, or `inspect S --dump D [--streets N]` | M5 |
+| `inspect S [--node "x b50 c 8h"] [--hand AKs] [--json]`, `inspect S --spot`, or `inspect S --dump D [--streets N]` | M5 |
 | `compare A B [--spot P]`, or `compare A --reference [--keep-reference D]` | M5 |
 | `estimate --ranges F --board B [--tree T]`, or `--spot P` (the memory estimate only) | M5 |
-| `serve S`: a local page for studying solution files in a browser | its own milestone, after M5 (DECISIONS D24) |
+| `serve FOLDER [--port 8080] [--max-memory 10] [--ranges reference/ranges] [--trees configs/trees]`: the viewer's page and its JSON, from a folder of solution files, and solves started from the page into it, on 127.0.0.1 only | M5b (DECISIONS D24, D25) |
 | `build-buckets --street flop\|turn\|river` | M6 |
 | `solve-preflop --config a [--iters N] [--checkpoint-dir D] [--resume]` | M7 |
 | `inspect-preflop --config a --node "UTG r BTN c"` | M7 |
@@ -469,7 +469,7 @@ A node path is a space-separated list of actions:
 
 `compare` prints a `pk_postflop::Comparison` ([Cross-solver comparison](#cross-solver-comparison)), after which solution is which and what could be checked, and ends with its verdict ([compare](#compare)). The tokens above are labels from our own sizes, so a [solution dump](#solution-dump), which another solver writes, names each action by its kind and chip amount instead.
 
-**Layout.** Each command is a module of `commands`, holding its arguments, a struct that derives `clap::Args`, and its `run`. What the commands share has modules of its own: `spot_input` turns the options that name a spot into a `Spot`, `limits` holds the limit options and says what to do when a spot is over a limit, `format` writes amounts, sizes and times and prints the spot and the 13x13 grids, `save` is the one place a solution is written, and `view` builds what `inspect` shows of a solution as data, printing nothing.
+**Layout.** Each command is a module of `commands`, holding its arguments, a struct that derives `clap::Args`, and its `run`. What the commands share has modules of its own: `spot_input` turns the options that name a spot into a `Spot`, `limits` holds the limit options and says what to do when a spot is over a limit, `format` writes amounts, sizes and times and prints the spot and the 13x13 grids, `save` is the one place a solution is written, `view` builds what `inspect` shows of a solution as data, printing nothing, `json` is that data's JSON form, [the viewer's JSON](#the-viewers-json), and `server` is what [serve](#serve) answers, its routing and its shared state in one place.
 
 **Output.** Everything a command reports goes to stdout, so that redirecting it keeps a whole run. Errors go to stderr, each as one line, `solver: <message>`, that names the file or option it is about and says what to do, with exit code 1. A command line that does not parse is reported the same way, followed by clap's usage line, with exit code 2. Help and `--version` print to stdout with exit code 0, and `solver` alone prints the help to stderr with exit code 2. Amounts are in big blinds: exact for the pot, the stack and the rake cap, to two decimals for values. Bet sizes are percents of the pot, raise sizes multiples of the bet, and memory is in decimal units, as the estimate writes it. Each line that describes the spot or the result is a label padded to 13 characters and its value, and the progress is a table with a column for each measure.
 
@@ -520,6 +520,7 @@ While it solves, it prints a line per exploitability measurement: the iterations
 | `FILE` | | the solution file, as `solve-postflop --out` writes it |
 | `--node PATH` | the root | the node to show, by its path (the tokens above) |
 | `--hand HAND` | | a class (`AKs`, `77`, `T9o`) or a combo (`AhKh`) to show combo by combo at the node |
+| `--json` | off | print the file and the node as JSON, [the viewer's JSON](#the-viewers-json), in place of the text |
 | `--spot` | off | print the file's spot as a spot file, and nothing else |
 | `--dump D` | | write the solution to `D` as a [solution dump](#solution-dump) |
 | `--streets N` | the streets the file holds | the streets the dump holds, from the spot's first |
@@ -537,7 +538,101 @@ While it solves, it prints a line per exploitability measurement: the iterations
 
 **`--dump`** writes the solution as a solution dump through `SolutionDump::from_saved`, with the EVs the file holds rather than EVs measured again, so that a file without its river dumps the streets it has (DECISIONS P77). It holds the streets the file holds unless `--streets` says fewer; a dump of fewer streets than the spot plays is partial, `"complete": false`, and a line says so. It is estimated first from the raw lengths of the sections it covers, and a dump of more than 1 GB is refused unless `--streets` asks for it by name, with the size and that of the dump of a street fewer: the complete dump of the flop above is about 2.4 GB of JSON, built in memory and written in one piece, and the dump of its flop and turn 15.6 MB, written in 1.9 s. The dump goes to `D.part`, renamed once it is written, and not over a file that exists unless `--force` is given; its folder must exist.
 
-**As data.** What `inspect` shows is built by `view`, which prints nothing: `FileView` (the path, the size and the header), and `NodeView`, with the path, street, board, pot, chips put in and behind, reach, combos, and the node's kind: a `Decision` with its `ActionView`s (action, token, chips, both frequencies and what follows), its `ClassRow`s (class, combos, share, frequencies, EV) and the `Breakdown` asked for, a deal with its cards, or the end with its outcome and payoffs; and a `RiverSolve` when the river was solved again. `commands::inspect` prints them, and the viewer will serialize the same structures.
+**As data.** What `inspect` shows is built by `view`, which prints nothing: `FileView` (the path, the size and the header), and `NodeView`, with the path, street, board, pot, chips put in and behind, reach, combos, and the node's kind: a `Decision` with its `ActionView`s (action, token, chips, both frequencies and what follows), its `ClassRow`s (class, combos, share, frequencies, EV) and the `Breakdown` asked for, a deal with its cards, or the end with its outcome and payoffs; and a `RiverSolve` when the river was solved again. `commands::inspect` prints them, and `json` gives them the JSON form below, which `--json` prints.
+
+### serve
+
+`serve` is a local HTTP server over a folder of [solution files](#solution-file), for the viewer's page: it serves the page and answers the page's requests with [the viewer's JSON](#the-viewers-json) (DECISIONS D25, P83). It listens on `127.0.0.1` only, so that nothing but this machine reaches it, and there is no option to listen on another address. It is synchronous, on `tiny_http`, and answers one request at a time.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `FOLDER` | | the folder of solution files to serve; files in folders below it are not served |
+| `--port N` | 8080 | the port to listen on; 0 takes any free port |
+| `--max-memory GB` | 10 | hold loaded solutions and a running solve of at most this many gigabytes, 10^9 bytes, by their estimates |
+| `--ranges DIR` | `reference/ranges` | the range files a solve from the page can use, laid out `<config>/<formation>.toml`; each one's config is read from `configs/` under the current directory, as `solve-postflop --ranges` reads it |
+| `--trees DIR` | `configs/trees` | the tree files a solve from the page can use |
+| `--max-nodes N` | 1,000,000 | refuse a solve from the page whose betting or public tree has more nodes |
+| `--log FILE` | `runs/log.jsonl` | the resource log, to which each solve from the page appends its `SolveRecord` |
+| `--no-log` | off | append nothing to the log |
+
+On start it prints `Serving      the solution files of `FOLDER` at http://127.0.0.1:PORT/`, the port the one it got, then the memory limit, and then one line per request, `METHOD URL STATUS TIME`, after a line for each solution it loads or drops. It runs until it is stopped.
+
+**Endpoints.** Every one is a `GET` but `/api/estimate`, `/api/solve` to start a solve and `/api/solve/cancel`, which are `POST`; another method is refused with 405. A query is percent-decoded, with `+` read as a space, and a key an endpoint does not take is refused with 400, saying which keys it takes. A body is at most 64 KiB, or 413.
+
+| Endpoint | Answer |
+| --- | --- |
+| `/`, `/index.html` and the page's other files | the page, built into the binary from `crates/cli/assets/` with `include_bytes!`; a file there is served once it has a line in `server::ASSETS` |
+| `/api/files` | `{"folder", "files"}`: the folder as given, and its `.pksol` files by name, each a File of [the viewer's JSON](#the-viewers-json) from its header alone, or `{"name", "bytes", "error"}` for one whose header cannot be read. No solution is loaded to list them |
+| `/api/node?file=NAME&path=PATH&hand=HAND` | `{"file": File, "node": Node}`, as `inspect NAME --node PATH --hand HAND --json` prints it: the node of the file `NAME` that `PATH` leads to, the root without `path`, with the combos of `HAND`, a class or a combo, at a decision. Tokens may be in either case, and are joined by spaces, escaped as `+` or `%20` |
+| `GET /api/inputs` | what a solve can be made from (DECISIONS P87): `ranges_folder` and `trees_folder`; `ranges`, each range file as `{"name", "config", "formation", "line", "positions", "pot", "stack", "combos", "config_tree", "error"}`, `name` being `<config>/<file>.toml`, `positions` OOP's and IP's, `pot` and `stack` in chips, `combos` each range's weights summed, `config_tree` a line of the config's own sizing, and `error` `null` or why the file or its config cannot be read; `trees`, each tree file as `{"name", "summary", "error"}`; and `max_memory` and `max_nodes`, the limits a solve runs under |
+| `POST /api/estimate` | a solve asked for, checked and estimated, as `solver estimate` gives it, and nothing started. The body is a Solve request: `{"ranges", "board", "tree", "target", "max_iterations", "last_street", "out", "force", "compressed"}`, `ranges` and `board` required, `tree` a tree file's name or `null` for the config's own tree, `target` a percent of the pot (0.3), `max_iterations` (10,000), `last_street` (`"river"`), `out` the file's name in the folder (the spot's name, `.pksol` added), `force` to overwrite it, and `compressed` for 16-bit storage. The answer: `spot`, as a File's; `positions`; `tree`, `"config"` or the file's name; `out`, `exists` and `streets`, the file and what it would hold; `hands` and `nodes` (`betting`, `public`, `player`, `merged`), `null` when the betting tree is over the node limit; `memory`, `{"solve", "save", "limit", "loaded", "solving", "lifted", "threads"}` in bytes, `loaded` what loaded solutions hold, which are dropped to make room, `solving` what a running solve holds, and `lifted` whether the estimates were made as if the node limit were lifted; and `refusal`, `null`, or `{"over", "reasons", "advice", "message"}`: each limit the spot is over as `{"kind": "public_tree", "nodes", "limit"}`, `{"kind": "betting_tree", "limit"}`, `{"kind": "memory", "estimate"}` or `{"kind": "save_memory", "estimate"}`, and the reasons, the advice and the refusal in `solve-postflop`'s words. A refusal is an answer here, with status 200 |
+| `POST /api/solve` | starts the solve of a Solve request, after the checks and estimates of `/api/estimate`, on a thread of its own, and answers 202 with its Status. A spot over a limit is refused with 422, `{"error", "estimate"}`; a file that exists, unless `force`, with 400; a start while a solve runs with 409 |
+| `GET /api/solve` | the Status: `{"state", "cancelling", "solve", "result", "message"}`. `state` is `"idle"`, `"running"`, `"saving"`, `"done"`, `"failed"` or `"cancelled"`, and the last solve's end stays until the next starts. `solve`, `null` before the first, is `{"spot", "file", "ranges", "board", "tree", "target", "max_iterations", "last_street", "memory", "seconds", "iterations", "measurements"}`, the solve's inputs as a request gives them, the memory it holds, the time since it started or that it ran, the iterations at its last measurement, and every measurement so far, `{"iterations", "percent_of_pot", "chips", "seconds"}`. `result`, when it is done, is `{"file", "iterations", "stop", "exploitability", "solve_exploitability", "bytes", "warning"}`, `warning` a log that could not be appended to; `message`, when it failed, says why |
+| `POST /api/solve/cancel` | asks the running solve to stop at its next measurement of exploitability, every 10 iterations, saving nothing, and answers with its Status, `cancelling` true; 409 when no solve runs, or once it is being saved |
+
+**Errors** are JSON, `{"error": "..."}`, one line in the words `inspect` uses, with a path named `path` rather than `--node`:
+
+| Status | When |
+| --- | --- |
+| 400 | a file name that is not a plain name: empty, with `/`, `\`, `:` or `..` in it, or absolute, and the same of a tree file's name, of an output name and of each part of a range file's `<config>/<file>.toml`; a board, target, iteration count or last street that `solve-postflop` would refuse, in its words with `--board` named `board`; a Solve request that is not JSON or holds a key it does not take; a solution file that exists, on a start without `force`; a path that leads to no node, or to one after a turn the file leaves out; a hand that is neither a class nor a combo; a query that does not decode, a key that is not taken, or `/api/node` without `file` |
+| 404 | a file the folder does not hold as a `.pksol` file, a range file or tree file its folder does not hold, and a URL that is neither an endpoint nor a file of the page |
+| 405 | a method other than the endpoint's |
+| 409 | a start while a solve runs, and a cancel when none runs or once it is being saved |
+| 413 | a body of more than 64 KiB |
+| 422 | a start of a spot over a limit, with the estimate |
+| 500 | a file that cannot be read or is not a solution file, with `inspect`'s message, and a request the server failed on; it goes on serving |
+| 503 | a solution that would need more memory loaded than `--max-memory` lets the server hold, even with nothing else loaded, or than a running solve leaves of it |
+
+**Loaded solutions** stay loaded between requests (DECISIONS P84). A node needs its file's sections up to the node's street, counted from the path as `inspect` counts it, and no further, so the root of the gate's 226 MB flop file reads 13 kB of sections; a node on a later street than the one loaded loads the file again, that far. A file whose length or time of writing has changed since it was loaded is loaded again. Each loaded solution is counted at an estimate of what it holds: its game as `estimate_memory` counts the public tree, the boards' hands and the betting tree, its strategy on the streets loaded as `f32`s, twice the raw length of their 16-bit sections, its EVs as the raw length of theirs, and 48 bytes a node. Before a solution is loaded the one it replaces is dropped and, until the new one fits in `--max-memory` beside those held, the least recently used; one that does not fit alone is refused. A river the file leaves out is solved again for each request of a node on it, as `inspect` does, and is not kept. A solve from the page holds back the larger of its solve's estimate and its save's out of the same `--max-memory` while it runs, the loaded solutions dropped, least recently used first, to make room for it; a solution loaded while it runs has what is left (DECISIONS P88).
+
+**Solving from the page** ([#94](https://github.com/Ollienel777/poker-solver/issues/94), DECISIONS P87 to P89) is `solve-postflop --ranges F --board B [--tree T] --out FOLDER/NAME` started by a request: the spot is read by `spot_input::load`, the estimates and refusals are `limits::estimates` and `Refusal`, which `solver estimate` prints too, the destination and streets are checked by `save`, and the file is written by `save::save`, so the page and the command line refuse the same spots in the same words. One solve runs at a time, on a thread of its own, while the server goes on answering; its progress is the library's progress callback, kept in `server::solving::Job`, and its record is appended to `--log` unless `--no-log` is given. A cancel is seen at the solve's next measurement, where the callback unwinds the thread with `std::panic::resume_unwind`, which drops what the solve holds and runs no panic hook; the library is not changed and nothing is saved. A solve that fails or panics ends `failed` with its message and gives its memory back; the server goes on. The server prints a line when a solve starts and when it ends, and none for the page's polls of `GET /api/solve` that succeed.
+
+**Layout.** `commands::serve` listens and prints; `server` holds everything else: `State`, the folder, the loaded solutions, where a solve's inputs come from, and the solve, which every request shares and the solve's thread shares too, and `State::answer`, which routes a method, URL and body to its endpoint and returns the reply, catching a panic as a 500. `server::cache` is the memory-bounded cache, with the reservation of a running solve, and `server::solving` the inputs, the Solve request, its estimate, and the solve's thread and state.
+
+**The page** ([#93](https://github.com/Ollienel777/poker-solver/issues/93), DECISIONS P86) is three files in `crates/cli/assets/`: `index.html`, the layout; `app.css`, every colour and size as a variable at its top; and `app.js`, which draws one node from one answer of `/api/node` and nothing else. The node shown is the page's address after the `#`, `file`, `path` and `hand` as the endpoint takes them, so a click only changes the address, back and forward move through the nodes visited, and an address can be kept. A decision shows the acting player's 13x13 grid, each cell as high as the share of the class's combos that the board leaves which are in the range, and split across the actions from the largest bet to the fold, or under the EV switch shaded by the class's EV with the EV in big blinds; the actions, each with the frequency it is taken with and what follows it; and, for the class clicked, its combos with each one's strategy and EV. A deal shows the cards that can come, and an end the payoffs. The page computes nothing about the game but the count of a class's combos that the board leaves. A test checks that every file the page asks for is one the server holds.
+
+**The form** (#94, DECISIONS P90) is the view `#new`, opened by the New solve button of the top bar, the viewer's one accent-coloured action, or of the empty folder's view. It takes a range file, whose positions, pot, stack and combos it shows; a board, its cards shown as they are typed and a bad or repeated card said inline; a tree, the config's own or a tree file, with its sizing on a line, one bet a street chosen first; a target; and, under Advanced, the most iterations, the last street to save, the file's name, overwrite and 16-bit storage. Once the inputs read as a solve, it asks `/api/estimate`, 350 ms after the last change, and shows the hands, the nodes and the memory to solve and to save against the limit, or the refusal's reasons and advice; Solve stays disabled while the spot is refused, the inputs are not valid, or the file exists without overwrite. Solve starts it and moves to `#solve`, which polls `/api/solve` once a second and shows the elapsed time, the iterations, the last exploitability, the target, the memory and every measurement, newest first, with Cancel. On loading, a page whose server runs a solve shows `#solve`, whatever its address, so a reload or another tab shows the same solve. Done, it lists the files again and opens the new file's root in place of `#solve`; failed or cancelled, it goes back to `#new` with the inputs of that solve and what happened.
+
+### The viewer's JSON
+
+`inspect --json` prints, and `solver serve` answers with, the JSON form of `view`'s structures, built by the module `json` of `pk-cli` with `serde`'s derive, as the solution file's header is written (DECISIONS P82). It is the contract the viewer's page is written against. It holds the numbers of the view exactly: each `f64` is written as the shortest decimal that reads back as the same number.
+
+**Units.** Amounts are integer chips, 1bb = 100, as everywhere in the solver: the pot, the stack, what each player has put in and has behind, the rake cap, and what an action adds. Values and EVs are chips that need not be whole, from the start of the spot. Frequencies, shares, reaches and probabilities are fractions from 0 to 1, not percents; an exploitability gives `percent_of_pot` and `chips`. A number that is undefined is `null`. Players are `"oop"` and `"ip"`, streets `"flop"`, `"turn"` and `"river"`, and cards, combos and classes are written as everywhere else: `"8h"`, `"AhKh"`, `"AKs"`. Every pair, such as `put_in`, is OOP's first. Fields come in the order below.
+
+**The answer for a node** is `{"file": File, "node": Node}`.
+
+**File**, from the file's header alone:
+
+| Field | Meaning |
+| --- | --- |
+| `name`, `bytes` | the file's name, without its folder, and its length |
+| `written_by` | the program that wrote it, such as `"pk-postflop 0.1.0"` |
+| `spot` | `name`, `description`; `board`, the spot's cards from the highest; `street`, the one it starts on; `pot` and `stack`, the effective stack behind each player; `rake_percent` and `rake_cap`; `tree`, with `max_raises`, `allin_threshold` and `streets`, one `{"street", "bets", "raises", "allin"}` for each street the spot plays, bets as fractions of the pot and raises as multiples of the bet |
+| `streets`, `complete` | the streets the file holds, and whether the river is one of them; a node on a river the file leaves out is solved again |
+| `nodes`, `player_nodes`, `hands` | the public tree's nodes and player nodes, and each player's hands on the board |
+| `stop`, `iterations` | how the solve stopped, `"target"`, `"iteration_cap"` or `"time_cap"`, and after how many iterations |
+| `exploitability`, `solve_exploitability` | of the strategy as stored, in 16 bits a probability, and as solved |
+| `values` | each player's value, in chips per hand dealt |
+
+A file knows no positions: a spot made from a range file has its formation in its name, such as `BTN_vs_BB_SRP_Ks7d2c`.
+
+**Node:**
+
+| Field | Meaning |
+| --- | --- |
+| `path` | the node's path, its tokens joined by one space; `""` at the root |
+| `line` | a step per token of the path, from the root: `{"token", "path", "actor", "street"}`, `path` the node the step leads to, `actor` `null` for a card dealt, and `street` the street a card deals |
+| `street` | the node's street; a deal is on the street it deals |
+| `board` | the spot's cards from the highest, then each card dealt on the way, in the order dealt |
+| `pot`, `put_in`, `behind` | the pot at the node, and what each player has put in since the spot started and has left |
+| `reached` | the probability that a hand dealt plays to the node |
+| `combos` | each player's range at the node in combos: range weight times own reach, summed |
+| `kind` | `"decision"`, `"deal"` or `"end"`, with the fields of that kind after it |
+| `river` | `null`, or the river solved again to show the node: `start`, the path where the river spot starts, its `pot`, `stop`, `iterations`, `exploitability` in the river spot's terms, the `target` as a percent of its pot, and `seconds` |
+
+A **decision** adds `actor`; `actions`, in the tree's order, which every list of frequencies and every strategy follows, each `{"token", "path", "action", "adds", "to", "frequency", "range_frequency", "next"}`, with `path` the node it leads to, `action` one of `"fold"`, `"check"`, `"call"`, `"bet"`, `"raise"` and `"allin"`, `adds` the chips it puts in, `to` the player's chips on the street once it is taken, the two frequencies of [inspect](#inspect) (taken, and of range), and `next` one of `{"kind": "acts", "player"}`, `{"kind": "deals", "street"}` and `{"kind": "ends", "outcome", "winner"}`; `classes`, all 169 hand classes in grid order, index `13 * row + column` with rows and columns from the ace to the deuce, pairs on the diagonal, suited hands above it and offsuit below, each `{"class", "in_range", "combos", "share", "frequencies", "ev"}`, a class outside the range with `in_range` false, 0 combos and share, and `null` frequencies and EV; and `hand`, `null` unless a hand was asked for, else `{"query", "rows", "missing"}`, a row `{"combo", "weight", "strategy", "ev"}` for each of its combos among the acting player's hands and a `{"combo", "reason"}` for each other, the reason `"on_board"` or `"not_in_range"`. The path of the node an action leads to is the node's path with its token after it, so the page builds every path by appending a token.
+
+A **deal** adds `cards`, each card it can deal in the order of its index, as `{"card", "path"}`, the card being its own token. An **end** adds `outcome`, `"fold"` or `"showdown"`, the `winner` after a fold or `null`, and `payoff`, from the start of the spot with the rake taken: `{"kind": "fold", "values": [oop, ip]}`, or `{"kind": "showdown", "win", "lose", "tie"}`, a player's payoff for holding the better hand, the worse, or a split.
 
 ### compare
 

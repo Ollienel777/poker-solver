@@ -5,4 +5,5 @@
 pub mod compare;
 pub mod estimate;
 pub mod inspect;
+pub mod serve;
 pub mod solve_postflop;
